@@ -59,9 +59,9 @@ pub struct GameStats {
     pub combo: u32,
     /// Maximum combo achieved during the game
     pub max_combo: u32,
-    /// Jam counter: +2 for COOL, +1 for GOOD, +0 for BAD/MISS
+    /// Jam counter: +4 for COOL, +2 for GOOD, +0 for BAD/MISS
     pub jam_counter: u32,
-    /// Jam combo: every 50 jam_counter = 1 jam combo
+    /// Jam combo: every 100 jam_counter = 1 jam combo (the multiplier)
     pub jam_combo: u32,
     /// Maximum jam combo
     pub max_jam_combo: u32,
@@ -77,12 +77,14 @@ pub struct GameStats {
     pub life: i32,
     /// Maximum life
     pub max_life: i32,
-    /// Number of pills collected (every 30 combo = 1 pill)
+    /// Number of pills/buffers collected (1 per 15 consecutive Cools, max 5)
     pub pill_count: u32,
-    /// Jam bar progress (0.0 to 1.0, fills with consecutive successful hits)
+    /// Jam bar progress (0.0 to 1.0, fills as jam_counter approaches 100)
     pub jam_bar_progress: f32,
     /// Total number of playable notes in the chart
     pub total_notes: u32,
+    /// Consecutive Cools counter (for buffer/pill awards, resets on Good/Miss)
+    pub consecutive_cools: u32,
 }
 
 impl GameStats {
@@ -104,6 +106,7 @@ impl GameStats {
             pill_count: 0,
             jam_bar_progress: 0.0,
             total_notes,
+            consecutive_cools: 0,
         }
     }
 
@@ -121,22 +124,26 @@ impl GameStats {
             JudgmentType::Cool => {
                 self.cool_count += 1;
                 self.combo += 1;
-                self.jam_counter += 2; // +2 for COOL
+                self.jam_counter += 4; // +4 for COOL (100 = 1 jam)
+                self.consecutive_cools += 1; // Track for buffer/pill awards
             }
             JudgmentType::Good => {
                 self.good_count += 1;
                 self.combo += 1;
-                self.jam_counter += 1; // +1 for GOOD
+                self.jam_counter += 2; // +2 for GOOD (100 = 1 jam)
+                self.consecutive_cools = 0; // Good resets buffer progress
             }
             JudgmentType::Bad => {
                 self.bad_count += 1;
                 self.combo = 0; // Reset combo on BAD
                 self.jam_counter = 0; // Reset jam counter on BAD
+                // Bad does NOT reset consecutive_cools for buffer tracking
             }
             JudgmentType::Miss => {
                 self.miss_count += 1;
                 self.combo = 0; // Reset combo on MISS
                 self.jam_counter = 0; // Reset jam counter on MISS
+                self.consecutive_cools = 0; // Miss resets buffer progress
             }
         }
 
@@ -144,13 +151,21 @@ impl GameStats {
             self.max_combo = self.combo;
         }
 
-        // Every 50 jam_counter = 1 jam combo
-        let new_jam_combo = self.jam_counter / 50;
+        // Every 100 jam_counter = 1 jam combo (jam is the multiplier)
+        let new_jam_combo = self.jam_counter / 100;
         if new_jam_combo > self.jam_combo {
             self.jam_combo = new_jam_combo;
         }
         if self.jam_combo > self.max_jam_combo {
             self.max_jam_combo = self.jam_combo;
+        }
+
+        // Award buffers/pills: 1 per 15 consecutive Cools, max 5 stored
+        if self.consecutive_cools > 0 && self.consecutive_cools % 15 == 0 {
+            let expected_buffers = (self.consecutive_cools / 15).min(5);
+            if expected_buffers > self.pill_count {
+                self.pill_count = expected_buffers;
+            }
         }
 
         // Calculate score with jam combo bonus
@@ -174,21 +189,12 @@ impl GameStats {
         self.life += effective_judgment.hp_change_hard();
         self.life = self.life.clamp(0, self.max_life);
 
-        // Update jam bar progress (fills with consecutive successful hits)
-        // Full bar at jam_counter = 50 (1 jam combo)
+        // Update jam bar progress (normalized to 100% = 1 jam)
+        // jam_counter goes 0..100, progress is 0.0..1.0
         if !effective_judgment.breaks_combo() {
-            self.jam_bar_progress = (self.jam_counter as f32 / 50.0).min(1.0);
+            self.jam_bar_progress = ((self.jam_counter % 100) as f32 / 100.0).min(1.0);
         } else {
             self.jam_bar_progress = 0.0;
-        }
-
-        // Award pills: every 30 combo without missing
-        if self.combo > 0 && self.combo % 30 == 0 && !effective_judgment.breaks_combo() {
-            // Only award if we haven't already awarded for this combo threshold
-            let expected_pills = self.combo / 30;
-            if expected_pills > self.pill_count {
-                self.pill_count = expected_pills;
-            }
         }
     }
 
