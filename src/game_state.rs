@@ -121,40 +121,39 @@ impl GameStats {
             JudgmentType::Cool => {
                 self.cool_count += 1;
                 self.combo += 1;
-                self.jam_counter += 4; // +4 for COOL (100 = 1 jam)
-                self.consecutive_cools += 1; // Track for buffer/pill awards
+                self.jam_counter += 4;
+                self.consecutive_cools += 1;
             }
             JudgmentType::Good => {
                 self.good_count += 1;
                 self.combo += 1;
-                self.jam_counter += 2; // +2 for GOOD (100 = 1 jam)
-                self.consecutive_cools = 0; // Good resets buffer progress
+                self.jam_counter += 2;
+                self.consecutive_cools = 0;
             }
             JudgmentType::Bad => {
                 self.bad_count += 1;
-                self.combo = 0; // Reset combo on BAD
-                self.jam_counter = 0; // Reset jam counter on BAD
-                // Bad does NOT reset consecutive_cools for buffer tracking
+                self.combo = 0;
+                self.jam_counter = 0;
             }
             JudgmentType::Miss => {
                 self.miss_count += 1;
-                self.combo = 0; // Reset combo on MISS
-                self.jam_counter = 0; // Reset jam counter on MISS
-                self.consecutive_cools = 0; // Miss resets buffer progress
+                self.combo = 0;
+                self.jam_counter = 0;
+                self.consecutive_cools = 0;
+            }
+        }
+
+        // No division: check threshold crossed, subtract and increment (no /100 every call)
+        while self.jam_counter >= 100 {
+            self.jam_counter -= 100;
+            self.jam_combo += 1;
+            if self.jam_combo > self.max_jam_combo {
+                self.max_jam_combo = self.jam_combo;
             }
         }
 
         if self.combo > self.max_combo {
             self.max_combo = self.combo;
-        }
-
-        // Every 100 jam_counter = 1 jam combo (jam is the multiplier)
-        let new_jam_combo = self.jam_counter / 100;
-        if new_jam_combo > self.jam_combo {
-            self.jam_combo = new_jam_combo;
-        }
-        if self.jam_combo > self.max_jam_combo {
-            self.max_jam_combo = self.jam_combo;
         }
 
         // Award buffers/pills: 1 per 15 consecutive Cools, max 5 stored

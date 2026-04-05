@@ -490,8 +490,8 @@ pub fn draw_jam_bar(
     let bar_w = 191.0 * sx;
     let bar_h = 12.0 * sy;
     
-    // Normalize jam_counter to 0.0-1.0 (capped at 100)
-    let progress = ((jam_counter % 100) as f32) / 100.0;
+    // jam_counter is now 0-99 (resets at 100), so direct normalization
+    let progress = (jam_counter as f32) / 100.0;
     
     // Draw the jam_bar sprite clipped to show only the filled portion
     // left_to_right: clip from the right side
