@@ -100,11 +100,11 @@ impl SkinAtlas {
             // Row packing: move to next row if frame doesn't fit
             if cursor_x > 0 && cursor_x + fw + 1 > max_atlas_width {
                 cursor_x = 0;
-                cursor_y += row_height;
+                cursor_y += row_height + 1; // 1px vertical padding between rows
                 row_height = 0;
             }
 
-            // Add 1px padding between frames
+            // Add 1px padding between frames (horizontal)
             if cursor_x > 0 {
                 cursor_x += 1;
             }
@@ -189,13 +189,14 @@ impl SkinAtlas {
             ..Default::default()
         });
 
-        // Build frame lookup with normalized UVs
+        // Build frame lookup with normalized UVs (inset 0.5px to avoid linear filtering bleed)
         let mut frame_map = HashMap::new();
         for (id, ax, ay, aw, ah) in &placements {
-            let u0 = *ax as f32 / atlas_width as f32;
-            let v0 = *ay as f32 / atlas_height as f32;
-            let u1 = (*ax + *aw) as f32 / atlas_width as f32;
-            let v1 = (*ay + *ah) as f32 / atlas_height as f32;
+            let inset = 0.5; // 0.5px inset prevents texture bleeding
+            let u0 = (*ax as f32 + inset) / atlas_width as f32;
+            let v0 = (*ay as f32 + inset) / atlas_height as f32;
+            let u1 = (*ax as f32 + *aw as f32 - inset) / atlas_width as f32;
+            let v1 = (*ay as f32 + *ah as f32 - inset) / atlas_height as f32;
 
             // For animated sprites (multiple frames), only store the first frame
             // Future: store all frames and select based on animation time
