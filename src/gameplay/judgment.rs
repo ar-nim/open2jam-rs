@@ -34,12 +34,13 @@ pub enum JudgmentType {
 
 impl JudgmentType {
     /// Base score for this judgment type (before jam combo bonus).
-    pub fn base_score(self) -> u32 {
+    /// Miss has a negative score (-10) as penalty.
+    pub fn base_score(self) -> i32 {
         match self {
             JudgmentType::Cool => 200,
             JudgmentType::Good => 100,
             JudgmentType::Bad => 4,
-            JudgmentType::Miss => 0,
+            JudgmentType::Miss => -10, // Penalty for missing
         }
     }
 

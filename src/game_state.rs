@@ -9,7 +9,7 @@ use crate::audio::manager::AudioManager;
 use crate::audio::trigger::{AudioTriggerEvent, AudioTriggerSystem};
 use crate::audio::cache::SoundCache;
 use crate::gameplay::judgment::{
-    JudgmentType, judge_tap_note, is_missed, cool_score_with_jam_bonus, good_score_with_jam_bonus,
+    JudgmentType, judge_tap_note, judge_release, is_missed, cool_score_with_jam_bonus, good_score_with_jam_bonus,
 };
 use crate::gameplay::scroll::scroll_travel_time_ms;
 use crate::parsing::ojn::{Chart, NoteType, TimedEvent};
@@ -154,13 +154,21 @@ impl GameStats {
         }
 
         // Calculate score with jam combo bonus
-        let note_score = match effective_judgment {
-            JudgmentType::Cool => cool_score_with_jam_bonus(self.jam_combo),
-            JudgmentType::Good => good_score_with_jam_bonus(self.jam_combo),
+        // Miss has negative score (-10), so we use i32 for calculation
+        let note_score: i32 = match effective_judgment {
+            JudgmentType::Cool => cool_score_with_jam_bonus(self.jam_combo) as i32,
+            JudgmentType::Good => good_score_with_jam_bonus(self.jam_combo) as i32,
             JudgmentType::Bad => 4,
-            JudgmentType::Miss => 0,
+            JudgmentType::Miss => -10, // Penalty for missing
         };
-        self.score += note_score;
+        // Score can go negative temporarily but display as 0 minimum
+        if note_score >= 0 {
+            self.score += note_score as u32;
+        } else {
+            // For negative scores (Miss), we still track them but score doesn't go below 0
+            let penalty = (-note_score) as u32;
+            self.score = self.score.saturating_sub(penalty);
+        }
 
         // Update life (Hard difficulty)
         self.life += effective_judgment.hp_change_hard();
@@ -505,12 +513,32 @@ impl GameState {
             }
         }
 
-        // Judge long note tails
+        // Judge long note tails (auto-release when tail passes judgment line)
         for long_note in &mut self.active_long_notes {
             if long_note.judged && long_note.tail_judgment.is_none() {
                 if render_time >= long_note.tail_time_ms {
-                    long_note.tail_judgment = Some(JudgmentType::Cool);
-                    self.stats.record_judgment(JudgmentType::Cool, false);
+                    // If player is still holding, judge the release timing
+                    if long_note.holding {
+                        long_note.holding = false;
+                        let time_diff = (render_time - long_note.tail_time_ms).abs();
+                        let release_judgment = judge_release(time_diff, bpm);
+                        long_note.tail_judgment = Some(release_judgment);
+                        self.stats.record_judgment(release_judgment, false);
+                        self.pending_judgments.push(PendingJudgment::new(
+                            release_judgment,
+                            long_note.lane,
+                            render_time,
+                        ));
+                    } else {
+                        // Player released early or never held - auto-miss
+                        long_note.tail_judgment = Some(JudgmentType::Miss);
+                        self.stats.record_judgment(JudgmentType::Miss, false);
+                        self.pending_judgments.push(PendingJudgment::new(
+                            JudgmentType::Miss,
+                            long_note.lane,
+                            render_time,
+                        ));
+                    }
                     long_note.dead = true;
                 }
             }
@@ -564,14 +592,46 @@ impl GameState {
     }
 
     /// Handle key release for a lane.
-    pub fn handle_key_release(&mut self, lane: usize) -> bool {
+    /// Evaluates the release timing against the long note's tail time.
+    /// Returns the release judgment type, or None if no long note was released.
+    pub fn handle_key_release(&mut self, lane: usize) -> Option<JudgmentType> {
+        let render_time = self.clock.render_time() as f64;
+        let bpm = self.clock.bpm() as f64;
+
         for long_note in &mut self.active_long_notes {
             if long_note.lane == lane && long_note.holding {
                 long_note.holding = false;
-                return true;
+
+                // If head was Bad or Miss, auto-miss the release
+                if let Some(head_judgment) = long_note.head_judgment {
+                    if head_judgment.breaks_combo() {
+                        long_note.tail_judgment = Some(JudgmentType::Miss);
+                        self.stats.record_judgment(JudgmentType::Miss, false);
+                        self.pending_judgments.push(PendingJudgment::new(
+                            JudgmentType::Miss,
+                            long_note.lane,
+                            render_time,
+                        ));
+                        return Some(JudgmentType::Miss);
+                    }
+                }
+
+                // Evaluate release timing against tail time
+                let time_diff = (render_time - long_note.tail_time_ms).abs();
+                let release_judgment = judge_release(time_diff, bpm);
+
+                long_note.tail_judgment = Some(release_judgment);
+                self.stats.record_judgment(release_judgment, false);
+                self.pending_judgments.push(PendingJudgment::new(
+                    release_judgment,
+                    long_note.lane,
+                    render_time,
+                ));
+
+                return Some(release_judgment);
             }
         }
-        false
+        None
     }
 
     pub fn active_note_count(&self) -> usize {

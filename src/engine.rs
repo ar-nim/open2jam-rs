@@ -187,10 +187,9 @@ impl ApplicationHandler for App {
                                 }
                             }
                             ElementState::Released => {
-                                // Release the long note in this lane
-                                let released = gs.handle_key_release(lane);
-                                if released {
-                                    info!("Long note released in lane {}", lane);
+                                let release_judgment = gs.handle_key_release(lane);
+                                if let Some(j) = release_judgment {
+                                    info!("Long note released in lane {}, judgment: {:?}", lane, j);
                                 }
                             }
                         }
