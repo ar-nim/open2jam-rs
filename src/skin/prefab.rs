@@ -28,6 +28,28 @@ pub struct NotePrefabs {
 }
 
 impl NotePrefabs {
+    /// Create default 7-lane note prefabs when no skin XML is available.
+    ///
+    /// Distributes lanes evenly across the viewport width.
+    pub fn default_7lan(skin_width: u32, skin_height: u32, judgment_line_y: u32) -> Self {
+        let lane_width = skin_width as i32 / NUM_LANES as i32;
+        let lanes: [NotePrefab; NUM_LANES] = std::array::from_fn(|lane| NotePrefab {
+            lane,
+            x: lane_width * lane as i32 + lane_width / 2,
+            sprite_id: None,
+            head_sprite: None,
+            body_sprite: None,
+            tail_sprite: None,
+        });
+
+        NotePrefabs {
+            lanes,
+            judgment_line_y,
+            skin_width,
+            skin_height,
+        }
+    }
+
     /// Build note prefabs from a parsed skin definition.
     ///
     /// Looks for entities with IDs like `NOTE_1` through `NOTE_7`

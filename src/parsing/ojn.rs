@@ -84,6 +84,23 @@ impl NoteEvent {
     pub fn is_note(&self) -> bool {
         matches!(self.channel, Channel::Note(_))
     }
+
+    /// Returns true if this is the HEAD of a long note.
+    pub fn is_long_note(&self) -> bool {
+        matches!(self.note_type, NoteType::Hold)
+    }
+
+    /// Returns true if this is the TAIL (release) of a long note.
+    pub fn is_release(&self) -> bool {
+        matches!(self.note_type, NoteType::Release)
+    }
+
+    /// For long note tails, returns the time_ms of the release event
+    /// if this is a long note head (used for body stretching).
+    /// Currently always None — full long note pairing requires a second pass.
+    pub fn end_time_ms(&self) -> Option<f64> {
+        None
+    }
 }
 
 /// A BPM change event.
