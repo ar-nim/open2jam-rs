@@ -240,8 +240,9 @@ mod tests {
 
     #[test]
     fn test_should_kill_note() {
-        assert!(!should_kill_note(1000.0, 1100.0, 200.0), "Note before target should not be killed");
-        assert!(!should_kill_note(1200.0, 1100.0, 200.0), "Note just after target should not be killed yet");
-        assert!(should_kill_note(1400.0, 1100.0, 200.0), "Note well after target should be killed");
+        assert!(!should_kill_note(1000.0, 1100.0, 0.0), "Note before target should not be killed");
+        assert!(!should_kill_note(1099.0, 1100.0, 0.0), "Note just before target should not be killed");
+        assert!(should_kill_note(1101.0, 1100.0, 0.0), "Note just after target should be killed");
+        assert!(should_kill_note(1400.0, 1100.0, 0.0), "Note well after target should be killed");
     }
 }

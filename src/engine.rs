@@ -13,6 +13,7 @@ use winit::window::Window;
 use crate::audio::AudioManager;
 use crate::game_state::GameState;
 use crate::gameplay::scroll::note_y_position;
+use crate::parsing::ojn::TimedEvent;
 use crate::parsing::xml::{parse_file as parse_skin_xml, Resources as SkinResources};
 use crate::render::atlas::SkinAtlas;
 use crate::render::textured_renderer::TexturedRenderer;
@@ -156,7 +157,44 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 use winit::event::ElementState;
                 use winit::keyboard::{Key, NamedKey};
-                if event.state == ElementState::Pressed {
+                
+                // Map keys to lanes (SDF JKL; for lanes 1-7)
+                let lane_from_key = |logical_key: &Key| -> Option<usize> {
+                    match logical_key {
+                        Key::Character(c) => match c.as_str() {
+                            "s" | "S" => Some(0), // Lane 1
+                            "d" | "D" => Some(1), // Lane 2
+                            "f" | "F" => Some(2), // Lane 3
+                            "j" | "J" => Some(3), // Lane 4
+                            "k" | "K" => Some(4), // Lane 5
+                            "l" | "L" => Some(5), // Lane 6
+                            ";" => Some(6),       // Lane 7
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                };
+
+                if let Some(lane) = lane_from_key(&event.logical_key) {
+                    if let Some(gs) = &mut self.game_state {
+                        match event.state {
+                            ElementState::Pressed => {
+                                // Judge the note/long note in this lane
+                                let judged = gs.handle_key_press(lane, 200.0); // 200ms judgment window
+                                if judged {
+                                    info!("Note judged in lane {}", lane);
+                                }
+                            }
+                            ElementState::Released => {
+                                // Release the long note in this lane
+                                let released = gs.handle_key_release(lane);
+                                if released {
+                                    info!("Long note released in lane {}", lane);
+                                }
+                            }
+                        }
+                    }
+                } else if event.state == ElementState::Pressed {
                     if let Key::Named(NamedKey::Escape) = &event.logical_key {
                         info!("Escape pressed, exiting...");
                         if let Some(render) = self.render.as_mut() {
@@ -458,37 +496,16 @@ impl App {
                         "static_keyboard",
                     ];
 
-                    static FRAME_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                    let frame_num = FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if frame_num == 0 {
-                        info!("=== Static render pass starting ===");
-                        info!("Static sprites whitelist: {:?}", STATIC_SPRITES);
-                    }
-
-                    let mut draw_count = 0;
-                    let mut skip_count = 0;
                     for entity in &skin.entities {
                         let sprite_id = match &entity.sprite {
                             Some(s) => s,
-                            None => { skip_count += 1; continue; }
+                            None => continue,
                         };
                         let first_sprite = sprite_id.split(',').next().unwrap_or(sprite_id).trim();
                         if !STATIC_SPRITES.contains(&first_sprite) {
-                            skip_count += 1;
                             continue;
                         }
                         if let Some(atlas_frame) = atlas.get_frame(first_sprite) {
-                            draw_count += 1;
-
-                            if frame_num == 0 {
-                                let frame_w = atlas_frame.width as f32 * skin_scale_x;
-                                let frame_h = atlas_frame.height as f32 * skin_scale_y;
-                                let frame_x = offset_x + entity.x as f32 * skin_scale_x;
-                                let frame_y = offset_y + entity.y as f32 * skin_scale_y;
-                                info!("  [RENDER] sprite={} skin({},{}) -> screen({:.1},{:.1}) size {:.1}x{:.1}",
-                                    first_sprite, entity.x, entity.y, frame_x, frame_y, frame_w, frame_h);
-                            }
-
                             let frame_w = atlas_frame.width as f32 * skin_scale_x;
                             let frame_h = atlas_frame.height as f32 * skin_scale_y;
                             let frame_x = offset_x + entity.x as f32 * skin_scale_x;
@@ -498,26 +515,7 @@ impl App {
                                 frame_x, frame_y, frame_w, frame_h,
                                 atlas_frame.uv, [1.0, 1.0, 1.0, 1.0],
                             );
-                        } else {
-                            if frame_num == 0 {
-                                info!("  [MISSING] sprite={} not found in atlas", first_sprite);
-                            }
                         }
-                    }
-                    if frame_num == 0 {
-                        info!("Static pass: {} drawn, {} skipped (no sprite), {} skipped (not in whitelist)",
-                            draw_count, skip_count, skin.entities.len() - draw_count - skip_count);
-                    }
-
-                    // Draw measure mark once at the judgment line
-                    if let Some(measure_frame) = atlas.get_frame("measure_mark") {
-                        let mw = measure_frame.width as f32 * skin_scale_x;
-                        let mh = measure_frame.height as f32 * skin_scale_y;
-                        let jly = offset_y + skin_judgment_line_y * skin_scale_y;
-                        let mx = offset_x + (skin_w - measure_frame.width as f32) / 2.0 * skin_scale_x;
-                        gpu.textured_renderer.draw_textured_quad(
-                            mx, jly - mh / 2.0, mw, mh, measure_frame.uv, [1.0, 1.0, 1.0, 0.5],
-                        );
                     }
                 }
             }
@@ -531,6 +529,42 @@ impl App {
             let judgment_line_y = skin_judgment_line_y as f64;
 
             if let (Some(atlas), Some(_skin_res)) = (&gpu.atlas, &gpu.skin) {
+                // Draw measure marks scrolling with the notes
+                if let Some(measure_frame) = atlas.get_frame("measure_mark") {
+                    let mw = measure_frame.width as f32 * skin_scale_x;
+                    let mh = measure_frame.height as f32 * skin_scale_y;
+
+                    // Center measure mark on the judgment area
+                    // judgmentarea: x=3, w=192; measure_mark: w=188 → centered at 3 + (192-188)/2 = 5
+                    let mark_skin_x: f32 = 5.0;
+                    let mx = offset_x + mark_skin_x * skin_scale_x;
+
+                    for event in &gs.chart.events {
+                        if let TimedEvent::Measure(ev) = event {
+                            // Skip measures that have already passed the judgment line
+                            if render_time > ev.time_ms {
+                                continue;
+                            }
+
+                            let y = note_y_position(
+                                render_time,
+                                ev.time_ms,
+                                bpm,
+                                judgment_line_y,
+                                viewport_height,
+                                gs.scroll_speed,
+                            );
+                            // Only draw if within viewport (above top, below bottom skip)
+                            let screen_y = offset_y + y as f32 * skin_scale_y - mh / 2.0;
+                            if screen_y > -mh && screen_y < config_height + mh {
+                                gpu.textured_renderer.draw_textured_quad(
+                                    mx, screen_y, mw, mh, measure_frame.uv, [1.0, 1.0, 1.0, 0.5],
+                                );
+                            }
+                        }
+                    }
+                }
+
                 for note in &gs.active_notes {
                     let y = note_y_position(
                         render_time,
@@ -561,6 +595,116 @@ impl App {
                         gpu.textured_renderer.draw_textured_quad(
                             x, y, note_w, note_h, head_frame.uv, [1.0, 1.0, 1.0, 1.0],
                         );
+                    }
+                }
+
+                // Draw long notes dynamically from game state
+                for long_note in &gs.active_long_notes {
+                    let lane_prefab = &gs.note_prefabs.lanes[long_note.lane];
+                    let lane_x = offset_x + lane_prefab.x as f32 * skin_scale_x;
+
+                    // Calculate head and tail Y positions
+                    let head_y = note_y_position(
+                        render_time,
+                        long_note.head_time_ms,
+                        bpm,
+                        judgment_line_y,
+                        viewport_height,
+                        gs.scroll_speed,
+                    );
+
+                    let tail_y = note_y_position(
+                        render_time,
+                        long_note.tail_time_ms,
+                        bpm,
+                        judgment_line_y,
+                        viewport_height,
+                        gs.scroll_speed,
+                    );
+
+                    // Determine sprite names for this lane
+                    let head_frame_name = lane_prefab.head_sprite.as_deref()
+                        .or(lane_prefab.sprite_id.as_deref())
+                        .unwrap_or_else(|| match long_note.lane {
+                            0 | 1 | 2 => "head_note_white",
+                            3 => "head_note_blue",
+                            _ => "head_note_yellow",
+                        });
+
+                    let body_frame_name = lane_prefab.body_sprite.as_deref()
+                        .or(lane_prefab.sprite_id.as_deref())
+                        .unwrap_or_else(|| match long_note.lane {
+                            0 | 1 | 2 => "body_note_white",
+                            3 => "body_note_blue",
+                            _ => "body_note_yellow",
+                        });
+
+                    // Tail uses the same sprite as head (or can be customized)
+                    let tail_frame_name = lane_prefab.tail_sprite.as_deref()
+                        .or(lane_prefab.sprite_id.as_deref())
+                        .unwrap_or(head_frame_name);
+
+                    if let (Some(head_frame), Some(body_frame), Some(tail_frame)) = (
+                        atlas.get_frame(head_frame_name),
+                        atlas.get_frame(body_frame_name),
+                        atlas.get_frame(tail_frame_name),
+                    ) {
+                        let note_w = head_frame.width as f32 * skin_scale_x;
+                        let head_h = head_frame.height as f32 * skin_scale_y;
+                        let tail_h = tail_frame.height as f32 * skin_scale_y;
+
+                        // Long note rendering follows Java pattern:
+                        // - head_sprite (tap note) at the bottom (end_y position, near judgment line)
+                        // - body_sprite stretched between head and tail
+                        // - tail_sprite at the top (tail_y position, where long note started)
+                        //
+                        // CLAMPING: When the head passes the judgment line (head_y > judgment_line_y),
+                        // the head sprite should NOT be drawn, but the body (clipped at the judgment line)
+                        // and tail should continue rendering above the judgment line.
+
+                        let judgment_line_screen_y = offset_y + judgment_line_y as f32 * skin_scale_y;
+                        let head_unclamped_screen_y = offset_y + head_y as f32 * skin_scale_y - head_h / 2.0;
+                        let tail_screen_y = offset_y + tail_y as f32 * skin_scale_y - tail_h / 2.0;
+
+                        // Determine if head is past the judgment line (use skin coords, not scaled screen)
+                        let head_past_judgment = head_y > judgment_line_y;
+
+                        // Calculate effective body bottom: if head is past judgment line, clamp to line
+                        let effective_head_y = if head_past_judgment { judgment_line_y } else { head_y };
+                        let effective_head_screen_y = offset_y + effective_head_y as f32 * skin_scale_y;
+
+                        // In screen coords, body stretches from tail (higher/smaller Y) to head (lower/larger Y)
+                        let body_top = tail_screen_y.min(effective_head_screen_y);
+                        let body_bottom = tail_screen_y.max(effective_head_screen_y);
+                        let body_pixel_height = (body_bottom - body_top).max(0.0);
+
+                        if body_pixel_height > 0.5 {
+                            let body_x = lane_x;
+                            let body_y = body_top;
+
+                            // Draw order (Java): body first, then tail, then head
+                            // 1. Body (middle, stretched) — clipped at judgment line if head is past
+                            gpu.textured_renderer.draw_textured_quad(
+                                body_x, body_y, note_w, body_pixel_height,
+                                body_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                            );
+
+                            // 2. Tail (top cap) — only render if above judgment line
+                            if !head_past_judgment || tail_y < judgment_line_y {
+                                gpu.textured_renderer.draw_textured_quad(
+                                    lane_x, tail_screen_y, note_w, tail_h,
+                                    tail_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                );
+                            }
+
+                            // 3. Head (bottom tap note) — only render if head is above judgment line
+                            if !head_past_judgment {
+                                gpu.textured_renderer.draw_textured_quad(
+                                    lane_x, head_unclamped_screen_y - head_h, note_w, head_h,
+                                    head_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                );
+                            }
+                        }
                     }
                 }
             }

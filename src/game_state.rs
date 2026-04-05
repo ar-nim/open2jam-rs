@@ -9,7 +9,7 @@ use crate::audio::manager::AudioManager;
 use crate::audio::trigger::{AudioTriggerEvent, AudioTriggerSystem};
 use crate::audio::cache::SoundCache;
 use crate::gameplay::scroll::scroll_travel_time_ms;
-use crate::parsing::ojn::{Chart, TimedEvent};
+use crate::parsing::ojn::{Chart, NoteType, TimedEvent};
 use crate::resources::clock::Clock;
 use crate::skin::prefab::NotePrefabs;
 use crate::parsing::xml::Resources as SkinResources;
@@ -24,6 +24,19 @@ pub struct ActiveNote {
     pub missed: bool,
 }
 
+/// A long note entity in the active game.
+#[derive(Debug, Clone)]
+pub struct ActiveLongNote {
+    pub lane: usize,
+    pub head_time_ms: f64,      // When the head reaches judgment line
+    pub tail_time_ms: f64,      // When the tail reaches judgment line (end_time)
+    pub sample_id: Option<u32>,
+    pub judged: bool,           // Head has been judged
+    pub missed: bool,
+    pub holding: bool,          // Player is currently holding the key
+    pub dead: bool,             // Marked for removal
+}
+
 /// The main game state.
 pub struct GameState {
     pub clock: Clock,
@@ -31,8 +44,10 @@ pub struct GameState {
     pub sound_cache: SoundCache,
     pub chart: Chart,
     pub note_prefabs: NotePrefabs,
-    /// Active notes on screen (not yet judged or killed)
+    /// Active tap notes on screen (not yet judged or killed)
     pub active_notes: Vec<ActiveNote>,
+    /// Active long notes on screen
+    pub active_long_notes: Vec<ActiveLongNote>,
     /// Iterator index into chart events
     pub next_event_idx: usize,
     /// Scroll speed multiplier
@@ -104,11 +119,16 @@ impl GameState {
         if auto_play {
             for event in &chart.events {
                 if let TimedEvent::Note(note_event) = event {
+                    // Skip Release events — the sample is triggered at the HEAD only,
+                    // not at the TAIL. The long note's sound continues until release.
+                    if note_event.note_type == NoteType::Release {
+                        continue;
+                    }
                     // Include ALL notes with sample_id (including AUTO_PLAY channels)
                     if let Some(sample_id) = note_event.sample_id {
                         audio_triggers.schedule(AudioTriggerEvent::new(
                             sample_id,
-                            note_event.time_ms as u64,
+                            note_event.time_ms.round() as u64,  // round to prevent drift
                         ).with_volume(note_event.volume).with_pan(note_event.pan));
                     }
                 }
@@ -127,6 +147,7 @@ impl GameState {
             chart,
             note_prefabs,
             active_notes: Vec::new(),
+            active_long_notes: Vec::new(),
             next_event_idx: 0,
             scroll_speed,
             auto_play,
@@ -161,13 +182,38 @@ impl GameState {
             // Spawn this note
             if let TimedEvent::Note(note_event) = event {
                 if let Some(lane) = note_event.channel.lane_index() {
-                    self.active_notes.push(ActiveNote {
-                        lane,
-                        target_time_ms: note_event.time_ms,
-                        sample_id: note_event.sample_id,
-                        judged: false,
-                        missed: false,
-                    });
+                    match note_event.note_type {
+                        NoteType::Tap => {
+                            log::debug!("[SPAWN] Tap note at {}ms, lane {}, spawn_lead={}, render_time={}", 
+                                note_event.time_ms, lane, self.spawn_lead_time_ms, render_time);
+                            self.active_notes.push(ActiveNote {
+                                lane,
+                                target_time_ms: note_event.time_ms,
+                                sample_id: note_event.sample_id,
+                                judged: false,
+                                missed: false,
+                            });
+                        }
+                        NoteType::Hold => {
+                            // Long note HEAD - spawn it
+                            let end_time = note_event.end_time_ms.unwrap_or(note_event.time_ms + 500.0);
+                            log::debug!("[SPAWN] Long note HEAD at {}ms, lane {}, tail at {}ms, render_time={}", 
+                                note_event.time_ms, lane, end_time, render_time);
+                            self.active_long_notes.push(ActiveLongNote {
+                                lane,
+                                head_time_ms: note_event.time_ms,
+                                tail_time_ms: end_time,
+                                sample_id: note_event.sample_id,
+                                judged: false,
+                                missed: false,
+                                holding: false,
+                                dead: false,
+                            });
+                        }
+                        NoteType::Release => {
+                            // Long note TAIL - skip it (already paired with HEAD during parsing)
+                        }
+                    }
                 }
             }
 
@@ -177,13 +223,19 @@ impl GameState {
 
     /// Remove notes that have passed the judgment line.
     ///
-    /// Notes are killed immediately once their target time has passed.
+    /// Notes are killed as soon as they pass the judgment line.
     /// This prevents rendering off-screen notes and frees memory.
     pub fn cleanup_notes(&mut self) {
         let render_time = self.clock.render_time();
 
+        // Clean up tap notes - remove immediately once they pass the judgment line
         self.active_notes.retain(|note| {
             note.target_time_ms >= render_time
+        });
+        
+        // Clean up long notes - remove immediately when tail passes the judgment line
+        self.active_long_notes.retain(|long_note| {
+            render_time <= long_note.tail_time_ms
         });
     }
 
@@ -199,5 +251,55 @@ impl GameState {
     /// Get the number of active notes for debugging.
     pub fn active_note_count(&self) -> usize {
         self.active_notes.len()
+    }
+
+    /// Get the number of active long notes for debugging.
+    pub fn active_long_note_count(&self) -> usize {
+        self.active_long_notes.len()
+    }
+
+    /// Handle key press for a lane - judges the nearest note/long note head.
+    ///
+    /// Returns true if a note was successfully judged.
+    pub fn handle_key_press(&mut self, lane: usize, judgment_window_ms: f64) -> bool {
+        let render_time = self.clock.render_time();
+        
+        // Try to judge long note first
+        for long_note in &mut self.active_long_notes {
+            if long_note.lane == lane && !long_note.judged && !long_note.missed {
+                let time_diff = (render_time - long_note.head_time_ms).abs();
+                if time_diff <= judgment_window_ms {
+                    long_note.judged = true;
+                    long_note.holding = true;
+                    return true;
+                }
+            }
+        }
+        
+        // Try to judge tap note
+        for note in &mut self.active_notes {
+            if note.lane == lane && !note.judged && !note.missed {
+                let time_diff = (render_time - note.target_time_ms).abs();
+                if time_diff <= judgment_window_ms {
+                    note.judged = true;
+                    return true;
+                }
+            }
+        }
+        
+        false
+    }
+
+    /// Handle key release for a lane - ends the long note hold.
+    ///
+    /// Returns true if a long note was released.
+    pub fn handle_key_release(&mut self, lane: usize) -> bool {
+        for long_note in &mut self.active_long_notes {
+            if long_note.lane == lane && long_note.holding {
+                long_note.holding = false;
+                return true;
+            }
+        }
+        false
     }
 }
