@@ -8,11 +8,21 @@ use log::info;
 use crate::audio::manager::AudioManager;
 use crate::audio::trigger::{AudioTriggerEvent, AudioTriggerSystem};
 use crate::audio::cache::SoundCache;
+use crate::gameplay::judgment::{
+    JudgmentType, judge_tap_note, is_missed, cool_score_with_jam_bonus, good_score_with_jam_bonus,
+};
 use crate::gameplay::scroll::scroll_travel_time_ms;
 use crate::parsing::ojn::{Chart, NoteType, TimedEvent};
 use crate::resources::clock::Clock;
 use crate::skin::prefab::NotePrefabs;
 use crate::parsing::xml::Resources as SkinResources;
+
+/// Total number of notes in the chart (for scoring).
+pub fn count_playable_notes(chart: &Chart) -> u32 {
+    chart.events.iter().filter(|e| {
+        matches!(e, TimedEvent::Note(n) if n.is_note())
+    }).count() as u32
+}
 
 /// A note entity in the active game.
 #[derive(Debug, Clone)]
@@ -22,19 +32,198 @@ pub struct ActiveNote {
     pub sample_id: Option<u32>,
     pub judged: bool,
     pub missed: bool,
+    pub judgment_type: Option<JudgmentType>,
 }
 
 /// A long note entity in the active game.
 #[derive(Debug, Clone)]
 pub struct ActiveLongNote {
     pub lane: usize,
-    pub head_time_ms: f64,      // When the head reaches judgment line
-    pub tail_time_ms: f64,      // When the tail reaches judgment line (end_time)
+    pub head_time_ms: f64,
+    pub tail_time_ms: f64,
     pub sample_id: Option<u32>,
-    pub judged: bool,           // Head has been judged
+    pub judged: bool,
     pub missed: bool,
-    pub holding: bool,          // Player is currently holding the key
-    pub dead: bool,             // Marked for removal
+    pub holding: bool,
+    pub dead: bool,
+    pub head_judgment: Option<JudgmentType>,
+    pub tail_judgment: Option<JudgmentType>,
+}
+
+/// Game statistics tracking: score, combo, life, judgment counts.
+#[derive(Debug, Clone)]
+pub struct GameStats {
+    /// Current score
+    pub score: u32,
+    /// Current combo counter (resets on BAD/MISS)
+    pub combo: u32,
+    /// Maximum combo achieved during the game
+    pub max_combo: u32,
+    /// Jam counter: +2 for COOL, +1 for GOOD, +0 for BAD/MISS
+    pub jam_counter: u32,
+    /// Jam combo: every 50 jam_counter = 1 jam combo
+    pub jam_combo: u32,
+    /// Maximum jam combo
+    pub max_jam_combo: u32,
+    /// Number of COOL judgments
+    pub cool_count: u32,
+    /// Number of GOOD judgments
+    pub good_count: u32,
+    /// Number of BAD judgments
+    pub bad_count: u32,
+    /// Number of MISS judgments
+    pub miss_count: u32,
+    /// Current life/health (starts at 1000, game over at 0)
+    pub life: i32,
+    /// Maximum life
+    pub max_life: i32,
+    /// Number of pills collected (every 30 combo = 1 pill)
+    pub pill_count: u32,
+    /// Jam bar progress (0.0 to 1.0, fills with consecutive successful hits)
+    pub jam_bar_progress: f32,
+    /// Total number of playable notes in the chart
+    pub total_notes: u32,
+}
+
+impl GameStats {
+    /// Create a new stats tracker with initial values.
+    pub fn new(total_notes: u32, max_life: i32) -> Self {
+        Self {
+            score: 0,
+            combo: 0,
+            max_combo: 0,
+            jam_counter: 0,
+            jam_combo: 0,
+            max_jam_combo: 0,
+            cool_count: 0,
+            good_count: 0,
+            bad_count: 0,
+            miss_count: 0,
+            life: max_life,
+            max_life,
+            pill_count: 0,
+            jam_bar_progress: 0.0,
+            total_notes,
+        }
+    }
+
+    /// Record a judgment result and update all counters.
+    /// Uses the new scoring system with jam combo bonuses.
+    pub fn record_judgment(&mut self, judgment: JudgmentType, has_pill: bool) {
+        // Check if pill converts BAD to COOL
+        let effective_judgment = if has_pill && judgment == JudgmentType::Bad {
+            JudgmentType::Cool
+        } else {
+            judgment
+        };
+
+        match effective_judgment {
+            JudgmentType::Cool => {
+                self.cool_count += 1;
+                self.combo += 1;
+                self.jam_counter += 2; // +2 for COOL
+            }
+            JudgmentType::Good => {
+                self.good_count += 1;
+                self.combo += 1;
+                self.jam_counter += 1; // +1 for GOOD
+            }
+            JudgmentType::Bad => {
+                self.bad_count += 1;
+                self.combo = 0; // Reset combo on BAD
+                self.jam_counter = 0; // Reset jam counter on BAD
+            }
+            JudgmentType::Miss => {
+                self.miss_count += 1;
+                self.combo = 0; // Reset combo on MISS
+                self.jam_counter = 0; // Reset jam counter on MISS
+            }
+        }
+
+        if self.combo > self.max_combo {
+            self.max_combo = self.combo;
+        }
+
+        // Every 50 jam_counter = 1 jam combo
+        let new_jam_combo = self.jam_counter / 50;
+        if new_jam_combo > self.jam_combo {
+            self.jam_combo = new_jam_combo;
+        }
+        if self.jam_combo > self.max_jam_combo {
+            self.max_jam_combo = self.jam_combo;
+        }
+
+        // Calculate score with jam combo bonus
+        let note_score = match effective_judgment {
+            JudgmentType::Cool => cool_score_with_jam_bonus(self.jam_combo),
+            JudgmentType::Good => good_score_with_jam_bonus(self.jam_combo),
+            JudgmentType::Bad => 4,
+            JudgmentType::Miss => 0,
+        };
+        self.score += note_score;
+
+        // Update life (Hard difficulty)
+        self.life += effective_judgment.hp_change_hard();
+        self.life = self.life.clamp(0, self.max_life);
+
+        // Update jam bar progress (fills with consecutive successful hits)
+        // Full bar at jam_counter = 50 (1 jam combo)
+        if !effective_judgment.breaks_combo() {
+            self.jam_bar_progress = (self.jam_counter as f32 / 50.0).min(1.0);
+        } else {
+            self.jam_bar_progress = 0.0;
+        }
+
+        // Award pills: every 30 combo without missing
+        if self.combo > 0 && self.combo % 30 == 0 && !effective_judgment.breaks_combo() {
+            // Only award if we haven't already awarded for this combo threshold
+            let expected_pills = self.combo / 30;
+            if expected_pills > self.pill_count {
+                self.pill_count = expected_pills;
+            }
+        }
+    }
+
+    /// Check if the game is over (life reached 0).
+    pub fn is_game_over(&self) -> bool {
+        self.life <= 0
+    }
+
+    /// Get life as a normalized value (0.0 to 1.0).
+    pub fn life_percent(&self) -> f32 {
+        if self.max_life <= 0 {
+            0.0
+        } else {
+            (self.life as f32 / self.max_life as f32).clamp(0.0, 1.0)
+        }
+    }
+}
+
+/// A pending judgment result to be visualized.
+#[derive(Debug, Clone)]
+pub struct PendingJudgment {
+    pub judgment_type: JudgmentType,
+    pub lane: usize,
+    /// Time when the judgment was made (for animation timing)
+    pub time_created_ms: f64,
+    /// How long the judgment should be displayed (in ms)
+    pub duration_ms: f64,
+}
+
+impl PendingJudgment {
+    pub fn new(judgment_type: JudgmentType, lane: usize, time_ms: f64) -> Self {
+        Self {
+            judgment_type,
+            lane,
+            time_created_ms: time_ms,
+            duration_ms: 800.0,
+        }
+    }
+
+    /// Check if this judgment is still visible.
+    pub fn is_active(&self, current_time_ms: f64) -> bool {
+        (current_time_ms - self.time_created_ms) < self.duration_ms
+    }
 }
 
 /// The main game state.
@@ -44,7 +233,7 @@ pub struct GameState {
     pub sound_cache: SoundCache,
     pub chart: Chart,
     pub note_prefabs: NotePrefabs,
-    /// Active tap notes on screen (not yet judged or killed)
+    /// Active tap notes on screen
     pub active_notes: Vec<ActiveNote>,
     /// Active long notes on screen
     pub active_long_notes: Vec<ActiveLongNote>,
@@ -56,6 +245,10 @@ pub struct GameState {
     pub auto_play: bool,
     /// Spawn lead time in milliseconds
     pub spawn_lead_time_ms: f64,
+    /// Game statistics
+    pub stats: GameStats,
+    /// Pending judgment results to visualize
+    pub pending_judgments: Vec<PendingJudgment>,
 }
 
 impl GameState {
@@ -80,6 +273,10 @@ impl GameState {
             chart.events.len(),
             chart.events.iter().filter(|e| matches!(e, TimedEvent::Measure(_))).count()
         );
+
+        // Count playable notes
+        let total_playable_notes = count_playable_notes(&chart);
+        info!("Total playable notes: {}", total_playable_notes);
 
         // 2. Find and parse the OJM audio file
         let ojm_filename = &chart.header.ojm_filename;
@@ -112,23 +309,20 @@ impl GameState {
         let base_bpm = chart.header.bpm as f64;
         let viewport_height = note_prefabs.skin_height as f64;
         let travel_time = scroll_travel_time_ms(base_bpm, viewport_height, scroll_speed);
-        let spawn_lead_time_ms = travel_time + 500.0; // extra margin
+        let spawn_lead_time_ms = travel_time + 500.0;
 
         // 6. Schedule audio triggers for BGM events (auto-play mode)
         let mut audio_triggers = AudioTriggerSystem::new();
         if auto_play {
             for event in &chart.events {
                 if let TimedEvent::Note(note_event) = event {
-                    // Skip Release events — the sample is triggered at the HEAD only,
-                    // not at the TAIL. The long note's sound continues until release.
                     if note_event.note_type == NoteType::Release {
                         continue;
                     }
-                    // Include ALL notes with sample_id (including AUTO_PLAY channels)
                     if let Some(sample_id) = note_event.sample_id {
                         audio_triggers.schedule(AudioTriggerEvent::new(
                             sample_id,
-                            note_event.time_ms.round() as u64,  // round to prevent drift
+                            note_event.time_ms.round() as u64,
                         ).with_volume(note_event.volume).with_pan(note_event.pan));
                     }
                 }
@@ -139,6 +333,10 @@ impl GameState {
         let mut clock = Clock::new();
         clock.set_bpm(chart.header.bpm);
         clock.set_chart_padding(1500);
+
+        // 7. Initialize game stats
+        let max_life = 1000;
+        let stats = GameStats::new(total_playable_notes, max_life);
 
         Ok(Self {
             clock,
@@ -152,6 +350,8 @@ impl GameState {
             scroll_speed,
             auto_play,
             spawn_lead_time_ms,
+            stats,
+            pending_judgments: Vec::new(),
         })
     }
 
@@ -174,31 +374,25 @@ impl GameState {
                 }
             };
 
-            // If this event is past the spawn window, stop spawning
-            if target_time > render_time + self.spawn_lead_time_ms {
+            if target_time > render_time as f64 + self.spawn_lead_time_ms {
                 break;
             }
 
-            // Spawn this note
             if let TimedEvent::Note(note_event) = event {
                 if let Some(lane) = note_event.channel.lane_index() {
                     match note_event.note_type {
                         NoteType::Tap => {
-                            log::debug!("[SPAWN] Tap note at {}ms, lane {}, spawn_lead={}, render_time={}", 
-                                note_event.time_ms, lane, self.spawn_lead_time_ms, render_time);
                             self.active_notes.push(ActiveNote {
                                 lane,
                                 target_time_ms: note_event.time_ms,
                                 sample_id: note_event.sample_id,
                                 judged: false,
                                 missed: false,
+                                judgment_type: None,
                             });
                         }
                         NoteType::Hold => {
-                            // Long note HEAD - spawn it
                             let end_time = note_event.end_time_ms.unwrap_or(note_event.time_ms + 500.0);
-                            log::debug!("[SPAWN] Long note HEAD at {}ms, lane {}, tail at {}ms, render_time={}", 
-                                note_event.time_ms, lane, end_time, render_time);
                             self.active_long_notes.push(ActiveLongNote {
                                 lane,
                                 head_time_ms: note_event.time_ms,
@@ -208,10 +402,12 @@ impl GameState {
                                 missed: false,
                                 holding: false,
                                 dead: false,
+                                head_judgment: None,
+                                tail_judgment: None,
                             });
                         }
                         NoteType::Release => {
-                            // Long note TAIL - skip it (already paired with HEAD during parsing)
+                            // Skip (already paired with HEAD during parsing)
                         }
                     }
                 }
@@ -222,18 +418,13 @@ impl GameState {
     }
 
     /// Remove notes that have passed the judgment line.
-    ///
-    /// Notes are killed as soon as they pass the judgment line.
-    /// This prevents rendering off-screen notes and frees memory.
     pub fn cleanup_notes(&mut self) {
-        let render_time = self.clock.render_time();
+        let render_time = self.clock.render_time() as f64;
 
-        // Clean up tap notes - remove immediately once they pass the judgment line
         self.active_notes.retain(|note| {
             note.target_time_ms >= render_time
         });
         
-        // Clean up long notes - remove immediately when tail passes the judgment line
         self.active_long_notes.retain(|long_note| {
             render_time <= long_note.tail_time_ms
         });
@@ -248,30 +439,106 @@ impl GameState {
         )
     }
 
-    /// Get the number of active notes for debugging.
-    pub fn active_note_count(&self) -> usize {
-        self.active_notes.len()
+    /// Auto-play judgment: automatically judge all notes that have reached the judgment line.
+    /// In auto-play mode, all notes are judged as COOL.
+    pub fn auto_judge_notes(&mut self) {
+        if !self.auto_play {
+            return;
+        }
+
+        let render_time = self.clock.render_time() as f64;
+        let bpm = self.clock.bpm() as f64;
+
+        // Judge tap notes that have reached the judgment line
+        // Use a wider tolerance for auto-play to ensure all notes are hit
+        let auto_play_tolerance_ms = 10.0; // 10ms tolerance for auto-play
+        
+        for note in &mut self.active_notes {
+            if !note.judged && !note.missed {
+                let time_diff = (render_time - note.target_time_ms).abs();
+                if time_diff < auto_play_tolerance_ms {
+                    note.judged = true;
+                    note.judgment_type = Some(JudgmentType::Cool);
+                    
+                    self.stats.record_judgment(JudgmentType::Cool, false);
+                    
+                    self.pending_judgments.push(PendingJudgment::new(
+                        JudgmentType::Cool,
+                        note.lane,
+                        render_time,
+                    ));
+                }
+            }
+        }
+
+        // Check for missed tap notes
+        for note in &mut self.active_notes {
+            if !note.judged && !note.missed {
+                if is_missed(render_time, note.target_time_ms, bpm) {
+                    note.missed = true;
+                    note.judgment_type = Some(JudgmentType::Miss);
+                    self.stats.record_judgment(JudgmentType::Miss, false);
+                    self.pending_judgments.push(PendingJudgment::new(
+                        JudgmentType::Miss,
+                        note.lane,
+                        render_time,
+                    ));
+                }
+            }
+        }
+
+        // Judge long note heads
+        for long_note in &mut self.active_long_notes {
+            if !long_note.judged && !long_note.missed {
+                let head_diff = (render_time - long_note.head_time_ms).abs();
+                if head_diff < auto_play_tolerance_ms {
+                    long_note.judged = true;
+                    long_note.head_judgment = Some(JudgmentType::Cool);
+                    long_note.holding = true;
+                    self.stats.record_judgment(JudgmentType::Cool, false);
+                    self.pending_judgments.push(PendingJudgment::new(
+                        JudgmentType::Cool,
+                        long_note.lane,
+                        render_time,
+                    ));
+                }
+            }
+        }
+
+        // Judge long note tails
+        for long_note in &mut self.active_long_notes {
+            if long_note.judged && long_note.tail_judgment.is_none() {
+                if render_time >= long_note.tail_time_ms {
+                    long_note.tail_judgment = Some(JudgmentType::Cool);
+                    self.stats.record_judgment(JudgmentType::Cool, false);
+                    long_note.dead = true;
+                }
+            }
+        }
+
+        // Clean up dead pending judgments
+        self.pending_judgments.retain(|j| j.is_active(render_time));
     }
 
-    /// Get the number of active long notes for debugging.
-    pub fn active_long_note_count(&self) -> usize {
-        self.active_long_notes.len()
-    }
-
-    /// Handle key press for a lane - judges the nearest note/long note head.
-    ///
-    /// Returns true if a note was successfully judged.
-    pub fn handle_key_press(&mut self, lane: usize, judgment_window_ms: f64) -> bool {
-        let render_time = self.clock.render_time();
+    /// Handle key press for a lane.
+    pub fn handle_key_press(&mut self, lane: usize, _judgment_window_ms: f64) -> Option<JudgmentType> {
+        let render_time = self.clock.render_time() as f64;
+        let bpm = self.clock.bpm() as f64;
         
         // Try to judge long note first
         for long_note in &mut self.active_long_notes {
             if long_note.lane == lane && !long_note.judged && !long_note.missed {
                 let time_diff = (render_time - long_note.head_time_ms).abs();
-                if time_diff <= judgment_window_ms {
+                let bad_window = 60000.0 / bpm * 0.13021;
+                if time_diff <= bad_window {
+                    let judgment = judge_tap_note(time_diff, bpm);
                     long_note.judged = true;
                     long_note.holding = true;
-                    return true;
+                    long_note.head_judgment = Some(judgment);
+                    self.stats.record_judgment(judgment, false);
+                    self.pending_judgments.push(PendingJudgment::new(
+                        judgment, lane, render_time));
+                    return Some(judgment);
                 }
             }
         }
@@ -280,19 +547,23 @@ impl GameState {
         for note in &mut self.active_notes {
             if note.lane == lane && !note.judged && !note.missed {
                 let time_diff = (render_time - note.target_time_ms).abs();
-                if time_diff <= judgment_window_ms {
+                let bad_window = 60000.0 / bpm * 0.13021;
+                if time_diff <= bad_window {
+                    let judgment = judge_tap_note(time_diff, bpm);
                     note.judged = true;
-                    return true;
+                    note.judgment_type = Some(judgment);
+                    self.stats.record_judgment(judgment, false);
+                    self.pending_judgments.push(PendingJudgment::new(
+                        judgment, lane, render_time));
+                    return Some(judgment);
                 }
             }
         }
         
-        false
+        None
     }
 
-    /// Handle key release for a lane - ends the long note hold.
-    ///
-    /// Returns true if a long note was released.
+    /// Handle key release for a lane.
     pub fn handle_key_release(&mut self, lane: usize) -> bool {
         for long_note in &mut self.active_long_notes {
             if long_note.lane == lane && long_note.holding {
@@ -301,5 +572,13 @@ impl GameState {
             }
         }
         false
+    }
+
+    pub fn active_note_count(&self) -> usize {
+        self.active_notes.len()
+    }
+
+    pub fn active_long_note_count(&self) -> usize {
+        self.active_long_notes.len()
     }
 }
