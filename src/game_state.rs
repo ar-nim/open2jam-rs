@@ -79,8 +79,6 @@ pub struct GameStats {
     pub max_life: i32,
     /// Number of pills/buffers collected (1 per 15 consecutive Cools, max 5)
     pub pill_count: u32,
-    /// Jam bar progress (0.0 to 1.0, fills as jam_counter approaches 100)
-    pub jam_bar_progress: f32,
     /// Total number of playable notes in the chart
     pub total_notes: u32,
     /// Consecutive Cools counter (for buffer/pill awards, resets on Good/Miss)
@@ -104,7 +102,6 @@ impl GameStats {
             life: max_life,
             max_life,
             pill_count: 0,
-            jam_bar_progress: 0.0,
             total_notes,
             consecutive_cools: 0,
         }
@@ -189,13 +186,6 @@ impl GameStats {
         self.life += effective_judgment.hp_change_hard();
         self.life = self.life.clamp(0, self.max_life);
 
-        // Update jam bar progress (normalized to 100% = 1 jam)
-        // jam_counter goes 0..100, progress is 0.0..1.0
-        if !effective_judgment.breaks_combo() {
-            self.jam_bar_progress = ((self.jam_counter % 100) as f32 / 100.0).min(1.0);
-        } else {
-            self.jam_bar_progress = 0.0;
-        }
     }
 
     /// Check if the game is over (life reached 0).

@@ -473,10 +473,11 @@ pub fn draw_lifebar(
 /// JAM_BAR: x="4" y="536", sprite is 191x12 pixels
 /// Fill direction: left_to_right
 /// The jam_bar sprite (green) is clipped relative to the empty jam bar background.
+/// jam_progress is the raw jam_counter value (0-100+), normalized here.
 pub fn draw_jam_bar(
     renderer: &mut TexturedRenderer,
     get_frame: &dyn Fn(&str) -> Option<AtlasFrame>,
-    jam_bar_progress: f32,
+    jam_counter: u32,
     layout: &HudLayout,
     skin_scale: (f32, f32),
     offset: (f32, f32),
@@ -489,16 +490,19 @@ pub fn draw_jam_bar(
     let bar_w = 191.0 * sx;
     let bar_h = 12.0 * sy;
     
+    // Normalize jam_counter to 0.0-1.0 (capped at 100)
+    let progress = ((jam_counter % 100) as f32) / 100.0;
+    
     // Draw the jam_bar sprite clipped to show only the filled portion
     // left_to_right: clip from the right side
     if let Some(bar_frame) = get_frame("jam_bar") {
-        let fill_width = bar_w * jam_bar_progress;
+        let fill_width = bar_w * progress;
         
         if fill_width > 0.5 {
             // Clip the UV to show only the left portion
             let uv_u = bar_frame.uv[0];
             let uv_v = bar_frame.uv[1];
-            let uv_w = bar_frame.uv[2] * jam_bar_progress;
+            let uv_w = bar_frame.uv[2] * progress;
             let uv_h = bar_frame.uv[3];
             
             renderer.draw_textured_quad(
@@ -639,7 +643,7 @@ pub fn render_hud(
     
     // 1. Draw static/background elements first
     draw_lifebar(renderer, get_frame, stats.life_percent(), layout, skin_scale, offset);
-    draw_jam_bar(renderer, get_frame, stats.jam_bar_progress, layout, skin_scale, offset);
+    draw_jam_bar(renderer, get_frame, stats.jam_counter, layout, skin_scale, offset);
     draw_pills(renderer, get_frame, stats.pill_count, layout, skin_scale, offset);
     
     // 2. Draw counters
