@@ -426,44 +426,60 @@ impl App {
             gpu.textured_renderer.begin();
         }
 
-        // 6. Draw skin elements (background, judgment line, notes)
+        // 6. Draw skin entities (background, judgment line, notes)
         if let Some(ref mut gpu) = render.gpu {
             if let (Some(atlas), Some(skin_res)) = (&gpu.atlas, &gpu.skin) {
                 if let Some(skin) = skin_res.get_skin("o2jam") {
-                    let jly = skin.judgment_line_y as f32 * skin_scale_y;
+                    // Whitelist of static entity IDs to render in the background pass.
+                    // Effects, counters, notes, and key-press effects are rendered dynamically elsewhere.
+                    const STATIC_ENTITIES: &[&str] = &[
+                        "BGA",
+                        "note_bg",
+                        "dashboard",
+                        "lifebar_bg",
+                        "timebar",
+                        "JUDGMENT_LINE",
+                        "LIFE_BAR",
+                        "PILL_1", "PILL_2", "PILL_3", "PILL_4", "PILL_5",
+                        "MEASURE_MARK",
+                        "JAM_BAR",
+                        "static_keyboard",
+                    ];
 
-                    // Draw note background
-                    if let Some(note_bg_frame) = atlas.get_frame("note_bg") {
-                        let note_w = note_bg_frame.width as f32 * skin_scale_x;
-                        let note_h = note_bg_frame.height as f32 * skin_scale_y;
-                        let note_x = (config_width - note_w) / 2.0;
-                        gpu.textured_renderer.draw_textured_quad(
-                            note_x, 0.0, note_w, note_h, note_bg_frame.uv, [1.0, 1.0, 1.0, 1.0],
-                        );
-                    }
+                    // Draw whitelisted entities from the skin XML
+                    for entity in &skin.entities {
+                        let id = match &entity.id {
+                            Some(id) => id.as_str(),
+                            None => continue,
+                        };
 
-                    // Draw judgment line
-                    if let Some(jl_frame) = atlas.get_frame("judgmentarea") {
-                        let jl_w = jl_frame.width as f32 * skin_scale_x;
-                        let jl_h = jl_frame.height as f32 * skin_scale_y;
-                        let jl_x = (config_width - jl_w) / 2.0;
-                        gpu.textured_renderer.draw_textured_quad(
-                            jl_x, jly - jl_h / 2.0, jl_w, jl_h, jl_frame.uv, [1.0, 1.0, 1.0, 1.0],
-                        );
-                    } else {
-                        // Fallback: colored line
-                        gpu.textured_renderer.draw_textured_quad(
-                            0.0, jly - 2.0, config_width, 4.0, [0.0, 0.0, 0.0, 0.0], [0.8, 0.8, 0.8, 0.6],
-                        );
-                    }
+                        if !STATIC_ENTITIES.contains(&id) {
+                            continue;
+                        }
 
-                    // Draw measure mark
-                    if let Some(measure_frame) = atlas.get_frame("measure_mark") {
-                        let mw = measure_frame.width as f32 * skin_scale_x;
-                        let mh = measure_frame.height as f32 * skin_scale_y;
-                        let mx = (config_width - mw) / 2.0;
+                        let sprite_id = match &entity.sprite {
+                            Some(s) => s,
+                            None => continue,
+                        };
+
+                        // Skip multi-frame animated sprites (comma-separated sprite attribute)
+                        // These need special handling — just use the first frame name
+                        let first_sprite = sprite_id.split(',').next().unwrap_or(sprite_id).trim();
+
+                        // Get atlas frame by sprite ID
+                        let atlas_frame = match atlas.get_frame(first_sprite) {
+                            Some(f) => f,
+                            None => continue,
+                        };
+
+                        let frame_w = atlas_frame.width as f32 * skin_scale_x;
+                        let frame_h = atlas_frame.height as f32 * skin_scale_y;
+                        let frame_x = entity.x as f32 * skin_scale_x;
+                        let frame_y = entity.y as f32 * skin_scale_y;
+
                         gpu.textured_renderer.draw_textured_quad(
-                            mx, jly - mh / 2.0, mw, mh, measure_frame.uv, [1.0, 1.0, 1.0, 0.5],
+                            frame_x, frame_y, frame_w, frame_h,
+                            atlas_frame.uv, [1.0, 1.0, 1.0, 1.0],
                         );
                     }
                 }
