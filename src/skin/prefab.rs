@@ -12,10 +12,16 @@ pub const NUM_LANES: usize = 7;
 pub struct NotePrefab {
     pub lane: usize,
     pub x: i32,
+    /// Regular note sprite (for tap notes)
     pub sprite_id: Option<String>,
+    /// Long note head sprite (falls back to sprite_id)
     pub head_sprite: Option<String>,
+    /// Long note body sprite (stretchable middle section)
     pub body_sprite: Option<String>,
+    /// Long note tail sprite (top cap)
     pub tail_sprite: Option<String>,
+    /// Long note prototype exists for this lane
+    pub is_long_note: bool,
 }
 
 /// All note prefabs for a skin (one per lane).
@@ -40,6 +46,7 @@ impl NotePrefabs {
             head_sprite: None,
             body_sprite: None,
             tail_sprite: None,
+            is_long_note: false,
         });
 
         NotePrefabs {
@@ -52,8 +59,8 @@ impl NotePrefabs {
 
     /// Build note prefabs from a parsed skin definition.
     ///
-    /// Looks for entities with IDs like `NOTE_1` through `NOTE_7`
-    /// and `LONG_NOTE_1` through `LONG_NOTE_7`.
+    /// Follows the Java pattern: NOTE_N entities create both regular and long note prefabs.
+    /// Long note sprites use `head`, `body`, `tail` attributes (falling back to `sprite`).
     pub fn from_skin(skin: &SkinDef) -> Self {
         let mut lanes: [Option<NotePrefab>; NUM_LANES] = Default::default();
 
@@ -64,13 +71,21 @@ impl NotePrefabs {
                     continue;
                 }
 
+                // Java pattern: sprite is the main note sprite
+                // head/body/tail are optional, falling back to sprite
+                let sprite_id = entity.sprite.clone();
+                let head_sprite = entity.head_sprite.clone().or_else(|| sprite_id.clone());
+                let body_sprite = entity.body_sprite.clone().or_else(|| sprite_id.clone());
+                let tail_sprite = entity.tail_sprite.clone().or_else(|| sprite_id.clone());
+
                 lanes[lane].get_or_insert(NotePrefab {
                     lane,
                     x: entity.x,
-                    sprite_id: entity.sprite.clone(),
-                    head_sprite: None,
-                    body_sprite: None,
-                    tail_sprite: None,
+                    sprite_id,
+                    head_sprite,
+                    body_sprite,
+                    tail_sprite,
+                    is_long_note: true, // NOTE_N entities create long note prototypes in Java
                 });
             }
         }
@@ -85,6 +100,7 @@ impl NotePrefabs {
                     head_sprite: None,
                     body_sprite: None,
                     tail_sprite: None,
+                    is_long_note: false,
                 });
             }
         }
@@ -159,23 +175,27 @@ mod tests {
     fn test_extract_lane_from_entity() {
         assert_eq!(NotePrefabs::extract_lane_from_note_entity(&EntityDef {
             id: Some("NOTE_1".to_string()),
-            sprite: None, x: 0, y: 0, layer: 0,
+            sprite: None, head_sprite: None, body_sprite: None, tail_sprite: None,
+            x: 0, y: 0, layer: 0,
         }), Some(0));
 
         assert_eq!(NotePrefabs::extract_lane_from_note_entity(&EntityDef {
             id: Some("NOTE_7".to_string()),
-            sprite: None, x: 0, y: 0, layer: 0,
+            sprite: None, head_sprite: None, body_sprite: None, tail_sprite: None,
+            x: 0, y: 0, layer: 0,
         }), Some(6));
 
         assert_eq!(NotePrefabs::extract_lane_from_note_entity(&EntityDef {
             id: Some("LONG_NOTE_3".to_string()),
-            sprite: None, x: 0, y: 0, layer: 0,
+            sprite: None, head_sprite: None, body_sprite: None, tail_sprite: None,
+            x: 0, y: 0, layer: 0,
         }), Some(2));
 
         // Non-note entities return None
         assert_eq!(NotePrefabs::extract_lane_from_note_entity(&EntityDef {
             id: Some("JUDGMENT_LINE".to_string()),
-            sprite: None, x: 0, y: 0, layer: 0,
+            sprite: None, head_sprite: None, body_sprite: None, tail_sprite: None,
+            x: 0, y: 0, layer: 0,
         }), None);
     }
 
@@ -227,14 +247,16 @@ mod tests {
         // NOTE_8 should be ignored (only 1-7 are valid)
         let entity = EntityDef {
             id: Some("NOTE_8".to_string()),
-            sprite: None, x: 0, y: 0, layer: 0,
+            sprite: None, head_sprite: None, body_sprite: None, tail_sprite: None,
+            x: 0, y: 0, layer: 0,
         };
         assert!(NotePrefabs::extract_lane_from_note_entity(&entity).is_none());
 
         // NOTE_0 should be ignored
         let entity = EntityDef {
             id: Some("NOTE_0".to_string()),
-            sprite: None, x: 0, y: 0, layer: 0,
+            sprite: None, head_sprite: None, body_sprite: None, tail_sprite: None,
+            x: 0, y: 0, layer: 0,
         };
         assert!(NotePrefabs::extract_lane_from_note_entity(&entity).is_none());
     }

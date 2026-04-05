@@ -77,6 +77,9 @@ pub struct NoteEvent {
     pub note_type: NoteType,
     pub measure: u32,
     pub position: f64, // 0.0 to <1.0 within the measure
+    /// For long note HEADs: the time_ms of the matching TAIL event (after pairing pass).
+    /// For TAILs: None.
+    pub end_time_ms: Option<f64>,
 }
 
 impl NoteEvent {
@@ -95,11 +98,10 @@ impl NoteEvent {
         matches!(self.note_type, NoteType::Release)
     }
 
-    /// For long note tails, returns the time_ms of the release event
-    /// if this is a long note head (used for body stretching).
-    /// Currently always None — full long note pairing requires a second pass.
+    /// For long note HEADs, returns the paired TAIL time_ms.
+    /// For TAILs and tap notes, returns None.
     pub fn end_time_ms(&self) -> Option<f64> {
-        None
+        self.end_time_ms
     }
 }
 
@@ -422,19 +424,24 @@ fn build_timed_events(
 
     // Calculate time for each measure
     let mut time_ms = CHART_PADDING_MS;
+    let mut last_measure_num: Option<u32> = None;
 
-    for (idx, &measure_num) in sorted_measures.iter().enumerate() {
+    for &measure_num in sorted_measures.iter() {
+        // Advance time by the actual gap in measure numbers
+        if let Some(prev_measure) = last_measure_num {
+            let measures_diff = measure_num.saturating_sub(prev_measure);
+            time_ms += measure_duration(measures_diff as f64, current_bpm);
+        }
+        last_measure_num = Some(measure_num);
+
         let channels = &measures[&measure_num];
 
         // Add measure marker
-        if idx > 0 || measure_num == 0 {
-            // Check if we already added measure 0
-            if !(measure_num == 0 && events.iter().any(|e| matches!(e, TimedEvent::Measure(m) if m.measure == 0))) {
-                events.push(TimedEvent::Measure(MeasureEvent {
-                    time_ms,
-                    measure: measure_num,
-                }));
-            }
+        if !events.iter().any(|e| matches!(e, TimedEvent::Measure(m) if m.measure == measure_num)) {
+            events.push(TimedEvent::Measure(MeasureEvent {
+                time_ms,
+                measure: measure_num,
+            }));
         }
 
         // Process channels in this measure
@@ -495,6 +502,7 @@ fn build_timed_events(
                             note_type,
                             measure: measure_num,
                             position,
+                            end_time_ms: None, // Will be populated in pair_long_notes pass
                         };
 
                         events.push(TimedEvent::Note(note_event));
@@ -502,9 +510,6 @@ fn build_timed_events(
                 }
             }
         }
-
-        // Advance time to next measure (4 beats per measure by default)
-        time_ms += measure_duration(1.0, current_bpm);
     }
 
     // Sort all events by time
@@ -522,7 +527,45 @@ fn build_timed_events(
         time_a.partial_cmp(&time_b).unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    // Pair long note HOLD/RELEASE events (second pass)
+    pair_long_notes(&mut events);
+
     Ok(events)
+}
+
+/// Pair HOLD and RELEASE events per channel to populate end_time_ms for long note heads.
+fn pair_long_notes(events: &mut [TimedEvent]) {
+    // Track open long notes per note channel (lanes 1-7, index 0-6)
+    // Stores the event index of the HOLD
+    let mut ln_buffer: [Option<usize>; 7] = [None; 7];
+
+    // First pass: collect all pairs (hold_idx, release_time)
+    let mut pairs_to_update: Vec<(usize, f64)> = Vec::new();
+    
+    for (idx, event) in events.iter().enumerate() {
+        if let TimedEvent::Note(note) = event {
+            if let Some(lane) = note.channel.lane_index() {
+                if lane < 7 {
+                    if note.note_type == NoteType::Hold {
+                        ln_buffer[lane] = Some(idx);
+                    } else if note.note_type == NoteType::Release {
+                        if let Some(hold_idx) = ln_buffer[lane].take() {
+                            // Found matching pair: store for later update
+                            pairs_to_update.push((hold_idx, note.time_ms));
+                        }
+                        // If no open long note, orphaned release — ignore
+                    }
+                }
+            }
+        }
+    }
+    
+    // Second pass: apply updates (separate borrow)
+    for (hold_idx, release_time) in pairs_to_update {
+        if let TimedEvent::Note(ref mut hold_note) = events[hold_idx] {
+            hold_note.end_time_ms = Some(release_time);
+        }
+    }
 }
 
 fn measure_duration(position_fraction: f64, bpm: f64) -> f64 {
@@ -605,9 +648,48 @@ mod tests {
     #[test]
     fn test_chart_has_events() {
         let chart = parse_file("test_assets/o2ma100.ojn").expect("Failed to parse OJN");
-        // Should have at least some note events
         let note_count = chart.events.iter().filter(|e| matches!(e, TimedEvent::Note(_))).count();
         assert!(note_count > 0, "Chart should have note events, got {}", note_count);
+        
+        // Print first 30 events to check ordering
+        println!("First 30 events (sorted by time):");
+        for (i, event) in chart.events.iter().enumerate().take(30) {
+            match event {
+                TimedEvent::Note(n) => {
+                    println!("  [{}] Note at {:.1}ms, lane {:?}, type: {:?}, end_time: {:?}", 
+                        i, n.time_ms, n.channel, n.note_type, n.end_time_ms);
+                }
+                TimedEvent::BpmChange(b) => {
+                    println!("  [{}] BPM at {:.1}ms, bpm={}", i, b.time_ms, b.bpm);
+                }
+                TimedEvent::Measure(m) => {
+                    println!("  [{}] Measure {} at {:.1}ms", i, m.measure, m.time_ms);
+                }
+            }
+        }
+        
+        // Check unique measure numbers
+        let measure_nums: Vec<u32> = chart.events.iter()
+            .filter_map(|e| match e {
+                TimedEvent::Measure(m) => Some(m.measure),
+                _ => None,
+            })
+            .collect();
+        println!("\nMeasure numbers in events: {:?}", measure_nums);
+        
+        // Check long notes
+        let long_note_heads: Vec<_> = chart.events.iter()
+            .filter_map(|e| match e {
+                TimedEvent::Note(n) if n.note_type == NoteType::Hold => Some(n),
+                _ => None,
+            })
+            .collect();
+        
+        println!("\nLong note heads: {}", long_note_heads.len());
+        for ln in &long_note_heads {
+            println!("  HOLD at {:.1}ms, lane {:?}, end_time_ms: {:?}", 
+                ln.time_ms, ln.channel, ln.end_time_ms);
+        }
     }
 
     #[test]
