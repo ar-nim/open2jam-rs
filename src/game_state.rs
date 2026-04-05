@@ -12,6 +12,7 @@ use crate::gameplay::scroll::scroll_travel_time_ms;
 use crate::parsing::ojn::{Chart, TimedEvent};
 use crate::resources::clock::Clock;
 use crate::skin::prefab::NotePrefabs;
+use crate::parsing::xml::Resources as SkinResources;
 
 /// A note entity in the active game.
 #[derive(Debug, Clone)]
@@ -48,6 +49,7 @@ impl GameState {
         ojn_path: impl AsRef<Path>,
         scroll_speed: f64,
         auto_play: bool,
+        skin_resources: Option<&SkinResources>,
     ) -> Result<Self> {
         let ojn_path = ojn_path.as_ref();
         let dir = ojn_path.parent().context("OJN file must have a parent directory")?;
@@ -77,12 +79,23 @@ impl GameState {
         sound_cache.populate_from_sample_map(sample_map, &ojm_path.to_string_lossy());
         info!("Sound cache: {} decoded samples", sound_cache.len());
 
-        // 4. Build note prefabs from defaults (no skin XML yet)
-        let note_prefabs = NotePrefabs::default_7lan(1000, 750, 600);
+        // 4. Build note prefabs from skin XML if available, otherwise use defaults
+        let note_prefabs = if let Some(skin_res) = skin_resources {
+            if let Some(skin) = skin_res.get_skin("o2jam") {
+                info!("Building note prefabs from skin XML (o2jam)");
+                NotePrefabs::from_skin(skin)
+            } else {
+                info!("Skin 'o2jam' not found, using default 7-lane layout");
+                NotePrefabs::default_7lan(1000, 750, 600)
+            }
+        } else {
+            info!("No skin resources provided, using default 7-lane layout");
+            NotePrefabs::default_7lan(1000, 750, 600)
+        };
 
         // 5. Calculate spawn lead time based on BPM and viewport
         let base_bpm = chart.header.bpm as f64;
-        let viewport_height = 750.0; // default window height
+        let viewport_height = note_prefabs.skin_height as f64;
         let travel_time = scroll_travel_time_ms(base_bpm, viewport_height, scroll_speed);
         let spawn_lead_time_ms = travel_time + 500.0; // extra margin
 

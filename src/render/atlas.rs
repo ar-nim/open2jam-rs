@@ -129,15 +129,13 @@ impl SkinAtlas {
         // Create atlas image buffer (RGBA8)
         let mut atlas_img: image::RgbaImage = image::ImageBuffer::new(atlas_width, atlas_height);
 
-        // Place frames into atlas
-        for (id, ax, ay, aw, ah) in &placements {
-            let lf = loaded.iter().find(|l| &l.id == id).unwrap();
+        // Place frames into atlas — use index-based lookup to match placements with loaded frames
+        for (i, (_id, ax, ay, aw, ah)) in placements.iter().enumerate() {
+            let lf = &loaded[i];
             for sy in 0..*ah {
                 for sx in 0..*aw {
-                    if sx < lf.img.width() && sy < lf.img.height() {
-                        let pixel = lf.img.get_pixel(sx, sy);
-                        atlas_img.put_pixel(*ax + sx, *ay + sy, *pixel);
-                    }
+                    let pixel = lf.img.get_pixel(sx, sy);
+                    atlas_img.put_pixel(*ax + sx, *ay + sy, *pixel);
                 }
             }
         }
@@ -193,24 +191,24 @@ impl SkinAtlas {
 
         // Build frame lookup with normalized UVs
         let mut frame_map = HashMap::new();
-        for (_id, ax, ay, aw, ah) in &placements {
+        for (id, ax, ay, aw, ah) in &placements {
             let u0 = *ax as f32 / atlas_width as f32;
             let v0 = *ay as f32 / atlas_height as f32;
             let u1 = (*ax + *aw) as f32 / atlas_width as f32;
             let v1 = (*ay + *ah) as f32 / atlas_height as f32;
 
-            // Find the original id
-            let idx = placements.iter().position(|p| p.1 == *ax && p.2 == *ay).unwrap();
-            let id = &placements[idx].0;
-
-            frame_map.insert(
-                id.clone(),
-                AtlasFrame {
-                    uv: [u0, v0, u1, v1],
-                    width: *aw,
-                    height: *ah,
-                },
-            );
+            // For animated sprites (multiple frames), only store the first frame
+            // Future: store all frames and select based on animation time
+            if !frame_map.contains_key(id) {
+                frame_map.insert(
+                    id.clone(),
+                    AtlasFrame {
+                        uv: [u0, v0, u1, v1],
+                        width: *aw,
+                        height: *ah,
+                    },
+                );
+            }
         }
 
         Some(Self {

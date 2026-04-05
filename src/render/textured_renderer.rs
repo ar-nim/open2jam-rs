@@ -265,8 +265,8 @@ impl TexturedRenderer {
             });
         }
 
-        // Triangle 2: TL, BL, BR
-        for i in [0, 2, 3] {
+        // Triangle 2: TR, BR, BL (covers the other half of the quad)
+        for i in [1, 3, 2] {
             self.vertices.push(TexturedVertex {
                 position: positions[i],
                 uv: uvs[i],

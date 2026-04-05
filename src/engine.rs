@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use log::info;
+use log::{info, warn};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -106,7 +106,13 @@ impl ApplicationHandler for App {
             // Load the game state after rendering is ready
             if let Some(path) = &self.ojn_path {
                 info!("Loading game state from: {}", path.display());
-                match GameState::load(path, SCROLL_SPEED, AUTO_PLAY) {
+                
+                // Get skin resources for note prefab loading
+                let skin_res = self.render.as_ref()
+                    .and_then(|r| r.gpu.as_ref())
+                    .and_then(|g| g.skin.as_ref());
+                
+                match GameState::load(path, SCROLL_SPEED, AUTO_PLAY, skin_res) {
                     Ok(mut gs) => {
                         info!(
                             "Game loaded: {} ({:.1}ms spawn lead)",
@@ -350,7 +356,20 @@ impl App {
     }
 
     fn render_frame(&mut self) {
-        let Some(render) = &mut self.render else { return };
+        let Some(render) = &mut self.render else {
+            warn!("render_frame: render state is None");
+            return;
+        };
+
+        // Log first time we enter render_frame
+        static FIRST_FRAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !FIRST_FRAME.load(std::sync::atomic::Ordering::Relaxed) {
+            FIRST_FRAME.store(true, std::sync::atomic::Ordering::Relaxed);
+            info!("=== First render_frame call ===");
+            info!("gpu state: atlas={}, skin={}",
+                render.gpu.as_ref().map(|g| g.atlas.is_some()).unwrap_or(false),
+                render.gpu.as_ref().map(|g| g.skin.is_some()).unwrap_or(false));
+        }
 
         // 1. Calculate delta time (rounded to prevent cumulative drift — Bug 11 fix)
         let now = Instant::now();
@@ -426,8 +445,6 @@ impl App {
             if let (Some(atlas), Some(skin_res)) = (&gpu.atlas, &gpu.skin) {
                 if let Some(skin) = skin_res.get_skin("o2jam") {
                     // Whitelist of static sprite IDs to render in the background pass.
-                    // Many background entities have no XML 'id' attribute, so we match by
-                    // sprite name instead.
                     const STATIC_SPRITES: &[&str] = &[
                         "bga10",
                         "note_bg",
@@ -441,16 +458,37 @@ impl App {
                         "static_keyboard",
                     ];
 
+                    static FRAME_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    let frame_num = FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if frame_num == 0 {
+                        info!("=== Static render pass starting ===");
+                        info!("Static sprites whitelist: {:?}", STATIC_SPRITES);
+                    }
+
+                    let mut draw_count = 0;
+                    let mut skip_count = 0;
                     for entity in &skin.entities {
                         let sprite_id = match &entity.sprite {
                             Some(s) => s,
-                            None => continue,
+                            None => { skip_count += 1; continue; }
                         };
                         let first_sprite = sprite_id.split(',').next().unwrap_or(sprite_id).trim();
                         if !STATIC_SPRITES.contains(&first_sprite) {
+                            skip_count += 1;
                             continue;
                         }
                         if let Some(atlas_frame) = atlas.get_frame(first_sprite) {
+                            draw_count += 1;
+
+                            if frame_num == 0 {
+                                let frame_w = atlas_frame.width as f32 * skin_scale_x;
+                                let frame_h = atlas_frame.height as f32 * skin_scale_y;
+                                let frame_x = offset_x + entity.x as f32 * skin_scale_x;
+                                let frame_y = offset_y + entity.y as f32 * skin_scale_y;
+                                info!("  [RENDER] sprite={} skin({},{}) -> screen({:.1},{:.1}) size {:.1}x{:.1}",
+                                    first_sprite, entity.x, entity.y, frame_x, frame_y, frame_w, frame_h);
+                            }
+
                             let frame_w = atlas_frame.width as f32 * skin_scale_x;
                             let frame_h = atlas_frame.height as f32 * skin_scale_y;
                             let frame_x = offset_x + entity.x as f32 * skin_scale_x;
@@ -460,7 +498,15 @@ impl App {
                                 frame_x, frame_y, frame_w, frame_h,
                                 atlas_frame.uv, [1.0, 1.0, 1.0, 1.0],
                             );
+                        } else {
+                            if frame_num == 0 {
+                                info!("  [MISSING] sprite={} not found in atlas", first_sprite);
+                            }
                         }
+                    }
+                    if frame_num == 0 {
+                        info!("Static pass: {} drawn, {} skipped (no sprite), {} skipped (not in whitelist)",
+                            draw_count, skip_count, skin.entities.len() - draw_count - skip_count);
                     }
 
                     // Draw measure mark once at the judgment line
@@ -498,17 +544,19 @@ impl App {
                     let lane_prefab = &gs.note_prefabs.lanes[note.lane];
                     let lane_x = offset_x + lane_prefab.x as f32 * skin_scale_x;
 
-                    let head_frame_name = match note.lane {
-                        0 | 1 | 2 => "head_note_white",
-                        3 => "head_note_blue",
-                        _ => "head_note_yellow",
-                    };
-
-                    let note_w = 28.0 * skin_scale_x;
-                    let note_h = 7.0 * skin_scale_y;
+                    // Use the sprite ID from the skin XML prefab, fallback to lane-based default
+                    let head_frame_name = lane_prefab.sprite_id.as_deref().unwrap_or_else(|| {
+                        match note.lane {
+                            0 | 1 | 2 => "head_note_white",
+                            3 => "head_note_blue",
+                            _ => "head_note_yellow",
+                        }
+                    });
 
                     if let Some(head_frame) = atlas.get_frame(head_frame_name) {
-                        let x = lane_x - note_w / 2.0;
+                        let note_w = head_frame.width as f32 * skin_scale_x;
+                        let note_h = head_frame.height as f32 * skin_scale_y;
+                        let x = lane_x; // Left edge aligned with receptor (entity.x is left edge in skin XML)
                         let y = offset_y + y as f32 * skin_scale_y - note_h / 2.0;
                         gpu.textured_renderer.draw_textured_quad(
                             x, y, note_w, note_h, head_frame.uv, [1.0, 1.0, 1.0, 1.0],
