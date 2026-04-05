@@ -41,6 +41,9 @@ pub struct SpriteDef {
 pub struct EntityDef {
     pub id: Option<String>,
     pub sprite: Option<String>,
+    pub head_sprite: Option<String>,  // For long notes
+    pub body_sprite: Option<String>,  // For long notes
+    pub tail_sprite: Option<String>,  // For long notes
     pub x: i32,
     pub y: i32,
     pub layer: u32,
@@ -304,9 +307,21 @@ fn parse_skin<R: std::io::BufRead>(
                     let e_attrs = collect_attrs(e)?;
                     let id = get_attr(&e_attrs, "id").map(String::from);
                     let sprite = get_attr(&e_attrs, "sprite").map(String::from);
+                    let head_sprite = get_attr(&e_attrs, "head").map(String::from);
+                    let body_sprite = get_attr(&e_attrs, "body").map(String::from);
+                    let tail_sprite = get_attr(&e_attrs, "tail").map(String::from);
                     let x = parse_attr_i32(&e_attrs, "x", 0);
                     let y = parse_attr_i32(&e_attrs, "y", 0);
-                    entities.push(EntityDef { id, sprite, x, y, layer: current_layer });
+                    entities.push(EntityDef {
+                        id,
+                        sprite,
+                        head_sprite,
+                        body_sprite,
+                        tail_sprite,
+                        x,
+                        y,
+                        layer: current_layer,
+                    });
                 }
             }
             Ok(Event::End(ref e)) => {
