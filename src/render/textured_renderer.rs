@@ -1,6 +1,7 @@
 //! Textured sprite renderer using the skin atlas texture.
 
 use bytemuck::{Pod, Zeroable};
+use log::{info, warn};
 
 use super::atlas::SkinAtlas;
 
@@ -247,12 +248,12 @@ impl TexturedRenderer {
             [x + w, y + h], // BR
         ];
 
-        // UV coords (flip Y because texture origin is top-left)
+        // UV coords — screen Y points down, texture V points down, no flip needed
         let uvs = [
-            [u0, v1], // TL
-            [u1, v1], // TR
-            [u0, v0], // BL
-            [u1, v0], // BR
+            [u0, v0], // TL
+            [u1, v0], // TR
+            [u0, v1], // BL
+            [u1, v1], // BR
         ];
 
         // Triangle 1: TL, TR, BL
@@ -277,9 +278,11 @@ impl TexturedRenderer {
     /// Upload and issue draw calls.
     pub fn end(&mut self, view: &wgpu::TextureView, queue: &wgpu::Queue, device: &wgpu::Device) {
         if self.vertices.is_empty() {
+            warn!("TexturedRenderer::end called with 0 vertices");
             return;
         }
         let Some(ref bind_group) = self.bind_group else {
+            warn!("TexturedRenderer::end called without atlas bind group set");
             return;
         };
 

@@ -1,7 +1,6 @@
 //! Skin texture atlas: packs all skin PNG frames into a single wgpu texture.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use log::{info, warn};
 
@@ -30,6 +29,12 @@ pub struct SkinAtlas {
     pub height: u32,
 }
 
+/// A loaded frame ready for packing.
+struct LoadedFrame {
+    id: String,
+    img: image::RgbaImage,
+}
+
 impl SkinAtlas {
     /// Build a texture atlas from skin XML frame definitions.
     ///
@@ -46,53 +51,68 @@ impl SkinAtlas {
             return None;
         }
 
-        // Simple row-packing algorithm: lay out frames left-to-right, top-to-bottom
-        let max_atlas_width: u32 = 4096;
-        let mut atlas_data: Vec<u8> = Vec::new();
-        let mut frame_rects: Vec<(String, u32, u32, u32, u32)> = Vec::new(); // id, x_in_atlas, y_in_atlas, w, h
-
-        let mut cursor_x: u32 = 0;
-        let mut cursor_y: u32 = 0;
-        let mut row_height: u32 = 0;
-
+        // Load all frames, skipping ones that fail
+        let mut loaded: Vec<LoadedFrame> = Vec::new();
         for (id, file, fx, fy, fw, fh) in frames {
-            let img = image_loader(file)?;
+            let img = match image_loader(file) {
+                Some(img) => img,
+                None => {
+                    warn!("Atlas: failed to load image for frame '{}'", id);
+                    continue;
+                }
+            };
+
             let img_w = img.width();
             let img_h = img.height();
 
-            if fx + fw > img_w || fy + fh > img_h {
+            if *fx + *fw > img_w || *fy + *fh > img_h {
                 warn!(
-                    "Frame {} out of bounds in {}: ({}, {}, {}, {}) but image is {}x{}",
+                    "Atlas: frame '{}' out of bounds in {} (rect: {},{},{},{} but image is {}x{})",
                     id, file, fx, fy, fw, fh, img_w, img_h
                 );
                 continue;
             }
 
             // Extract the sub-rectangle
-            let mut sub_img = image::ImageBuffer::new(*fw, *fh);
-            for sy in 0..*fh {
-                for sx in 0..*fw {
-                    let pixel = img.get_pixel(fx + sx, fy + sy);
-                    sub_img.put_pixel(sx, sy, *pixel);
-                }
-            }
+            let sub_img = image::imageops::crop_imm(&img, *fx, *fy, *fw, *fh).to_image();
+            loaded.push(LoadedFrame { id: id.clone(), img: sub_img });
+        }
+
+        if loaded.is_empty() {
+            warn!("Atlas: no frames loaded successfully");
+            return None;
+        }
+
+        info!("Atlas: {} frames loaded successfully", loaded.len());
+
+        // Simple row-packing algorithm: lay out frames left-to-right, top-to-bottom
+        let max_atlas_width: u32 = 4096;
+        let mut placements: Vec<(String, u32, u32, u32, u32)> = Vec::new(); // (id, x, y, w, h)
+
+        let mut cursor_x: u32 = 0;
+        let mut cursor_y: u32 = 0;
+        let mut row_height: u32 = 0;
+
+        for lf in &loaded {
+            let fw = lf.img.width();
+            let fh = lf.img.height();
 
             // Row packing: move to next row if frame doesn't fit
-            if cursor_x + *fw > max_atlas_width {
+            if cursor_x > 0 && cursor_x + fw + 1 > max_atlas_width {
                 cursor_x = 0;
                 cursor_y += row_height;
                 row_height = 0;
             }
 
-            // Add padding between frames
+            // Add 1px padding between frames
             if cursor_x > 0 {
                 cursor_x += 1;
             }
 
-            frame_rects.push((id.clone(), cursor_x, cursor_y, *fw, *fh));
-            cursor_x += *fw;
-            if *fh > row_height {
-                row_height = *fh;
+            placements.push((lf.id.clone(), cursor_x, cursor_y, fw, fh));
+            cursor_x += fw;
+            if fh > row_height {
+                row_height = fh;
             }
         }
 
@@ -104,39 +124,23 @@ impl SkinAtlas {
             return None;
         }
 
+        info!("Atlas size: {}x{} ({} frames)", atlas_width, atlas_height, placements.len());
+
         // Create atlas image buffer (RGBA8)
         let mut atlas_img: image::RgbaImage = image::ImageBuffer::new(atlas_width, atlas_height);
 
-        // Re-extract and place frames into atlas
-        for (id, ax, ay, aw, ah) in &frame_rects {
-            // Find the original frame data
-            let frame_def = frames.iter().find(|(fid, ..)| fid == id)?;
-            let img = image_loader(&frame_def.1)?;
-            let sub_img = image::imageops::crop_imm(
-                &img,
-                frame_def.2,
-                frame_def.3,
-                frame_def.4,
-                frame_def.5,
-            )
-            .to_image();
-
+        // Place frames into atlas
+        for (id, ax, ay, aw, ah) in &placements {
+            let lf = loaded.iter().find(|l| &l.id == id).unwrap();
             for sy in 0..*ah {
                 for sx in 0..*aw {
-                    if sx < sub_img.width() && sy < sub_img.height() {
-                        let pixel = sub_img.get_pixel(sx, sy);
+                    if sx < lf.img.width() && sy < lf.img.height() {
+                        let pixel = lf.img.get_pixel(sx, sy);
                         atlas_img.put_pixel(*ax + sx, *ay + sy, *pixel);
                     }
                 }
             }
         }
-
-        info!(
-            "Skin atlas: {}x{} ({} frames)",
-            atlas_width,
-            atlas_height,
-            frame_rects.len()
-        );
 
         // Create wgpu texture
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -189,11 +193,15 @@ impl SkinAtlas {
 
         // Build frame lookup with normalized UVs
         let mut frame_map = HashMap::new();
-        for (id, ax, ay, aw, ah) in &frame_rects {
+        for (_id, ax, ay, aw, ah) in &placements {
             let u0 = *ax as f32 / atlas_width as f32;
             let v0 = *ay as f32 / atlas_height as f32;
             let u1 = (*ax + *aw) as f32 / atlas_width as f32;
             let v1 = (*ay + *ah) as f32 / atlas_height as f32;
+
+            // Find the original id
+            let idx = placements.iter().position(|p| p.1 == *ax && p.2 == *ay).unwrap();
+            let id = &placements[idx].0;
 
             frame_map.insert(
                 id.clone(),

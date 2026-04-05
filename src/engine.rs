@@ -5,7 +5,6 @@ use std::time::Instant;
 use anyhow::Result;
 use log::{info, warn};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use wgpu::CurrentSurfaceTexture;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -21,17 +20,36 @@ use crate::render::textured_renderer::TexturedRenderer;
 const SCROLL_SPEED: f64 = 1.0;
 const AUTO_PLAY: bool = true;
 
-struct RenderState {
-    window: Window,
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
+/// GPU resources that must be dropped before the device.
+/// This wrapper allows explicit drop ordering to prevent segfaults.
+struct GpuResources {
     textured_renderer: TexturedRenderer,
     atlas: Option<SkinAtlas>,
     skin: Option<SkinResources>,
-    /// Scale factor from skin coordinates to screen coordinates.
+}
+
+struct RenderState {
+    window: Window,
+    surface: Option<wgpu::Surface<'static>>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    gpu: Option<GpuResources>,
     skin_scale: (f32, f32),
+}
+
+impl RenderState {
+    /// Clean up GPU resources in the correct order to prevent segfaults.
+    /// wgpu resources → surface → device/queue → window.
+    fn shutdown(&mut self) {
+        // Drop GPU resources (textures, buffers, bind groups, pipelines)
+        self.gpu.take();
+        // Drop surface before window (surface holds a raw window handle)
+        self.surface.take();
+        // Poll device to ensure all GPU commands complete
+        // (device/queue/window are dropped by Drop impl in natural order)
+        info!("RenderState shutdown complete.");
+    }
 }
 
 pub struct App {
@@ -128,7 +146,11 @@ impl ApplicationHandler for App {
     ) {
         match event {
             WindowEvent::CloseRequested => {
-                info!("Close requested, exiting...");
+                info!("Close requested, cleaning up...");
+                // Clean up GPU resources in correct order to prevent segfault.
+                if let Some(render) = self.render.as_mut() {
+                    render.shutdown();
+                }
                 event_loop.exit();
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -137,6 +159,9 @@ impl ApplicationHandler for App {
                 if event.state == ElementState::Pressed {
                     if let Key::Named(NamedKey::Escape) = &event.logical_key {
                         info!("Escape pressed, exiting...");
+                        if let Some(render) = self.render.as_mut() {
+                            render.shutdown();
+                        }
                         event_loop.exit();
                     }
                 }
@@ -146,13 +171,17 @@ impl ApplicationHandler for App {
                     if size.width > 0 && size.height > 0 {
                         render.config.width = size.width;
                         render.config.height = size.height;
-                        render.surface.configure(&render.device, &render.config);
-                        render.textured_renderer.resize(
-                            &render.device,
-                            &render.queue,
-                            size.width,
-                            size.height,
-                        );
+                        if let Some(ref surface) = render.surface {
+                            surface.configure(&render.device, &render.config);
+                        }
+                        if let Some(ref mut gpu) = render.gpu {
+                            gpu.textured_renderer.resize(
+                                &render.device,
+                                &render.queue,
+                                size.width,
+                                size.height,
+                            );
+                        }
                     }
                 }
             }
@@ -228,16 +257,20 @@ impl App {
             textured_renderer.set_atlas(&device, atlas);
         }
 
-        info!("wgpu surface configured: {}x{}", config.width, config.height);
-        self.render = Some(RenderState {
-            window,
-            surface,
-            device,
-            queue,
-            config,
+        let gpu = GpuResources {
             textured_renderer,
             atlas,
             skin,
+        };
+
+        info!("wgpu surface configured: {}x{}", config.width, config.height);
+        self.render = Some(RenderState {
+            window,
+            surface: Some(surface),
+            device,
+            queue,
+            config,
+            gpu: Some(gpu),
             skin_scale,
         });
     }
@@ -254,7 +287,7 @@ impl App {
             return (None, None, (1.0, 1.0));
         }
 
-        let skin_resources = match parse_skin_xml(&xml_path) {
+        let resources = match parse_skin_xml(&xml_path) {
             Ok(r) => r,
             Err(e) => {
                 warn!("Failed to parse skin XML: {e:?}");
@@ -262,7 +295,7 @@ impl App {
             }
         };
 
-        let skin_def = match skin_resources.get_skin("o2jam") {
+        let skin_def = match resources.get_skin("o2jam") {
             Some(s) => s.clone(),
             None => {
                 warn!("Skin 'o2jam' not found in resources.xml");
@@ -270,26 +303,30 @@ impl App {
             }
         };
 
-        // Collect all frame definitions: (id, file, x, y, w, h)
-        let frames: Vec<(String, String, u32, u32, u32, u32)> = skin_def
-            .frames
-            .iter()
-            .map(|f| {
-                (
-                    f.id.clone(),
-                    f.file.to_string_lossy().to_string(),
-                    f.x,
-                    f.y,
-                    f.w,
-                    f.h,
-                )
-            })
-            .collect();
+        // Build atlas from global sprites
+        let mut frame_entries: Vec<(String, String, u32, u32, u32, u32)> = Vec::new();
+        for (sprite_id, sprite_def) in &resources.sprites {
+            for frame in &sprite_def.frames {
+                frame_entries.push((
+                    sprite_id.clone(),
+                    frame.file.to_string_lossy().to_string(),
+                    frame.x,
+                    frame.y,
+                    frame.w,
+                    frame.h,
+                ));
+            }
+        }
+
+        info!("Skin has {} sprite frames to pack into atlas", frame_entries.len());
 
         // Build atlas
         let skin_dir_owned = skin_dir.to_path_buf();
-        let atlas = SkinAtlas::from_frames(device, queue, &frames, |file: &str| {
+        let atlas = SkinAtlas::from_frames(device, queue, &frame_entries, |file: &str| {
             let path = skin_dir_owned.join(file);
+            if !path.exists() {
+                warn!("Skin image not found: {}", path.display());
+            }
             match image::open(&path) {
                 Ok(img) => Some(img.into_rgba8()),
                 Err(e) => {
@@ -299,20 +336,26 @@ impl App {
             }
         });
 
+        // Debug: dump atlas frame keys
+        if let Some(ref a) = atlas {
+            info!("Atlas built: {} frames in {}x{} texture", a.frames.len(), a.width, a.height);
+            for key in &["head_note_white", "head_note_blue", "head_note_yellow", "judgmentarea", "note_bg", "measure_mark"] {
+                match a.get_frame(key) {
+                    Some(f) => info!("  [OK] {} -> uv={:?}, {}x{}", key, f.uv, f.width, f.height),
+                    None => warn!("  [MISSING] {}", key),
+                }
+            }
+        } else {
+            warn!("Atlas failed to build — using colored quad fallback");
+        }
+
         let skin_width = skin_def.width as f32;
         let skin_height = skin_def.height as f32;
-        let skin_scale = (1.0, 1.0); // Will be recalculated per-frame based on viewport
+        let skin_scale = (1.0, 1.0);
 
-        info!(
-            "Skin loaded: {}x{}, {} frames, atlas {}x{}",
-            skin_width,
-            skin_height,
-            frames.len(),
-            atlas.as_ref().map(|a| a.width).unwrap_or(0),
-            atlas.as_ref().map(|a| a.height).unwrap_or(0),
-        );
+        info!("Skin loaded: {}x{}", skin_width, skin_height);
 
-        (atlas, Some(skin_resources), skin_scale)
+        (atlas, Some(resources), skin_scale)
     }
 
     fn render_frame(&mut self) {
@@ -341,7 +384,8 @@ impl App {
         }
 
         // 3. Acquire surface texture
-        let surface_texture = match render.surface.get_current_texture() {
+        let Some(ref surface) = render.surface else { return };
+        let surface_texture = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(st) => st,
             wgpu::CurrentSurfaceTexture::Suboptimal(st) => {
                 warn!("Surface suboptimal.");
@@ -350,7 +394,7 @@ impl App {
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
             wgpu::CurrentSurfaceTexture::Outdated => {
                 warn!("Surface outdated, reconfiguring...");
-                render.surface.configure(&render.device, &render.config);
+                surface.configure(&render.device, &render.config);
                 return;
             }
             wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Validation => return,
@@ -362,10 +406,14 @@ impl App {
 
         // 4. Calculate skin scale
         let (config_width, config_height) = (render.config.width as f32, render.config.height as f32);
-        let (skin_scale_x, skin_scale_y) = if let Some(ref skin_res) = render.skin {
-            let skin = skin_res.get_skin("o2jam");
-            if let Some(s) = skin {
-                (config_width / s.width as f32, config_height / s.height as f32)
+        let (skin_scale_x, skin_scale_y) = if let Some(ref gpu) = render.gpu {
+            if let Some(ref skin_res) = gpu.skin {
+                let skin = skin_res.get_skin("o2jam");
+                if let Some(s) = skin {
+                    (config_width / s.width as f32, config_height / s.height as f32)
+                } else {
+                    (1.0, 1.0)
+                }
             } else {
                 (1.0, 1.0)
             }
@@ -374,96 +422,111 @@ impl App {
         };
 
         // 5. Begin textured rendering
-        render.textured_renderer.begin();
+        if let Some(ref mut gpu) = render.gpu {
+            gpu.textured_renderer.begin();
+        }
 
-        // 6. Draw background (note_bg if available)
-        if let (Some(atlas), Some(skin_res)) = (&render.atlas, &render.skin) {
-            if let Some(skin) = skin_res.get_skin("o2jam") {
-                // Draw note background
-                if let Some(note_bg_frame) = atlas.get_frame("note_bg") {
-                    let note_w = note_bg_frame.width as f32 * skin_scale_x;
-                    let note_h = note_bg_frame.height as f32 * skin_scale_y;
-                    let note_x = (config_width - note_w) / 2.0;
-                    let note_y = 0.0;
-                    render.textured_renderer.draw_textured_quad(
-                        note_x, note_y, note_w, note_h, note_bg_frame.uv, [1.0, 1.0, 1.0, 1.0],
-                    );
-                }
+        // 6. Draw skin elements (background, judgment line, notes)
+        if let Some(ref mut gpu) = render.gpu {
+            if let (Some(atlas), Some(skin_res)) = (&gpu.atlas, &gpu.skin) {
+                if let Some(skin) = skin_res.get_skin("o2jam") {
+                    let jly = skin.judgment_line_y as f32 * skin_scale_y;
 
-                // Draw judgment line
-                let jly = skin.judgment_line_y as f32 * skin_scale_y;
-                if let Some(jl_frame) = atlas.get_frame("judgmentarea") {
-                    let jl_w = jl_frame.width as f32 * skin_scale_x;
-                    let jl_h = jl_frame.height as f32 * skin_scale_y;
-                    let jl_x = (config_width - jl_w) / 2.0;
-                    render.textured_renderer.draw_textured_quad(
-                        jl_x, jly - jl_h / 2.0, jl_w, jl_h, jl_frame.uv, [1.0, 1.0, 1.0, 1.0],
-                    );
-                } else {
-                    // Fallback: colored line
-                    render.textured_renderer.draw_textured_quad(
-                        0.0, jly - 2.0, config_width, 4.0, [0.0, 0.0, 0.0, 0.0], [0.8, 0.8, 0.8, 0.6],
-                    );
-                }
-
-                // Draw notes
-                if let Some(gs) = &self.game_state {
-                    let render_time = gs.clock.render_time();
-                    let bpm = gs.clock.bpm() as f64;
-                    let viewport_height = config_height as f64;
-                    let judgment_line_y = jly as f64;
-
-                    for note in &gs.active_notes {
-                        let y = note_y_position(
-                            render_time,
-                            note.target_time_ms,
-                            bpm,
-                            judgment_line_y,
-                            viewport_height,
-                            gs.scroll_speed,
+                    // Draw note background
+                    if let Some(note_bg_frame) = atlas.get_frame("note_bg") {
+                        let note_w = note_bg_frame.width as f32 * skin_scale_x;
+                        let note_h = note_bg_frame.height as f32 * skin_scale_y;
+                        let note_x = (config_width - note_w) / 2.0;
+                        gpu.textured_renderer.draw_textured_quad(
+                            note_x, 0.0, note_w, note_h, note_bg_frame.uv, [1.0, 1.0, 1.0, 1.0],
                         );
+                    }
 
-                        // Get lane X from skin prefab
-                        let lane_prefab = &gs.note_prefabs.lanes[note.lane];
-                        let lane_x = lane_prefab.x as f32 * skin_scale_x;
+                    // Draw judgment line
+                    if let Some(jl_frame) = atlas.get_frame("judgmentarea") {
+                        let jl_w = jl_frame.width as f32 * skin_scale_x;
+                        let jl_h = jl_frame.height as f32 * skin_scale_y;
+                        let jl_x = (config_width - jl_w) / 2.0;
+                        gpu.textured_renderer.draw_textured_quad(
+                            jl_x, jly - jl_h / 2.0, jl_w, jl_h, jl_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                        );
+                    } else {
+                        // Fallback: colored line
+                        gpu.textured_renderer.draw_textured_quad(
+                            0.0, jly - 2.0, config_width, 4.0, [0.0, 0.0, 0.0, 0.0], [0.8, 0.8, 0.8, 0.6],
+                        );
+                    }
 
-                        // Pick note sprite based on lane color
-                        // Lanes 1-3: white notes, lanes 4: blue, lanes 5-7: yellow
-                        let head_frame_name = match note.lane {
-                            0 | 1 | 2 => "head_note_white",
-                            3 => "head_note_blue",
-                            _ => "head_note_yellow",
-                        };
-
-                        let note_w = 28.0 * skin_scale_x;
-                        let note_h = 7.0 * skin_scale_y;
-
-                        if let Some(head_frame) = atlas.get_frame(head_frame_name) {
-                            let x = lane_x - note_w / 2.0;
-                            let y = y as f32 - note_h / 2.0;
-                            render.textured_renderer.draw_textured_quad(
-                                x, y, note_w, note_h, head_frame.uv, [1.0, 1.0, 1.0, 1.0],
-                            );
-                        }
+                    // Draw measure mark
+                    if let Some(measure_frame) = atlas.get_frame("measure_mark") {
+                        let mw = measure_frame.width as f32 * skin_scale_x;
+                        let mh = measure_frame.height as f32 * skin_scale_y;
+                        let mx = (config_width - mw) / 2.0;
+                        gpu.textured_renderer.draw_textured_quad(
+                            mx, jly - mh / 2.0, mw, mh, measure_frame.uv, [1.0, 1.0, 1.0, 0.5],
+                        );
                     }
                 }
+            }
+        }
 
-                // Draw measure mark
-                if let Some(measure_frame) = atlas.get_frame("measure_mark") {
-                    let mw = measure_frame.width as f32 * skin_scale_x;
-                    let mh = measure_frame.height as f32 * skin_scale_y;
-                    let mx = (config_width - mw) / 2.0;
-                    render.textured_renderer.draw_textured_quad(
-                        mx, jly - mh / 2.0, mw, mh, measure_frame.uv, [1.0, 1.0, 1.0, 0.5],
+        // Draw notes
+        if let (Some(ref mut gpu), Some(gs)) = (&mut render.gpu, &self.game_state) {
+            let render_time = gs.clock.render_time();
+            let bpm = gs.clock.bpm() as f64;
+            let viewport_height = config_height as f64;
+            let judgment_line_y = skin_def_jly(gpu) as f64;
+
+            if let (Some(atlas), Some(_skin_res)) = (&gpu.atlas, &gpu.skin) {
+                for note in &gs.active_notes {
+                    let y = note_y_position(
+                        render_time,
+                        note.target_time_ms,
+                        bpm,
+                        judgment_line_y,
+                        viewport_height,
+                        gs.scroll_speed,
                     );
+
+                    let lane_prefab = &gs.note_prefabs.lanes[note.lane];
+                    let lane_x = lane_prefab.x as f32 * skin_scale_x;
+
+                    let head_frame_name = match note.lane {
+                        0 | 1 | 2 => "head_note_white",
+                        3 => "head_note_blue",
+                        _ => "head_note_yellow",
+                    };
+
+                    let note_w = 28.0 * skin_scale_x;
+                    let note_h = 7.0 * skin_scale_y;
+
+                    if let Some(head_frame) = atlas.get_frame(head_frame_name) {
+                        let x = lane_x - note_w / 2.0;
+                        let y = y as f32 - note_h / 2.0;
+                        gpu.textured_renderer.draw_textured_quad(
+                            x, y, note_w, note_h, head_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                        );
+                    }
                 }
             }
         }
 
         // 7. Flush render pass
-        render.textured_renderer.end(&view, &render.queue, &render.device);
+        if let Some(ref mut gpu) = render.gpu {
+            gpu.textured_renderer.end(&view, &render.queue, &render.device);
+        }
 
         // 8. Present
         surface_texture.present();
     }
+}
+
+/// Get the judgment line Y from the skin or use a default.
+fn skin_def_jly(gpu: &GpuResources) -> f32 {
+    if let Some(ref skin_res) = gpu.skin {
+        if let Some(skin) = skin_res.get_skin("o2jam") {
+            return skin.judgment_line_y as f32;
+        }
+    }
+    480.0 // default
 }

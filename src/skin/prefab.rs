@@ -64,30 +64,14 @@ impl NotePrefabs {
                     continue;
                 }
 
-                let existing = lanes[lane].get_or_insert(NotePrefab {
+                lanes[lane].get_or_insert(NotePrefab {
                     lane,
                     x: entity.x,
-                    sprite_id: None,
+                    sprite_id: entity.sprite.clone(),
                     head_sprite: None,
                     body_sprite: None,
                     tail_sprite: None,
                 });
-
-                // Long note entities have head/body/tail sprites
-                if let Some(ref head) = entity.head_sprite {
-                    existing.head_sprite = Some(head.clone());
-                }
-                if let Some(ref body) = entity.body_sprite {
-                    existing.body_sprite = Some(body.clone());
-                }
-                if let Some(ref tail) = entity.tail_sprite {
-                    existing.tail_sprite = Some(tail.clone());
-                }
-
-                // Regular note entities have a sprite
-                if let Some(ref sprite) = entity.sprite {
-                    existing.sprite_id = Some(sprite.clone());
-                }
             }
         }
 
@@ -121,7 +105,7 @@ impl NotePrefabs {
     /// Recognizes patterns like `NOTE_1` through `NOTE_7` and
     /// `LONG_NOTE_1` through `LONG_NOTE_7`.
     fn extract_lane_from_note_entity(entity: &EntityDef) -> Option<usize> {
-        let id = &entity.id;
+        let id = entity.id.as_ref()?;
 
         // Try "NOTE_N" where N is 1-7
         if let Some(suffix) = id.strip_prefix("NOTE_") {
@@ -174,28 +158,24 @@ mod tests {
     #[test]
     fn test_extract_lane_from_entity() {
         assert_eq!(NotePrefabs::extract_lane_from_note_entity(&EntityDef {
-            id: "NOTE_1".to_string(),
-            sprite: None, x: 0, y: 0,
-            head_sprite: None, body_sprite: None, tail_sprite: None, layer: 0,
+            id: Some("NOTE_1".to_string()),
+            sprite: None, x: 0, y: 0, layer: 0,
         }), Some(0));
 
         assert_eq!(NotePrefabs::extract_lane_from_note_entity(&EntityDef {
-            id: "NOTE_7".to_string(),
-            sprite: None, x: 0, y: 0,
-            head_sprite: None, body_sprite: None, tail_sprite: None, layer: 0,
+            id: Some("NOTE_7".to_string()),
+            sprite: None, x: 0, y: 0, layer: 0,
         }), Some(6));
 
         assert_eq!(NotePrefabs::extract_lane_from_note_entity(&EntityDef {
-            id: "LONG_NOTE_3".to_string(),
-            sprite: None, x: 0, y: 0,
-            head_sprite: None, body_sprite: None, tail_sprite: None, layer: 0,
+            id: Some("LONG_NOTE_3".to_string()),
+            sprite: None, x: 0, y: 0, layer: 0,
         }), Some(2));
 
         // Non-note entities return None
         assert_eq!(NotePrefabs::extract_lane_from_note_entity(&EntityDef {
-            id: "JUDGMENT_LINE".to_string(),
-            sprite: None, x: 0, y: 0,
-            head_sprite: None, body_sprite: None, tail_sprite: None, layer: 0,
+            id: Some("JUDGMENT_LINE".to_string()),
+            sprite: None, x: 0, y: 0, layer: 0,
         }), None);
     }
 
@@ -209,23 +189,19 @@ mod tests {
         assert_eq!(prefabs.skin_width, 800);
         assert_eq!(prefabs.skin_height, 600);
 
-        // Lane 0 should have NOTE_1 + LONG_NOTE_1 data
+        // Lane 0 should have NOTE_1 entity
         let lane0 = &prefabs.lanes[0];
         assert_eq!(lane0.lane, 0);
         assert_eq!(lane0.x, 100);
         assert_eq!(lane0.sprite_id.as_deref(), Some("note1_sprite"));
-        assert_eq!(lane0.head_sprite.as_deref(), Some("note1_sprite"));
-        assert_eq!(lane0.body_sprite.as_deref(), Some("long_body"));
-        assert_eq!(lane0.tail_sprite.as_deref(), Some("long_tail"));
 
-        // Lane 1 should have NOTE_2 + LONG_NOTE_2 data
+        // Lane 1 should have NOTE_2
         let lane1 = &prefabs.lanes[1];
         assert_eq!(lane1.x, 200);
 
-        // Lane 2 should have NOTE_3 only (no long note)
+        // Lane 2 should have NOTE_3
         let lane2 = &prefabs.lanes[2];
         assert_eq!(lane2.x, 300);
-        assert!(lane2.head_sprite.is_none());
 
         // Lanes 3-6 should have defaults
         for lane in 3..NUM_LANES {
@@ -250,17 +226,15 @@ mod tests {
     fn test_invalid_lane_numbers() {
         // NOTE_8 should be ignored (only 1-7 are valid)
         let entity = EntityDef {
-            id: "NOTE_8".to_string(),
-            sprite: None, x: 0, y: 0,
-            head_sprite: None, body_sprite: None, tail_sprite: None, layer: 0,
+            id: Some("NOTE_8".to_string()),
+            sprite: None, x: 0, y: 0, layer: 0,
         };
         assert!(NotePrefabs::extract_lane_from_note_entity(&entity).is_none());
 
         // NOTE_0 should be ignored
         let entity = EntityDef {
-            id: "NOTE_0".to_string(),
-            sprite: None, x: 0, y: 0,
-            head_sprite: None, body_sprite: None, tail_sprite: None, layer: 0,
+            id: Some("NOTE_0".to_string()),
+            sprite: None, x: 0, y: 0, layer: 0,
         };
         assert!(NotePrefabs::extract_lane_from_note_entity(&entity).is_none());
     }
