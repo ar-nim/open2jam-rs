@@ -17,6 +17,7 @@ use crate::parsing::ojn::TimedEvent;
 use crate::parsing::xml::{parse_file as parse_skin_xml, Resources as SkinResources};
 use crate::render::atlas::SkinAtlas;
 use crate::render::textured_renderer::TexturedRenderer;
+use crate::render::hud::{HudLayout, render_hud};
 
 const SCROLL_SPEED: f64 = 1.0;
 const AUTO_PLAY: bool = true;
@@ -181,7 +182,7 @@ impl ApplicationHandler for App {
                             ElementState::Pressed => {
                                 // Judge the note/long note in this lane
                                 let judged = gs.handle_key_press(lane, 200.0); // 200ms judgment window
-                                if judged {
+                                if judged.is_some() {
                                     info!("Note judged in lane {}", lane);
                                 }
                             }
@@ -423,6 +424,7 @@ impl App {
         if let Some(gs) = &mut self.game_state {
             gs.update(delta_ms);
             gs.spawn_notes();
+            gs.auto_judge_notes(); // Auto-play judgment
             gs.cleanup_notes();
 
             if let Some(audio_mgr) = &mut self.audio {
@@ -710,12 +712,30 @@ impl App {
             }
         }
 
-        // 8. Flush render pass
+        // 8. Draw HUD elements (score, combo, lifebar, judgment popups)
+        // Use separate borrows to avoid conflicting borrows
+        let hud_layout = HudLayout::from_skin();
+        if let Some(gs) = &self.game_state {
+            let render_time = gs.clock.render_time();
+            if let Some(ref mut gpu) = render.gpu {
+                render_hud(
+                    &mut gpu.textured_renderer,
+                    &|name: &str| gpu.atlas.as_ref().and_then(|a| a.get_frame(name)).copied(),
+                    gs,
+                    &hud_layout,
+                    (skin_scale_x, skin_scale_y),
+                    (offset_x, offset_y),
+                    render_time as f64,
+                );
+            }
+        }
+
+        // 9. Flush render pass
         if let Some(ref mut gpu) = render.gpu {
             gpu.textured_renderer.end(&view, &render.queue, &render.device);
         }
 
-        // 9. Present
+        // 10. Present
         surface_texture.present();
     }
 }
