@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use log::{info, warn};
+use log::info;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -40,14 +40,9 @@ struct RenderState {
 
 impl RenderState {
     /// Clean up GPU resources in the correct order to prevent segfaults.
-    /// wgpu resources → surface → device/queue → window.
     fn shutdown(&mut self) {
-        // Drop GPU resources (textures, buffers, bind groups, pipelines)
         self.gpu.take();
-        // Drop surface before window (surface holds a raw window handle)
         self.surface.take();
-        // Poll device to ensure all GPU commands complete
-        // (device/queue/window are dropped by Drop impl in natural order)
         info!("RenderState shutdown complete.");
     }
 }
@@ -84,7 +79,7 @@ impl App {
         if audio_mgr.is_active() {
             info!("Audio manager active.");
         } else {
-            warn!("Audio manager failed to initialise.");
+            info!("Audio manager failed to initialise (running headless).");
         }
         self.audio = Some(audio_mgr);
 
@@ -121,11 +116,11 @@ impl ApplicationHandler for App {
                         self.game_state = Some(gs);
                     }
                     Err(e) => {
-                        warn!("Failed to load game state: {e:?}");
+                        info!("Failed to load game state: {e:?}");
                     }
                 }
             } else {
-                warn!("No OJN file specified — running in demo mode (no notes)");
+                info!("No OJN file specified — running in demo mode (no notes)");
             }
 
             self.last_frame_time = Some(Instant::now());
@@ -147,7 +142,6 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 info!("Close requested, cleaning up...");
-                // Clean up GPU resources in correct order to prevent segfault.
                 if let Some(render) = self.render.as_mut() {
                     render.shutdown();
                 }
@@ -201,8 +195,6 @@ impl App {
         let raw_display_handle = window.display_handle().unwrap().as_raw();
         let raw_window_handle = window.window_handle().unwrap().as_raw();
 
-        // SAFETY: window is stored alongside surface in RenderState,
-        // so handles remain valid for the surface lifetime.
         let surface = unsafe {
             instance
                 .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
@@ -252,7 +244,6 @@ impl App {
         let skin_dir = std::path::Path::new("/home/arnim/projects/o2jam/open2jam-modern/src/resources");
         let (atlas, skin, skin_scale) = Self::load_skin(&device, &queue, skin_dir);
 
-        // Set atlas on textured renderer
         if let Some(ref atlas) = atlas {
             textured_renderer.set_atlas(&device, atlas);
         }
@@ -283,27 +274,27 @@ impl App {
     ) -> (Option<SkinAtlas>, Option<SkinResources>, (f32, f32)) {
         let xml_path = skin_dir.join("resources.xml");
         if !xml_path.exists() {
-            warn!("Skin XML not found at {}", xml_path.display());
+            info!("Skin XML not found at {}", xml_path.display());
             return (None, None, (1.0, 1.0));
         }
 
         let resources = match parse_skin_xml(&xml_path) {
             Ok(r) => r,
             Err(e) => {
-                warn!("Failed to parse skin XML: {e:?}");
+                info!("Failed to parse skin XML: {e:?}");
                 return (None, None, (1.0, 1.0));
             }
         };
 
-        let skin_def = match resources.get_skin("o2jam") {
+        let _skin_def = match resources.get_skin("o2jam") {
             Some(s) => s.clone(),
             None => {
-                warn!("Skin 'o2jam' not found in resources.xml");
+                info!("Skin 'o2jam' not found in resources.xml");
                 return (None, None, (1.0, 1.0));
             }
         };
 
-        // Build atlas from global sprites
+        // Build atlas from global sprites (all sprite definitions in the XML)
         let mut frame_entries: Vec<(String, String, u32, u32, u32, u32)> = Vec::new();
         for (sprite_id, sprite_def) in &resources.sprites {
             for frame in &sprite_def.frames {
@@ -320,42 +311,42 @@ impl App {
 
         info!("Skin has {} sprite frames to pack into atlas", frame_entries.len());
 
-        // Build atlas
         let skin_dir_owned = skin_dir.to_path_buf();
         let atlas = SkinAtlas::from_frames(device, queue, &frame_entries, |file: &str| {
             let path = skin_dir_owned.join(file);
             if !path.exists() {
-                warn!("Skin image not found: {}", path.display());
+                info!("Skin image not found: {}", path.display());
             }
             match image::open(&path) {
                 Ok(img) => Some(img.into_rgba8()),
                 Err(e) => {
-                    warn!("Failed to load skin image {}: {e}", path.display());
+                    info!("Failed to load skin image {}: {e}", path.display());
                     None
                 }
             }
         });
 
-        // Debug: dump atlas frame keys
         if let Some(ref a) = atlas {
-            info!("Atlas built: {} frames in {}x{} texture", a.frames.len(), a.width, a.height);
+            info!(
+                "Atlas built: {} frames in {}x{} texture",
+                a.frames.len(),
+                a.width,
+                a.height
+            );
             for key in &["head_note_white", "head_note_blue", "head_note_yellow", "judgmentarea", "note_bg", "measure_mark"] {
-                match a.get_frame(key) {
-                    Some(f) => info!("  [OK] {} -> uv={:?}, {}x{}", key, f.uv, f.width, f.height),
-                    None => warn!("  [MISSING] {}", key),
+                if let Some(f) = a.get_frame(key) {
+                    info!("  [OK] {} -> uv={:?}, {}x{}", key, f.uv, f.width, f.height);
+                } else {
+                    info!("  [MISSING] {}", key);
                 }
             }
         } else {
-            warn!("Atlas failed to build — using colored quad fallback");
+            info!("Atlas failed to build — using colored quad fallback");
         }
 
-        let skin_width = skin_def.width as f32;
-        let skin_height = skin_def.height as f32;
-        let skin_scale = (1.0, 1.0);
+        info!("Skin loaded: 800x600");
 
-        info!("Skin loaded: {}x{}", skin_width, skin_height);
-
-        (atlas, Some(resources), skin_scale)
+        (atlas, Some(resources), (1.0, 1.0))
     }
 
     fn render_frame(&mut self) {
@@ -367,7 +358,7 @@ impl App {
             let delta = now.duration_since(last);
             (delta.as_micros() as f64 / 1000.0).round() as u64
         } else {
-            16 // first frame: assume ~60fps
+            16
         };
         self.last_frame_time = Some(now);
 
@@ -377,7 +368,6 @@ impl App {
             gs.spawn_notes();
             gs.cleanup_notes();
 
-            // Process audio triggers
             if let Some(audio_mgr) = &mut self.audio {
                 gs.process_audio(audio_mgr);
             }
@@ -388,12 +378,10 @@ impl App {
         let surface_texture = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(st) => st,
             wgpu::CurrentSurfaceTexture::Suboptimal(st) => {
-                warn!("Surface suboptimal.");
                 st
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
             wgpu::CurrentSurfaceTexture::Outdated => {
-                warn!("Surface outdated, reconfiguring...");
                 surface.configure(&render.device, &render.config);
                 return;
             }
@@ -414,8 +402,7 @@ impl App {
         let offset_y = (config_height - skin_h * scale) / 2.0;
         let (skin_scale_x, skin_scale_y) = (scale, scale);
 
-        // Get skin reference for judgment line calculation
-        let skin_judgment_line_y = if let Some(ref gpu) = render.gpu {
+        let skin_judgment_line_y: f32 = if let Some(ref gpu) = render.gpu {
             if let Some(ref skin_res) = gpu.skin {
                 if let Some(s) = skin_res.get_skin("o2jam") {
                     s.judgment_line_y as f32
@@ -438,60 +425,45 @@ impl App {
         if let Some(ref mut gpu) = render.gpu {
             if let (Some(atlas), Some(skin_res)) = (&gpu.atlas, &gpu.skin) {
                 if let Some(skin) = skin_res.get_skin("o2jam") {
-                    // Whitelist of static entity IDs to render in the background pass.
-                    // Effects, counters, notes, and key-press effects are rendered dynamically elsewhere.
-                    // MEASURE_MARK is excluded here - it's drawn once at the judgment line below.
-                    const STATIC_ENTITIES: &[&str] = &[
-                        "BGA",
+                    // Whitelist of static sprite IDs to render in the background pass.
+                    // Many background entities have no XML 'id' attribute, so we match by
+                    // sprite name instead.
+                    const STATIC_SPRITES: &[&str] = &[
+                        "bga10",
                         "note_bg",
                         "dashboard",
                         "lifebar_bg",
                         "timebar",
-                        "JUDGMENT_LINE",
-                        "LIFE_BAR",
-                        "PILL_1", "PILL_2", "PILL_3", "PILL_4", "PILL_5",
-                        "JAM_BAR",
+                        "judgmentarea",
+                        "lifebar",
+                        "pill",
+                        "jam_bar",
                         "static_keyboard",
                     ];
 
-                    // Draw whitelisted entities from the skin XML
                     for entity in &skin.entities {
-                        let id = match &entity.id {
-                            Some(id) => id.as_str(),
-                            None => continue,
-                        };
-
-                        if !STATIC_ENTITIES.contains(&id) {
-                            continue;
-                        }
-
                         let sprite_id = match &entity.sprite {
                             Some(s) => s,
                             None => continue,
                         };
-
-                        // Skip multi-frame animated sprites (comma-separated sprite attribute)
-                        // These need special handling — just use the first frame name
                         let first_sprite = sprite_id.split(',').next().unwrap_or(sprite_id).trim();
+                        if !STATIC_SPRITES.contains(&first_sprite) {
+                            continue;
+                        }
+                        if let Some(atlas_frame) = atlas.get_frame(first_sprite) {
+                            let frame_w = atlas_frame.width as f32 * skin_scale_x;
+                            let frame_h = atlas_frame.height as f32 * skin_scale_y;
+                            let frame_x = offset_x + entity.x as f32 * skin_scale_x;
+                            let frame_y = offset_y + entity.y as f32 * skin_scale_y;
 
-                        // Get atlas frame by sprite ID
-                        let atlas_frame = match atlas.get_frame(first_sprite) {
-                            Some(f) => f,
-                            None => continue,
-                        };
-
-                        let frame_w = atlas_frame.width as f32 * skin_scale_x;
-                        let frame_h = atlas_frame.height as f32 * skin_scale_y;
-                        let frame_x = offset_x + entity.x as f32 * skin_scale_x;
-                        let frame_y = offset_y + entity.y as f32 * skin_scale_y;
-
-                        gpu.textured_renderer.draw_textured_quad(
-                            frame_x, frame_y, frame_w, frame_h,
-                            atlas_frame.uv, [1.0, 1.0, 1.0, 1.0],
-                        );
+                            gpu.textured_renderer.draw_textured_quad(
+                                frame_x, frame_y, frame_w, frame_h,
+                                atlas_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                            );
+                        }
                     }
 
-                    // Draw measure mark once at the judgment line (centered on the game area)
+                    // Draw measure mark once at the judgment line
                     if let Some(measure_frame) = atlas.get_frame("measure_mark") {
                         let mw = measure_frame.width as f32 * skin_scale_x;
                         let mh = measure_frame.height as f32 * skin_scale_y;
@@ -505,7 +477,7 @@ impl App {
             }
         }
 
-        // Draw notes
+        // 7. Draw notes dynamically from game state
         if let (Some(ref mut gpu), Some(gs)) = (&mut render.gpu, &self.game_state) {
             let render_time = gs.clock.render_time();
             let bpm = gs.clock.bpm() as f64;
@@ -546,12 +518,12 @@ impl App {
             }
         }
 
-        // 7. Flush render pass
+        // 8. Flush render pass
         if let Some(ref mut gpu) = render.gpu {
             gpu.textured_renderer.end(&view, &render.queue, &render.device);
         }
 
-        // 8. Present
+        // 9. Present
         surface_texture.present();
     }
 }
