@@ -1,7 +1,7 @@
 //! Textured sprite renderer using the skin atlas texture.
 
 use bytemuck::{Pod, Zeroable};
-use log::{info, warn};
+use log::warn;
 
 use super::atlas::SkinAtlas;
 

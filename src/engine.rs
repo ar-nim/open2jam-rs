@@ -404,21 +404,29 @@ impl App {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // 4. Calculate skin scale
+        // 4. Calculate skin scale and letterbox offset
+        // Scale the 800x600 skin to fit the window while maintaining aspect ratio
         let (config_width, config_height) = (render.config.width as f32, render.config.height as f32);
-        let (skin_scale_x, skin_scale_y) = if let Some(ref gpu) = render.gpu {
+        let skin_w = 800.0f32;
+        let skin_h = 600.0f32;
+        let scale = (config_width / skin_w).min(config_height / skin_h);
+        let offset_x = (config_width - skin_w * scale) / 2.0;
+        let offset_y = (config_height - skin_h * scale) / 2.0;
+        let (skin_scale_x, skin_scale_y) = (scale, scale);
+
+        // Get skin reference for judgment line calculation
+        let skin_judgment_line_y = if let Some(ref gpu) = render.gpu {
             if let Some(ref skin_res) = gpu.skin {
-                let skin = skin_res.get_skin("o2jam");
-                if let Some(s) = skin {
-                    (config_width / s.width as f32, config_height / s.height as f32)
+                if let Some(s) = skin_res.get_skin("o2jam") {
+                    s.judgment_line_y as f32
                 } else {
-                    (1.0, 1.0)
+                    480.0
                 }
             } else {
-                (1.0, 1.0)
+                480.0
             }
         } else {
-            (1.0, 1.0)
+            480.0
         };
 
         // 5. Begin textured rendering
@@ -432,6 +440,7 @@ impl App {
                 if let Some(skin) = skin_res.get_skin("o2jam") {
                     // Whitelist of static entity IDs to render in the background pass.
                     // Effects, counters, notes, and key-press effects are rendered dynamically elsewhere.
+                    // MEASURE_MARK is excluded here - it's drawn once at the judgment line below.
                     const STATIC_ENTITIES: &[&str] = &[
                         "BGA",
                         "note_bg",
@@ -441,7 +450,6 @@ impl App {
                         "JUDGMENT_LINE",
                         "LIFE_BAR",
                         "PILL_1", "PILL_2", "PILL_3", "PILL_4", "PILL_5",
-                        "MEASURE_MARK",
                         "JAM_BAR",
                         "static_keyboard",
                     ];
@@ -474,12 +482,23 @@ impl App {
 
                         let frame_w = atlas_frame.width as f32 * skin_scale_x;
                         let frame_h = atlas_frame.height as f32 * skin_scale_y;
-                        let frame_x = entity.x as f32 * skin_scale_x;
-                        let frame_y = entity.y as f32 * skin_scale_y;
+                        let frame_x = offset_x + entity.x as f32 * skin_scale_x;
+                        let frame_y = offset_y + entity.y as f32 * skin_scale_y;
 
                         gpu.textured_renderer.draw_textured_quad(
                             frame_x, frame_y, frame_w, frame_h,
                             atlas_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                        );
+                    }
+
+                    // Draw measure mark once at the judgment line (centered on the game area)
+                    if let Some(measure_frame) = atlas.get_frame("measure_mark") {
+                        let mw = measure_frame.width as f32 * skin_scale_x;
+                        let mh = measure_frame.height as f32 * skin_scale_y;
+                        let jly = offset_y + skin_judgment_line_y * skin_scale_y;
+                        let mx = offset_x + (skin_w - measure_frame.width as f32) / 2.0 * skin_scale_x;
+                        gpu.textured_renderer.draw_textured_quad(
+                            mx, jly - mh / 2.0, mw, mh, measure_frame.uv, [1.0, 1.0, 1.0, 0.5],
                         );
                     }
                 }
@@ -490,8 +509,8 @@ impl App {
         if let (Some(ref mut gpu), Some(gs)) = (&mut render.gpu, &self.game_state) {
             let render_time = gs.clock.render_time();
             let bpm = gs.clock.bpm() as f64;
-            let viewport_height = config_height as f64;
-            let judgment_line_y = skin_def_jly(gpu) as f64;
+            let viewport_height = skin_h as f64;
+            let judgment_line_y = skin_judgment_line_y as f64;
 
             if let (Some(atlas), Some(_skin_res)) = (&gpu.atlas, &gpu.skin) {
                 for note in &gs.active_notes {
@@ -505,7 +524,7 @@ impl App {
                     );
 
                     let lane_prefab = &gs.note_prefabs.lanes[note.lane];
-                    let lane_x = lane_prefab.x as f32 * skin_scale_x;
+                    let lane_x = offset_x + lane_prefab.x as f32 * skin_scale_x;
 
                     let head_frame_name = match note.lane {
                         0 | 1 | 2 => "head_note_white",
@@ -518,7 +537,7 @@ impl App {
 
                     if let Some(head_frame) = atlas.get_frame(head_frame_name) {
                         let x = lane_x - note_w / 2.0;
-                        let y = y as f32 - note_h / 2.0;
+                        let y = offset_y + y as f32 * skin_scale_y - note_h / 2.0;
                         gpu.textured_renderer.draw_textured_quad(
                             x, y, note_w, note_h, head_frame.uv, [1.0, 1.0, 1.0, 1.0],
                         );
@@ -535,14 +554,4 @@ impl App {
         // 8. Present
         surface_texture.present();
     }
-}
-
-/// Get the judgment line Y from the skin or use a default.
-fn skin_def_jly(gpu: &GpuResources) -> f32 {
-    if let Some(ref skin_res) = gpu.skin {
-        if let Some(skin) = skin_res.get_skin("o2jam") {
-            return skin.judgment_line_y as f32;
-        }
-    }
-    480.0 // default
 }
