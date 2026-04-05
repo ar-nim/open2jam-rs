@@ -1,6 +1,4 @@
 //! Audio manager — oddio mixer hooked to cpal output stream.
-//!
-//! MILESTONE 0: Basic audio initialisation with real-time safe callback.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32};
@@ -9,31 +7,27 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{info, warn};
 use oddio::{Mixer, MixerControl};
 
-/// Stereo frame type for oddio.
 pub type StereoFrame = [f32; 2];
 
-/// Shared audio state between manager and cpal callback.
 pub struct AudioState {
-    /// Output sample rate.
     pub sample_rate: AtomicU32,
-    /// Whether the stream is active.
     pub active: AtomicBool,
 }
 
-/// Audio manager wrapping oddio + cpal.
 pub struct AudioManager {
-    /// oddio mixer control (main thread).
     mixer: Option<MixerControl<StereoFrame>>,
-    /// cpal stream (kept alive).
     _stream: Option<cpal::Stream>,
-    /// Shared state.
     state: Arc<AudioState>,
-    /// Whether initialisation succeeded.
     active: bool,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum AudioPlayError {
+    #[error("AudioManager is not available")]
+    NoManager,
+}
+
 impl AudioManager {
-    /// Create and initialise the audio manager.
     pub fn new() -> Self {
         match Self::init() {
             Ok((mixer, stream, state)) => {
@@ -60,7 +54,6 @@ impl AudioManager {
         }
     }
 
-    /// Initialise oddio + cpal.
     fn init() -> anyhow::Result<(MixerControl<StereoFrame>, cpal::Stream, Arc<AudioState>)> {
         let host = cpal::default_host();
         let device = host
@@ -133,19 +126,33 @@ impl AudioManager {
         Ok((mixer_control, stream, state))
     }
 
-    /// Get the mixer control for playing sounds.
     pub fn mixer(&mut self) -> Option<&mut MixerControl<StereoFrame>> {
         self.mixer.as_mut()
     }
 
-    /// Whether the manager is active.
     pub fn is_active(&self) -> bool {
         self.active
     }
 
-    /// Get shared audio state.
     pub fn state(&self) -> &Arc<AudioState> {
         &self.state
+    }
+
+    pub fn play_frames(
+        &mut self,
+        frames: &Arc<oddio::Frames<[f32; 2]>>,
+        gain: f32,
+        _position: [f32; 3],
+    ) -> Result<(), AudioPlayError> {
+        let mixer = self.mixer.as_mut().ok_or(AudioPlayError::NoManager)?;
+
+        let frames_clone = Arc::clone(frames);
+        let base_signal = oddio::FramesSignal::from(frames_clone);
+        let (_, mut signal) = oddio::Gain::new(base_signal);
+        signal.set_gain(gain);
+
+        mixer.play(signal);
+        Ok(())
     }
 }
 
