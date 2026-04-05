@@ -176,13 +176,14 @@ impl GameState {
     }
 
     /// Remove notes that have passed the judgment line.
+    ///
+    /// Notes are killed immediately once their target time has passed.
+    /// This prevents rendering off-screen notes and frees memory.
     pub fn cleanup_notes(&mut self) {
         let render_time = self.clock.render_time();
-        let kill_tolerance = 500.0; // ms after target before removing
 
         self.active_notes.retain(|note| {
-            let time_since_target = render_time - note.target_time_ms;
-            time_since_target < kill_tolerance
+            note.target_time_ms >= render_time
         });
     }
 
