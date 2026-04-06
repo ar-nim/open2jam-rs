@@ -501,15 +501,16 @@ pub fn draw_jam_bar(
         
         if fill_width > 0.5 {
             // Clip the UV to show only the left portion
+            // UV is [u0, v0, u1, v1], so interpolate u0..u1 by progress
             let uv_u = bar_frame.uv[0];
             let uv_v = bar_frame.uv[1];
-            let uv_w = bar_frame.uv[2] * progress;
-            let uv_h = bar_frame.uv[3];
+            let uv_u1 = uv_u + (bar_frame.uv[2] - uv_u) * progress;
+            let uv_v1 = bar_frame.uv[3];
             
             renderer.draw_textured_quad(
                 bar_x, bar_y,
                 fill_width, bar_h,
-                [uv_u, uv_v, uv_w, uv_h],
+                [uv_u, uv_v, uv_u1, uv_v1],
                 [1.0, 1.0, 1.0, 1.0],
             );
         }
