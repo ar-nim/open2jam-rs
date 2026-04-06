@@ -517,7 +517,8 @@ pub fn draw_jam_bar(
     }
 }
 
-/// Draw pill indicators. Pills are shown for every 30 combo achieved.
+/// Draw pill indicators. Pills increment every 15 consecutive Cools (max 5).
+/// PILL_1 through PILL_5 entities are drawn at their XML entity positions.
 pub fn draw_pills(
     renderer: &mut TexturedRenderer,
     get_frame: &dyn Fn(&str) -> Option<AtlasFrame>,
