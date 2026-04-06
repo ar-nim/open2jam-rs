@@ -5,7 +5,7 @@
 
 use crate::game_state::{GameState, PendingJudgment};
 use crate::gameplay::judgment::JudgmentType;
-use crate::render::atlas::AtlasFrame;
+use crate::render::atlas::{AtlasFrame, SkinAtlas};
 use crate::render::textured_renderer::TexturedRenderer;
 
 /// HUD skin entity positions extracted from skin XML.
@@ -334,23 +334,28 @@ pub fn draw_max_combo(
 
 /// Draw the combo counter using skin XML entity positions.
 /// COMBO_COUNTER: x="99" y="210" - centered position (same as jam counter).
+///
+/// Animation: Drops 10px on increment, slides back up in 20ms.
+/// Visible for 4s total, then hidden until next combo.
 pub fn draw_combo(
     renderer: &mut TexturedRenderer,
     get_frame: &dyn Fn(&str) -> Option<AtlasFrame>,
     combo: u32,
+    combo_y: f32,
+    combo_visible: bool,
     layout: &HudLayout,
     skin_scale: (f32, f32),
     offset: (f32, f32),
 ) {
-    if combo == 0 {
+    if combo == 0 || !combo_visible {
         return;
     }
-    
+
     let (sx, sy) = skin_scale;
     let (ox, oy) = offset;
     let cx = ox + layout.combo_x * sx; // center X (same alignment as jam counter)
-    let cy = oy + layout.combo_y * sy;
-    
+    let cy = oy + combo_y * sy; // Use animated Y position
+
     draw_number_centered(
         renderer,
         &|d| get_frame(&format!("combo_number_{}", d)),
@@ -361,7 +366,29 @@ pub fn draw_combo(
         [1.0, 1.0, 1.0, 1.0],
     );
 
-    // Draw "COMBO" title centered above the combo number
+    // NOTE: COMBO title is drawn separately with its own visibility timer
+}
+
+/// Draw the combo title using skin XML entity positions.
+/// COMBO_TITLE visibility: 2 seconds timeout.
+pub fn draw_combo_title(
+    renderer: &mut TexturedRenderer,
+    get_frame: &dyn Fn(&str) -> Option<AtlasFrame>,
+    combo: u32,
+    combo_y: f32,
+    layout: &HudLayout,
+    skin_scale: (f32, f32),
+    offset: (f32, f32),
+) {
+    if combo == 0 {
+        return;
+    }
+
+    let (sx, sy) = skin_scale;
+    let (ox, oy) = offset;
+    let cx = ox + layout.combo_x * sx;
+    let cy = oy + combo_y * sy;
+
     if let Some(title_frame) = get_frame("combo_title") {
         renderer.draw_textured_quad(
             cx - (title_frame.width as f32 * sx) / 2.0,
@@ -550,6 +577,8 @@ pub fn draw_pills(
 
 /// Draw judgment popup (COOL/GOOD/BAD/MISS text at judgment line).
 /// EFFECT_JUDGMENT_COOL: x="30" y="280", sprite is 128x128 pixels
+///
+/// Animation: Pop-in from 50%→100% scale over first 100ms, then full size for 3s.
 pub fn draw_judgment_popup(
     renderer: &mut TexturedRenderer,
     get_frame: &dyn Fn(&str) -> Option<AtlasFrame>,
@@ -565,28 +594,41 @@ pub fn draw_judgment_popup(
         JudgmentType::Bad => "judgment_bad",
         JudgmentType::Miss => "judgment_miss",
     };
-    
+
     let (sx, sy) = skin_scale;
     let (ox, oy) = offset;
-    
-    // Position at the judgment popup entity position from skin XML
-    let x = ox + layout.judgment_popup_x * sx;
-    let y = oy + layout.judgment_popup_y * sy;
-    
+
+    // Get animation values
+    let scale = judgment.scale_factor(current_time_ms) as f32;
+    let alpha = judgment.alpha(current_time_ms) as f32;
+    let elapsed = current_time_ms - judgment.time_created_ms;
+
+    // DEBUG: Log first few frames of each judgment to verify animation
+    if elapsed < 150.0 && elapsed >= 0.0 {
+        log::info!(
+            "JUDGMENT {:?} elapsed={:.1}ms scale={:.3} alpha={:.3}",
+            judgment.judgment_type, elapsed, scale, alpha
+        );
+    }
+
+    if alpha < 0.01 {
+        return;
+    }
+
+    // Base position from skin XML
+    let base_x = ox + layout.judgment_popup_x * sx;
+    let base_y = oy + layout.judgment_popup_y * sy;
+
     if let Some(frame) = get_frame(sprite_name) {
-        // Calculate alpha based on time remaining
-        let elapsed = current_time_ms - judgment.time_created_ms;
-        let alpha = (1.0 - elapsed / judgment.duration_ms).clamp(0.0, 1.0) as f32;
-        
-        if alpha > 0.01 {
-            renderer.draw_textured_quad(
-                x, y,
-                frame.width as f32 * sx,
-                frame.height as f32 * sy,
-                frame.uv,
-                [1.0, 1.0, 1.0, alpha],
-            );
-        }
+        // Scaled dimensions
+        let w = frame.width as f32 * sx * scale;
+        let h = frame.height as f32 * sy * scale;
+
+        // Center the scaled sprite around the base position
+        let x = base_x + (frame.width as f32 * sx - w) / 2.0;
+        let y = base_y + (frame.height as f32 * sy - h) / 2.0;
+
+        renderer.draw_textured_quad(x, y, w, h, frame.uv, [1.0, 1.0, 1.0, alpha]);
     }
 }
 
@@ -631,7 +673,21 @@ pub fn draw_judgment_counts(
         miss, mx, my, 1.0 * sx, sx, sy, [1.0, 1.0, 1.0, 1.0]);
 }
 
-/// Draw all HUD elements in the correct order.
+/// Resolve a sprite frame, using animation if available.
+fn resolve_frame(atlas: Option<&SkinAtlas>, sprite_id: &str, time_ms: f64) -> Option<AtlasFrame> {
+    if let Some(a) = atlas {
+        // Try animated sprite first (for sprites with multiple frames)
+        if let Some(animated_frame) = a.get_frame_at_time(sprite_id, time_ms) {
+            return Some(animated_frame);
+        }
+        // Fall back to single frame
+        a.get_frame(sprite_id).copied()
+    } else {
+        None
+    }
+}
+
+/// Draw all HUD elements in the correct order, with animation support.
 /// Call this after rendering notes but before flushing.
 pub fn render_hud(
     renderer: &mut TexturedRenderer,
@@ -642,28 +698,65 @@ pub fn render_hud(
     offset: (f32, f32),
     current_time_ms: f64,
 ) {
+    render_hud_with_atlas(
+        renderer, None, game_state, layout, skin_scale, offset, current_time_ms,
+    )
+}
+
+/// Draw all HUD elements with atlas-based animation support.
+pub fn render_hud_with_atlas(
+    renderer: &mut TexturedRenderer,
+    atlas: Option<&SkinAtlas>,
+    game_state: &GameState,
+    layout: &HudLayout,
+    skin_scale: (f32, f32),
+    offset: (f32, f32),
+    current_time_ms: f64,
+) {
     let stats = &game_state.stats;
-    
+
+    // Create a closure that resolves sprite IDs with animation support
+    let get_frame = |sprite_id: &str| resolve_frame(atlas, sprite_id, current_time_ms);
+
     // 1. Draw static/background elements first
-    draw_lifebar(renderer, get_frame, stats.life_percent(), layout, skin_scale, offset);
-    draw_jam_bar(renderer, get_frame, stats.jam_counter, layout, skin_scale, offset);
-    draw_pills(renderer, get_frame, stats.pill_count, layout, skin_scale, offset);
-    
+    draw_lifebar(renderer, &get_frame, stats.life_percent(), layout, skin_scale, offset);
+    draw_jam_bar(renderer, &get_frame, stats.jam_counter, layout, skin_scale, offset);
+    draw_pills(renderer, &get_frame, stats.pill_count, layout, skin_scale, offset);
+
     // 2. Draw counters
-    draw_score(renderer, get_frame, stats.score, layout, skin_scale, offset);
-    draw_combo(renderer, get_frame, stats.combo, layout, skin_scale, offset);
-    draw_jam_counter(renderer, get_frame, stats.jam_combo, layout, skin_scale, offset);
-    draw_max_combo(renderer, get_frame, stats.max_combo, layout, skin_scale, offset);
+    draw_score(renderer, &get_frame, stats.score, layout, skin_scale, offset);
+    draw_combo(
+        renderer, &get_frame, stats.combo,
+        game_state.combo_counter.current_y(),
+        game_state.combo_counter.visible,
+        layout, skin_scale, offset,
+    );
+    // Combo title: only visible for 2 seconds after combo changes
+    if game_state.is_combo_title_visible() {
+        draw_combo_title(
+            renderer, &get_frame, stats.combo,
+            game_state.combo_counter.current_y(),
+            layout, skin_scale, offset,
+        );
+    }
+    // Jam counter: only visible for 1 second after jam combo increases
+    if game_state.is_jam_counter_visible() {
+        draw_jam_counter(renderer, &get_frame, stats.jam_combo, layout, skin_scale, offset);
+    }
+    // Max combo: only visible for 2 seconds after max combo increases
+    if game_state.is_max_combo_counter_visible() {
+        draw_max_combo(renderer, &get_frame, stats.max_combo, layout, skin_scale, offset);
+    }
     draw_judgment_counts(
-        renderer, get_frame,
+        renderer, &get_frame,
         stats.cool_count, stats.good_count, stats.bad_count, stats.miss_count,
         layout, skin_scale, offset,
     );
-    
+
     // 3. Draw active judgment popups
     for judgment in &game_state.pending_judgments {
         draw_judgment_popup(
-            renderer, get_frame,
+            renderer, &get_frame,
             judgment, current_time_ms as f64,
             layout, skin_scale, offset,
         );

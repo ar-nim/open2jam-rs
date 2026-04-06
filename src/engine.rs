@@ -1,5 +1,6 @@
 //! Frame orchestrator — winit event loop, wgpu device, oddio mixer, game loop.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -17,7 +18,7 @@ use crate::parsing::ojn::TimedEvent;
 use crate::parsing::xml::{parse_file as parse_skin_xml, Resources as SkinResources};
 use crate::render::atlas::SkinAtlas;
 use crate::render::textured_renderer::TexturedRenderer;
-use crate::render::hud::{HudLayout, render_hud};
+use crate::render::hud::{HudLayout, render_hud_with_atlas};
 
 const SCROLL_SPEED: f64 = 1.0;
 const AUTO_PLAY: bool = true;
@@ -339,8 +340,11 @@ impl App {
         };
 
         // Build atlas from global sprites (all sprite definitions in the XML)
+        // Collect frame_speed map for animated sprites
+        let mut sprite_speeds: HashMap<String, u32> = HashMap::new();
         let mut frame_entries: Vec<(String, String, u32, u32, u32, u32)> = Vec::new();
         for (sprite_id, sprite_def) in &resources.sprites {
+            sprite_speeds.insert(sprite_id.clone(), sprite_def.frame_speed_ms);
             for frame in &sprite_def.frames {
                 frame_entries.push((
                     sprite_id.clone(),
@@ -356,19 +360,24 @@ impl App {
         info!("Skin has {} sprite frames to pack into atlas", frame_entries.len());
 
         let skin_dir_owned = skin_dir.to_path_buf();
-        let atlas = SkinAtlas::from_frames(device, queue, &frame_entries, |file: &str| {
-            let path = skin_dir_owned.join(file);
-            if !path.exists() {
-                info!("Skin image not found: {}", path.display());
-            }
-            match image::open(&path) {
-                Ok(img) => Some(img.into_rgba8()),
-                Err(e) => {
-                    info!("Failed to load skin image {}: {e}", path.display());
-                    None
+        let speed_map = sprite_speeds;
+        let atlas = SkinAtlas::from_frames_with_speed(
+            device, queue, &frame_entries,
+            |sprite_id: &str| *speed_map.get(sprite_id).unwrap_or(&50),
+            |file: &str| {
+                let path = skin_dir_owned.join(file);
+                if !path.exists() {
+                    info!("Skin image not found: {}", path.display());
                 }
-            }
-        });
+                match image::open(&path) {
+                    Ok(img) => Some(img.into_rgba8()),
+                    Err(e) => {
+                        info!("Failed to load skin image {}: {e}", path.display());
+                        None
+                    }
+                }
+            },
+        );
 
         if let Some(ref a) = atlas {
             info!(
@@ -421,10 +430,37 @@ impl App {
 
         // 2. Advance game state
         if let Some(gs) = &mut self.game_state {
+            let prev_combo = gs.stats.combo;
+            let prev_jam_combo = gs.stats.jam_combo;
+            let prev_max_combo = gs.stats.max_combo;
             gs.update(delta_ms);
+            gs.combo_counter.update(delta_ms as f64);
             gs.spawn_notes();
             gs.auto_judge_notes(); // Auto-play judgment
             gs.cleanup_notes();
+
+            // Trigger combo counter animation when combo increases
+            if gs.stats.combo > prev_combo {
+                gs.combo_counter.increment();
+                // Only show combo title/max combo when starting a new combo streak (combo was 0)
+                if prev_combo == 0 {
+                    gs.show_combo_title();
+                    gs.show_max_combo_counter();
+                }
+            } else if gs.stats.combo == 0 && prev_combo > 0 {
+                gs.combo_counter.reset();
+            }
+
+            // Show jam counter when jam combo increases
+            if gs.stats.jam_combo > prev_jam_combo {
+                gs.show_jam_counter();
+            }
+
+            // Show max combo when max combo increases (new high score)
+            if gs.stats.max_combo > prev_max_combo {
+                gs.show_max_combo_counter();
+                gs.show_combo_title();
+            }
 
             if let Some(audio_mgr) = &mut self.audio {
                 gs.process_audio(audio_mgr);
@@ -530,8 +566,9 @@ impl App {
             let judgment_line_y = skin_judgment_line_y as f64;
 
             if let (Some(atlas), Some(_skin_res)) = (&gpu.atlas, &gpu.skin) {
-                // Draw measure marks scrolling with the notes
-                if let Some(measure_frame) = atlas.get_frame("measure_mark") {
+                // Draw measure marks scrolling with the notes (animated)
+                if let Some(measure_frame) = atlas.get_frame_at_time("measure_mark", render_time as f64)
+                    .or_else(|| atlas.get_frame("measure_mark").copied()) {
                     let mw = measure_frame.width as f32 * skin_scale_x;
                     let mh = measure_frame.height as f32 * skin_scale_y;
 
@@ -588,7 +625,10 @@ impl App {
                         }
                     });
 
-                    if let Some(head_frame) = atlas.get_frame(head_frame_name) {
+                    // Use animated frame if available, fall back to static frame
+                    let head_frame = atlas.get_frame_at_time(head_frame_name, render_time as f64)
+                        .or_else(|| atlas.get_frame(head_frame_name).copied());
+                    if let Some(head_frame) = head_frame {
                         let note_w = head_frame.width as f32 * skin_scale_x;
                         let note_h = head_frame.height as f32 * skin_scale_y;
                         let x = lane_x; // Left edge aligned with receptor (entity.x is left edge in skin XML)
@@ -717,9 +757,10 @@ impl App {
         if let Some(gs) = &self.game_state {
             let render_time = gs.clock.render_time();
             if let Some(ref mut gpu) = render.gpu {
-                render_hud(
+                let atlas_ref = gpu.atlas.as_ref();
+                render_hud_with_atlas(
                     &mut gpu.textured_renderer,
-                    &|name: &str| gpu.atlas.as_ref().and_then(|a| a.get_frame(name)).copied(),
+                    atlas_ref,
                     gs,
                     &hud_layout,
                     (skin_scale_x, skin_scale_y),

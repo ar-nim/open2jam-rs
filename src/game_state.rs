@@ -207,14 +207,21 @@ impl GameStats {
 }
 
 /// A pending judgment result to be visualized.
+///
+/// Animation behavior (matches Java open2jam):
+/// - Pop-in: scales from 50%→100% over first 100ms
+/// - Stays at full size for 3s total
+/// - Disappears after 3s
 #[derive(Debug, Clone)]
 pub struct PendingJudgment {
     pub judgment_type: JudgmentType,
     pub lane: usize,
     /// Time when the judgment was made (for animation timing)
     pub time_created_ms: f64,
-    /// How long the judgment should be displayed (in ms)
+    /// Total duration the judgment is displayed (2000ms)
     pub duration_ms: f64,
+    /// Pop-in duration (100ms for 50%→100% scale)
+    pub pop_in_ms: f64,
 }
 
 impl PendingJudgment {
@@ -223,13 +230,107 @@ impl PendingJudgment {
             judgment_type,
             lane,
             time_created_ms: time_ms,
-            duration_ms: 800.0,
+            duration_ms: 750.0,
+            pop_in_ms: 100.0,
         }
     }
 
     /// Check if this judgment is still visible.
     pub fn is_active(&self, current_time_ms: f64) -> bool {
         (current_time_ms - self.time_created_ms) < self.duration_ms
+    }
+
+    /// Get the current scale factor (0.5→1.0 during pop-in, then 1.0).
+    pub fn scale_factor(&self, current_time_ms: f64) -> f64 {
+        let elapsed = current_time_ms - self.time_created_ms;
+        if elapsed < self.pop_in_ms {
+            // Pop-in: 50%→100% over first 100ms
+            0.5 + (elapsed / self.pop_in_ms) * 0.5
+        } else {
+            1.0
+        }
+    }
+
+    /// Get the current alpha (1.0 until near end, then fades).
+    pub fn alpha(&self, current_time_ms: f64) -> f64 {
+        let elapsed = current_time_ms - self.time_created_ms;
+        let remaining = self.duration_ms - elapsed;
+        // Fade out in last 200ms
+        if remaining < 200.0 {
+            (remaining / 200.0).clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
+    }
+}
+
+/// Combo counter entity with wobble animation.
+///
+/// Animation behavior (matches Java open2jam):
+/// - On increment: drops 10px, slides back up in 20ms
+/// - Visible for 4s total, then hidden until next combo
+#[derive(Debug, Clone)]
+pub struct ComboCounterState {
+    /// Current combo number
+    pub number: u32,
+    /// Base Y position (skin coords)
+    pub base_y: f32,
+    /// Current Y offset from base (for wobble)
+    pub y_offset: f32,
+    /// Visibility timer (counts down from 4000ms)
+    pub show_time_ms: f64,
+    /// Whether the counter is currently visible
+    pub visible: bool,
+}
+
+impl ComboCounterState {
+    pub fn new(base_y: f32) -> Self {
+        Self {
+            number: 0,
+            base_y,
+            y_offset: 0.0,
+            show_time_ms: 0.0,
+            visible: false,
+        }
+    }
+
+    /// Increment combo and trigger wobble animation.
+    pub fn increment(&mut self) {
+        self.number += 1;
+        self.y_offset = 10.0; // Drop 10px
+        self.show_time_ms = 750.0;
+        self.visible = true;
+    }
+
+    /// Reset combo to 0 and hide.
+    pub fn reset(&mut self) {
+        self.number = 0;
+        self.show_time_ms = 0.0;
+        self.visible = false;
+        self.y_offset = 0.0;
+    }
+
+    /// Update animation state.
+    pub fn update(&mut self, delta_ms: f64) {
+        if self.show_time_ms > 0.0 {
+            self.show_time_ms -= delta_ms;
+            if self.show_time_ms <= 0.0 {
+                self.visible = false;
+            }
+        }
+
+        // Slide back up: -0.5px per ms (10px / 20ms = 0.5px/ms)
+        if self.y_offset > 0.0 {
+            self.y_offset -= delta_ms as f32 * 0.5;
+            if self.y_offset < 0.0 {
+                self.y_offset = 0.0;
+            }
+        }
+    }
+
+    /// Get current Y position (base + offset).
+    pub fn current_y(&self) -> f32 {
+        self.base_y + self.y_offset
     }
 }
 
@@ -256,6 +357,14 @@ pub struct GameState {
     pub stats: GameStats,
     /// Pending judgment results to visualize
     pub pending_judgments: Vec<PendingJudgment>,
+    /// Combo counter with wobble animation
+    pub combo_counter: ComboCounterState,
+    /// Jam counter visibility timer (ms remaining, 0 = hidden)
+    pub jam_counter_visible_ms: f64,
+    /// Max combo counter visibility timer (ms remaining, 0 = hidden)
+    pub max_combo_counter_visible_ms: f64,
+    /// Combo title visibility timer (ms remaining, 0 = hidden)
+    pub combo_title_visible_ms: f64,
 }
 
 impl GameState {
@@ -359,12 +468,67 @@ impl GameState {
             spawn_lead_time_ms,
             stats,
             pending_judgments: Vec::new(),
+            combo_counter: ComboCounterState::new(210.0), // COMBO_COUNTER y="210"
+            jam_counter_visible_ms: 0.0,
+            max_combo_counter_visible_ms: 0.0,
+            combo_title_visible_ms: 0.0,
         })
     }
 
     /// Advance the game clock and process events.
     pub fn update(&mut self, delta_ms: u64) {
         self.clock.advance_game_time(delta_ms);
+
+        // Update visibility timers (count down)
+        let delta = delta_ms as f64;
+        if self.jam_counter_visible_ms > 0.0 {
+            self.jam_counter_visible_ms -= delta;
+            if self.jam_counter_visible_ms < 0.0 {
+                self.jam_counter_visible_ms = 0.0;
+            }
+        }
+        if self.max_combo_counter_visible_ms > 0.0 {
+            self.max_combo_counter_visible_ms -= delta;
+            if self.max_combo_counter_visible_ms < 0.0 {
+                self.max_combo_counter_visible_ms = 0.0;
+            }
+        }
+        if self.combo_title_visible_ms > 0.0 {
+            self.combo_title_visible_ms -= delta;
+            if self.combo_title_visible_ms < 0.0 {
+                self.combo_title_visible_ms = 0.0;
+            }
+        }
+    }
+
+    /// Show jam counter for 750ms.
+    pub fn show_jam_counter(&mut self) {
+        self.jam_counter_visible_ms = 750.0;
+    }
+
+    /// Show max combo counter for 750ms.
+    pub fn show_max_combo_counter(&mut self) {
+        self.max_combo_counter_visible_ms = 750.0;
+    }
+
+    /// Show combo title for 750ms.
+    pub fn show_combo_title(&mut self) {
+        self.combo_title_visible_ms = 750.0;
+    }
+
+    /// Check if jam counter is visible.
+    pub fn is_jam_counter_visible(&self) -> bool {
+        self.jam_counter_visible_ms > 0.0
+    }
+
+    /// Check if max combo counter is visible.
+    pub fn is_max_combo_counter_visible(&self) -> bool {
+        self.max_combo_counter_visible_ms > 0.0
+    }
+
+    /// Check if combo title is visible.
+    pub fn is_combo_title_visible(&self) -> bool {
+        self.combo_title_visible_ms > 0.0
     }
 
     /// Spawn notes that are within the spawn window.
@@ -446,6 +610,19 @@ impl GameState {
         )
     }
 
+    /// Clear all pending judgments (original O2Jam behavior: instant replace).
+    /// When a new judgment spawns, the previous one is immediately killed.
+    pub fn clear_pending_judgments(&mut self) {
+        self.pending_judgments.clear();
+    }
+
+    /// Add a new pending judgment, clearing all previous ones first (instant replace).
+    pub fn add_pending_judgment(&mut self, judgment: PendingJudgment) {
+        // Original O2Jam behavior: kill previous judgment entity immediately
+        self.clear_pending_judgments();
+        self.pending_judgments.push(judgment);
+    }
+
     /// Auto-play judgment: automatically judge all notes that have reached the judgment line.
     /// In auto-play mode, all notes are judged as COOL.
     pub fn auto_judge_notes(&mut self) {
@@ -455,6 +632,9 @@ impl GameState {
 
         let render_time = self.clock.render_time() as f64;
         let bpm = self.clock.bpm() as f64;
+
+        // Collect judgments to add after iteration (avoid borrow conflicts)
+        let mut judgments_to_add: Vec<PendingJudgment> = Vec::new();
 
         // Judge tap notes that have reached the judgment line
         // Use a wider tolerance for auto-play to ensure all notes are hit
@@ -469,7 +649,8 @@ impl GameState {
                     
                     self.stats.record_judgment(JudgmentType::Cool, false);
                     
-                    self.pending_judgments.push(PendingJudgment::new(
+                    // Instant replace: clear previous judgments, add new one
+                    judgments_to_add.push(PendingJudgment::new(
                         JudgmentType::Cool,
                         note.lane,
                         render_time,
@@ -485,7 +666,8 @@ impl GameState {
                     note.missed = true;
                     note.judgment_type = Some(JudgmentType::Miss);
                     self.stats.record_judgment(JudgmentType::Miss, false);
-                    self.pending_judgments.push(PendingJudgment::new(
+                    // Instant replace: clear previous judgments, add new one
+                    judgments_to_add.push(PendingJudgment::new(
                         JudgmentType::Miss,
                         note.lane,
                         render_time,
@@ -503,7 +685,8 @@ impl GameState {
                     long_note.head_judgment = Some(JudgmentType::Cool);
                     long_note.holding = true;
                     self.stats.record_judgment(JudgmentType::Cool, false);
-                    self.pending_judgments.push(PendingJudgment::new(
+                    // Instant replace: clear previous judgments, add new one
+                    judgments_to_add.push(PendingJudgment::new(
                         JudgmentType::Cool,
                         long_note.lane,
                         render_time,
@@ -523,7 +706,8 @@ impl GameState {
                         let release_judgment = judge_release(time_diff, bpm);
                         long_note.tail_judgment = Some(release_judgment);
                         self.stats.record_judgment(release_judgment, false);
-                        self.pending_judgments.push(PendingJudgment::new(
+                        // Instant replace: clear previous judgments, add new one
+                        judgments_to_add.push(PendingJudgment::new(
                             release_judgment,
                             long_note.lane,
                             render_time,
@@ -532,7 +716,8 @@ impl GameState {
                         // Player released early or never held - auto-miss
                         long_note.tail_judgment = Some(JudgmentType::Miss);
                         self.stats.record_judgment(JudgmentType::Miss, false);
-                        self.pending_judgments.push(PendingJudgment::new(
+                        // Instant replace: clear previous judgments, add new one
+                        judgments_to_add.push(PendingJudgment::new(
                             JudgmentType::Miss,
                             long_note.lane,
                             render_time,
@@ -543,14 +728,27 @@ impl GameState {
             }
         }
 
+        // Add all judgments (instant replace: only the last one survives)
+        if !judgments_to_add.is_empty() {
+            // Clear all previous, add only the last judgment
+            self.clear_pending_judgments();
+            if let Some(last) = judgments_to_add.pop() {
+                self.pending_judgments.push(last);
+            }
+        }
+
         // Clean up dead pending judgments
         self.pending_judgments.retain(|j| j.is_active(render_time));
     }
 
     /// Handle key press for a lane.
+    /// Uses instant-replace behavior: new judgment kills previous one immediately.
     pub fn handle_key_press(&mut self, lane: usize, _judgment_window_ms: f64) -> Option<JudgmentType> {
         let render_time = self.clock.render_time() as f64;
         let bpm = self.clock.bpm() as f64;
+        
+        // Collect judgment data during iteration, add after to avoid borrow conflicts
+        let mut judgment_result: Option<(JudgmentType, bool)> = None; // (judgment, is_long_note)
         
         // Try to judge long note first
         for long_note in &mut self.active_long_notes {
@@ -562,40 +760,49 @@ impl GameState {
                     long_note.judged = true;
                     long_note.holding = true;
                     long_note.head_judgment = Some(judgment);
-                    self.stats.record_judgment(judgment, false);
-                    self.pending_judgments.push(PendingJudgment::new(
-                        judgment, lane, render_time));
-                    return Some(judgment);
+                    judgment_result = Some((judgment, true));
+                    break;
                 }
             }
         }
         
-        // Try to judge tap note
-        for note in &mut self.active_notes {
-            if note.lane == lane && !note.judged && !note.missed {
-                let time_diff = (render_time - note.target_time_ms).abs();
-                let bad_window = 60000.0 / bpm * 0.13021;
-                if time_diff <= bad_window {
-                    let judgment = judge_tap_note(time_diff, bpm);
-                    note.judged = true;
-                    note.judgment_type = Some(judgment);
-                    self.stats.record_judgment(judgment, false);
-                    self.pending_judgments.push(PendingJudgment::new(
-                        judgment, lane, render_time));
-                    return Some(judgment);
+        // Try to judge tap note if no long note was judged
+        if judgment_result.is_none() {
+            for note in &mut self.active_notes {
+                if note.lane == lane && !note.judged && !note.missed {
+                    let time_diff = (render_time - note.target_time_ms).abs();
+                    let bad_window = 60000.0 / bpm * 0.13021;
+                    if time_diff <= bad_window {
+                        let judgment = judge_tap_note(time_diff, bpm);
+                        note.judged = true;
+                        note.judgment_type = Some(judgment);
+                        judgment_result = Some((judgment, false));
+                        break;
+                    }
                 }
             }
+        }
+        
+        // Apply judgment after iteration (avoid borrow conflicts)
+        if let Some((judgment, _is_long)) = judgment_result {
+            self.stats.record_judgment(judgment, false);
+            self.add_pending_judgment(PendingJudgment::new(judgment, lane, render_time));
+            return Some(judgment);
         }
         
         None
     }
 
     /// Handle key release for a lane.
+    /// Uses instant-replace behavior: new judgment kills previous one immediately.
     /// Evaluates the release timing against the long note's tail time.
     /// Returns the release judgment type, or None if no long note was released.
     pub fn handle_key_release(&mut self, lane: usize) -> Option<JudgmentType> {
         let render_time = self.clock.render_time() as f64;
         let bpm = self.clock.bpm() as f64;
+
+        // Collect release data during iteration, add after to avoid borrow conflicts
+        let mut release_result: Option<(JudgmentType, bool)> = None; // (judgment, was_miss)
 
         for long_note in &mut self.active_long_notes {
             if long_note.lane == lane && long_note.holding {
@@ -605,12 +812,7 @@ impl GameState {
                 if let Some(head_judgment) = long_note.head_judgment {
                     if head_judgment.breaks_combo() {
                         long_note.tail_judgment = Some(JudgmentType::Miss);
-                        self.stats.record_judgment(JudgmentType::Miss, false);
-                        self.pending_judgments.push(PendingJudgment::new(
-                            JudgmentType::Miss,
-                            long_note.lane,
-                            render_time,
-                        ));
+                        release_result = Some((JudgmentType::Miss, true));
                         return Some(JudgmentType::Miss);
                     }
                 }
@@ -620,16 +822,18 @@ impl GameState {
                 let release_judgment = judge_release(time_diff, bpm);
 
                 long_note.tail_judgment = Some(release_judgment);
-                self.stats.record_judgment(release_judgment, false);
-                self.pending_judgments.push(PendingJudgment::new(
-                    release_judgment,
-                    long_note.lane,
-                    render_time,
-                ));
-
-                return Some(release_judgment);
+                release_result = Some((release_judgment, false));
+                break;
             }
         }
+
+        // Apply release judgment after iteration (avoid borrow conflicts)
+        if let Some((judgment, was_miss)) = release_result {
+            self.stats.record_judgment(judgment, false);
+            self.add_pending_judgment(PendingJudgment::new(judgment, lane, render_time));
+            return Some(judgment);
+        }
+
         None
     }
 
