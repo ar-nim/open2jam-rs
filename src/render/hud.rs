@@ -643,7 +643,7 @@ pub fn render_hud(
     
     // 1. Draw static/background elements first
     draw_lifebar(renderer, get_frame, stats.life_percent(), layout, skin_scale, offset);
-    draw_jam_bar(renderer, get_frame, stats.jam_counter, layout, skin_scale, offset);
+    draw_jam_bar(renderer, get_frame, stats.jam_bar_progress, layout, skin_scale, offset);
     draw_pills(renderer, get_frame, stats.pill_count, layout, skin_scale, offset);
     
     // 2. Draw counters

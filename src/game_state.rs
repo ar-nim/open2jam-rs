@@ -79,6 +79,8 @@ pub struct GameStats {
     pub max_life: i32,
     /// Number of pills/buffers collected (1 per 15 consecutive Cools, max 5)
     pub pill_count: u32,
+    /// Jam bar progress for HUD visual: 0-100, fills from note 1
+    pub jam_bar_progress: u32,
     /// Total number of playable notes in the chart
     pub total_notes: u32,
     /// Consecutive Cools counter (for buffer/pill awards, resets on Good/Miss)
@@ -102,6 +104,7 @@ impl GameStats {
             life: max_life,
             max_life,
             pill_count: 0,
+            jam_bar_progress: 0,
             total_notes,
             consecutive_cools: 0,
         }
@@ -133,22 +136,39 @@ impl GameStats {
             self.score = self.score.saturating_sub(penalty);
         }
 
-        // THEN update counters (jam_counter increments after scoring)
-        // Combo only starts counting from the 2nd note (first note combo stays 0)
         let is_first_hit = self.combo == 0 && self.cool_count == 0 && self.good_count == 0;
-        let combo_increment = if is_first_hit { 0u32 } else { 1u32 };
         match effective_judgment {
             JudgmentType::Cool => {
                 self.cool_count += 1;
-                self.combo += combo_increment;
-                self.jam_counter += 4;
-                self.consecutive_cools += 1;
+                if !is_first_hit {
+                    self.combo += 1;
+                    self.consecutive_cools += 1;
+                }
+                // jam_counter for scoring only starts from 2nd note
+                if !is_first_hit {
+                    self.jam_counter += 4;
+                }
+                // jam_bar_progress for HUD always increments
+                self.jam_bar_progress = if self.jam_bar_progress + 4 >= 100 {
+                    self.jam_bar_progress - 96
+                } else {
+                    self.jam_bar_progress + 4
+                };
             }
             JudgmentType::Good => {
                 self.good_count += 1;
-                self.combo += combo_increment;
-                self.jam_counter += 2;
+                if !is_first_hit {
+                    self.combo += 1;
+                }
                 self.consecutive_cools = 0;
+                if !is_first_hit {
+                    self.jam_counter += 2;
+                }
+                self.jam_bar_progress = if self.jam_bar_progress + 2 >= 100 {
+                    self.jam_bar_progress - 98
+                } else {
+                    self.jam_bar_progress + 2
+                };
             }
             JudgmentType::Bad => {
                 self.bad_count += 1;
