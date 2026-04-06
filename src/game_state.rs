@@ -109,6 +109,7 @@ impl GameStats {
 
     /// Record a judgment result and update all counters.
     /// Uses the new scoring system with jam combo bonuses.
+    /// Score is calculated BEFORE jam_counter increments (matches C++ behavior).
     pub fn record_judgment(&mut self, judgment: JudgmentType, has_pill: bool) {
         // Check if pill converts BAD to COOL
         let effective_judgment = if has_pill && judgment == JudgmentType::Bad {
@@ -117,6 +118,22 @@ impl GameStats {
             judgment
         };
 
+        // Score is calculated using CURRENT jam_combo (before incrementing jam_counter)
+        // This matches C++ behavior where scoring happens before jam_counter update
+        let note_score: i32 = match effective_judgment {
+            JudgmentType::Cool => cool_score_with_jam_bonus(self.jam_combo) as i32,
+            JudgmentType::Good => good_score_with_jam_bonus(self.jam_combo) as i32,
+            JudgmentType::Bad => 4,
+            JudgmentType::Miss => -10, // Penalty for missing
+        };
+        if note_score >= 0 {
+            self.score += note_score as u32;
+        } else {
+            let penalty = (-note_score) as u32;
+            self.score = self.score.saturating_sub(penalty);
+        }
+
+        // THEN update counters (jam_counter increments after scoring)
         match effective_judgment {
             JudgmentType::Cool => {
                 self.cool_count += 1;
@@ -143,7 +160,7 @@ impl GameStats {
             }
         }
 
-        // No division: check threshold crossed, subtract and increment (no /100 every call)
+        // Check threshold crossed (no division: subtract and increment)
         while self.jam_counter >= 100 {
             self.jam_counter -= 100;
             self.jam_combo += 1;
@@ -162,23 +179,6 @@ impl GameStats {
             if expected_buffers > self.pill_count {
                 self.pill_count = expected_buffers;
             }
-        }
-
-        // Calculate score with jam combo bonus
-        // Miss has negative score (-10), so we use i32 for calculation
-        let note_score: i32 = match effective_judgment {
-            JudgmentType::Cool => cool_score_with_jam_bonus(self.jam_combo) as i32,
-            JudgmentType::Good => good_score_with_jam_bonus(self.jam_combo) as i32,
-            JudgmentType::Bad => 4,
-            JudgmentType::Miss => -10, // Penalty for missing
-        };
-        // Score can go negative temporarily but display as 0 minimum
-        if note_score >= 0 {
-            self.score += note_score as u32;
-        } else {
-            // For negative scores (Miss), we still track them but score doesn't go below 0
-            let penalty = (-note_score) as u32;
-            self.score = self.score.saturating_sub(penalty);
         }
 
         // Update life (Hard difficulty)
