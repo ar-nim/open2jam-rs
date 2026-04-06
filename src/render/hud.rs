@@ -320,7 +320,8 @@ pub fn draw_max_combo(
     let x = ox + layout.max_combo_x * sx;
     let y = oy + layout.max_combo_y * sy;
 
-    draw_number_left_to_right(
+    // MAXCOMBO_COUNTER x="671" is the RIGHT edge, so draw right-to-left
+    draw_number(
         renderer,
         &|d| get_frame(&format!("maxcombo_number_{}", d)),
         max_combo,

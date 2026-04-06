@@ -493,7 +493,7 @@ impl App {
                         "judgmentarea",
                         "lifebar",
                         "pill",
-                        "jam_bar",
+                        // "jam_bar" is drawn by HUD with fill clipping, not as static sprite
                         "static_keyboard",
                     ];
 
