@@ -492,7 +492,7 @@ impl App {
                         "timebar",
                         "judgmentarea",
                         "lifebar",
-                        "pill",
+                        // "pill" is drawn by HUD based on pill_count
                         // "jam_bar" is drawn by HUD with fill clipping, not as static sprite
                         "static_keyboard",
                     ];
