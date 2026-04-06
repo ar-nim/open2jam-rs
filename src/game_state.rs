@@ -134,16 +134,19 @@ impl GameStats {
         }
 
         // THEN update counters (jam_counter increments after scoring)
+        // Combo only starts counting from the 2nd note (first note combo stays 0)
+        let is_first_hit = self.combo == 0 && self.cool_count == 0 && self.good_count == 0;
+        let combo_increment = if is_first_hit { 0u32 } else { 1u32 };
         match effective_judgment {
             JudgmentType::Cool => {
                 self.cool_count += 1;
-                self.combo += 1;
+                self.combo += combo_increment;
                 self.jam_counter += 4;
                 self.consecutive_cools += 1;
             }
             JudgmentType::Good => {
                 self.good_count += 1;
-                self.combo += 1;
+                self.combo += combo_increment;
                 self.jam_counter += 2;
                 self.consecutive_cools = 0;
             }
