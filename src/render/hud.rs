@@ -51,6 +51,11 @@ pub struct HudLayout {
     pub jam_bar_y: f32,
     // Pills: PILL_1-5
     pub pill_positions: Vec<(f32, f32)>,
+    // Time bar: TIME_BAR x="226" y="515"
+    pub timebar_x: f32,
+    pub timebar_y: f32,
+    pub timebar_width: f32,
+    pub timebar_height: f32,
 }
 
 impl HudLayout {
@@ -108,6 +113,11 @@ impl HudLayout {
                 (200.0, 33.0),  // PILL_4
                 (200.0, 2.0),   // PILL_5
             ],
+            // TIME_BAR: x="226" y="515", 288x9 pixels
+            timebar_x: 226.0,
+            timebar_y: 515.0,
+            timebar_width: 288.0,
+            timebar_height: 9.0,
         }
     }
 }
@@ -507,6 +517,54 @@ pub fn draw_lifebar(
     }
 }
 
+/// Draw the timebar showing song progress from left to right.
+/// TIME_BAR: x="226" y="515", fill_direction=left_to_right
+/// The progress is based on current game time / song duration.
+/// Uses vertex-position clipping: quad width + UV both scale with progress.
+pub fn draw_timebar(
+    renderer: &mut TexturedRenderer,
+    get_frame: &dyn Fn(&str) -> Option<AtlasFrame>,
+    progress: f32, // 0.0 to 1.0
+    layout: &HudLayout,
+    skin_scale: (f32, f32),
+    offset: (f32, f32),
+) {
+    let (sx, sy) = skin_scale;
+    let (ox, oy) = offset;
+    let progress = progress.clamp(0.0, 1.0);
+    
+    let bar_x = ox + layout.timebar_x * sx;
+    let bar_y = oy + layout.timebar_y * sy;
+    
+    if let Some(bar_frame) = get_frame("timebar") {
+        let frame_w = bar_frame.width as f32 * sx;
+        let frame_h = bar_frame.height as f32 * sy;
+        let fill_width = frame_w * progress;
+        let [uv0, uv1, uv2, uv3] = bar_frame.uv;
+        
+        // DEBUG: Log progress every 500 frames to diagnose "always full" issue
+        static FRAME_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let frame = FRAME_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if frame % 500 == 0 {
+            log::info!("TIMEBAR progress={:.3} (frame {}) fill_width={:.1} frame_w={:.1} uv=[{:.4}, {:.4}]", 
+                progress, frame, fill_width, frame_w, uv0, uv2);
+        }
+        
+        if fill_width > 0.5 {
+            // Left-to-right fill: u0 stays fixed (left edge), u2 moves with progress
+            let uv_u0 = uv0;
+            let uv_u2 = uv0 + (uv2 - uv0) * progress;
+            
+            renderer.draw_textured_quad(
+                bar_x, bar_y,
+                fill_width, frame_h,
+                [uv_u0, uv1, uv_u2, uv3],
+                [1.0, 1.0, 1.0, 1.0],
+            );
+        }
+    }
+}
+
 /// Draw the jam bar using skin XML entity positions.
 /// JAM_BAR: x="4" y="536", sprite is 191x12 pixels
 /// Fill direction: left_to_right
@@ -786,6 +844,15 @@ pub fn render_hud_with_atlas(
     // 1. Draw static/background elements first
     // Use life_percent_for_display() which handles startup animation vs gameplay
     draw_lifebar(renderer, &get_frame, game_state.life_percent_for_display(), layout, skin_scale, offset);
+    
+    // Draw timebar (song progress) - fills left to right based on game time / song duration
+    let time_progress = if game_state.song_duration_ms > 0.0 {
+        (game_state.game_time_ms() / game_state.song_duration_ms) as f32
+    } else {
+        0.0
+    };
+    draw_timebar(renderer, &get_frame, time_progress, layout, skin_scale, offset);
+    
     draw_jam_bar(renderer, &get_frame, stats.jam_counter, layout, skin_scale, offset);
     draw_pills(renderer, &get_frame, stats.pill_count, layout, skin_scale, offset);
 
