@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::mpsc;
+use std::thread;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -30,6 +32,22 @@ struct GpuResources {
     textured_renderer: TexturedRenderer,
     atlas: Option<SkinAtlas>,
     skin: Option<SkinResources>,
+    cover_texture: Option<wgpu::Texture>,
+    cover_bind_group: Option<wgpu::BindGroup>,
+    cover_pipeline: Option<wgpu::RenderPipeline>,
+    cover_sampler: Option<wgpu::Sampler>,
+}
+
+/// Message sent from background loading thread to main thread.
+enum LoadingMessage {
+    /// Game state loaded successfully
+    GameLoaded(Result<GameState>),
+}
+
+/// Background loading state
+struct LoadingState {
+    receiver: mpsc::Receiver<LoadingMessage>,
+    _thread: thread::JoinHandle<()>,
 }
 
 struct RenderState {
@@ -58,6 +76,10 @@ pub struct App {
     audio: Option<AudioManager>,
     game_state: Option<GameState>,
     last_frame_time: Option<Instant>,
+    /// Whether to start loading the game state on next frame.
+    start_load_game_state: bool,
+    /// Background loading state (Some while loading is in progress)
+    loading_state: Option<LoadingState>,
 }
 
 impl App {
@@ -69,6 +91,8 @@ impl App {
             audio: None,
             game_state: None,
             last_frame_time: None,
+            start_load_game_state: false,
+            loading_state: None,
         })
     }
 
@@ -107,29 +131,7 @@ impl ApplicationHandler for App {
             let window = event_loop.create_window(attrs).unwrap();
             self.init_wgpu(window);
 
-            // Load the game state after rendering is ready
-            if let Some(path) = &self.ojn_path {
-                info!("Loading game state from: {}", path.display());
-                
-                // Get skin resources for note prefab loading
-                let skin_res = self.render.as_ref()
-                    .and_then(|r| r.gpu.as_ref())
-                    .and_then(|g| g.skin.as_ref());
-                
-                match GameState::load(path, SCROLL_SPEED, AUTO_PLAY, skin_res) {
-                    Ok(mut gs) => {
-                        info!(
-                            "Game loaded: {} ({:.1}ms spawn lead)",
-                            gs.chart.header.title, gs.spawn_lead_time_ms
-                        );
-                        // clock.start() is now called automatically after 2000ms startup delay
-                        self.game_state = Some(gs);
-                    }
-                    Err(e) => {
-                        info!("Failed to load game state: {e:?}");
-                    }
-                }
-            } else {
+            if self.ojn_path.is_none() {
                 info!("No OJN file specified — running in demo mode (no notes)");
             }
 
@@ -226,6 +228,53 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                // Check for messages from background loading thread
+                if let Some(ref loading) = self.loading_state {
+                    if let Ok(msg) = loading.receiver.try_recv() {
+                        match msg {
+                            LoadingMessage::GameLoaded(result) => {
+                                match result {
+                                    Ok(gs) => {
+                                        info!(
+                                            "Game loaded: {} ({:.1}ms spawn lead)",
+                                            gs.chart.header.title, gs.spawn_lead_time_ms
+                                        );
+                                        self.game_state = Some(gs);
+                                    }
+                                    Err(e) => {
+                                        info!("Failed to load game state: {e:?}");
+                                    }
+                                }
+                                self.loading_state.take();
+                                // Reset frame timer so the first game frame doesn't get a huge delta
+                                self.last_frame_time = Some(Instant::now());
+                            }
+                        }
+                    }
+                }
+
+                // Start background loading if needed
+                if self.start_load_game_state && self.loading_state.is_none() {
+                    self.start_load_game_state = false;
+                    if let Some(path) = self.ojn_path.clone() {
+                        info!("Starting background game state load from: {}", path.display());
+                        let skin_res = self.render.as_ref()
+                            .and_then(|r| r.gpu.as_ref())
+                            .and_then(|g| g.skin.clone());
+                        
+                        let (tx, rx) = mpsc::channel();
+                        let thread_handle = thread::spawn(move || {
+                            let result = GameState::load(&path, SCROLL_SPEED, AUTO_PLAY, skin_res.as_ref());
+                            let _ = tx.send(LoadingMessage::GameLoaded(result));
+                        });
+                        
+                        self.loading_state = Some(LoadingState {
+                            receiver: rx,
+                            _thread: thread_handle,
+                        });
+                    }
+                }
+
                 let song_ended = self.render_frame();
                 if song_ended {
                     info!("Song ended, exiting game loop");
@@ -301,10 +350,22 @@ impl App {
             textured_renderer.set_atlas(&device, atlas);
         }
 
+        // Load OJN file to extract cover image (before game state loads it)
+        let (cover_texture, cover_bind_group, cover_pipeline, cover_sampler) =
+            if let Some(ref path) = self.ojn_path {
+                Self::load_cover_from_ojn(&device, &queue, &config, path)
+            } else {
+                (None, None, None, None)
+            };
+
         let gpu = GpuResources {
             textured_renderer,
             atlas,
             skin,
+            cover_texture,
+            cover_bind_group,
+            cover_pipeline,
+            cover_sampler,
         };
 
         info!("wgpu surface configured: {}x{}", config.width, config.height);
@@ -410,6 +471,170 @@ impl App {
         (atlas, Some(resources), (1.0, 1.0))
     }
 
+    /// Load cover image from OJN file and create a fullscreen-textured quad.
+    fn load_cover_from_ojn(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        config: &wgpu::SurfaceConfiguration,
+        ojn_path: &std::path::Path,
+    ) -> (Option<wgpu::Texture>, Option<wgpu::BindGroup>, Option<wgpu::RenderPipeline>, Option<wgpu::Sampler>) {
+        let data = match std::fs::read(ojn_path) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("Failed to read OJN file for cover: {e}");
+                return (None, None, None, None);
+            }
+        };
+
+        let jpeg_bytes = match crate::parsing::ojn::extract_cover_image(&data) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("No cover image in OJN: {e}");
+                return (None, None, None, None);
+            }
+        };
+
+        let img = match image::load_from_memory(&jpeg_bytes) {
+            Ok(i) => i,
+            Err(e) => {
+                warn!("Failed to decode cover JPEG: {e}");
+                return (None, None, None, None);
+            }
+        };
+
+        let rgba = img.into_rgba8();
+        let (w, h) = rgba.dimensions();
+        info!("Cover image: {}x{}", w, h);
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            label: Some("cover_texture"),
+            view_formats: &[],
+        });
+
+        queue.write_texture(
+            texture.as_image_copy(),
+            &rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * w),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cover_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cover_bind_group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        let shader = device.create_shader_module(wgpu::include_wgsl!("cover_shader.wgsl"));
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("cover_pipeline_layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("cover_pipeline"),
+            layout: Some(&pipeline_layout),
+            multiview_mask: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            cache: None,
+        });
+
+        info!("Cover texture uploaded to GPU");
+        (Some(texture), Some(bind_group), Some(pipeline), Some(sampler))
+    }
+
     fn render_frame(&mut self) -> bool {
         let Some(render) = &mut self.render else {
             warn!("render_frame: render state is None");
@@ -418,6 +643,11 @@ impl App {
 
         // Log first time we enter render_frame
         static FIRST_FRAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+        // If game state is None and not already loading, schedule game load for next redraw
+        if self.game_state.is_none() && self.loading_state.is_none() && self.ojn_path.is_some() {
+            self.start_load_game_state = true;
+        }
         if !FIRST_FRAME.load(std::sync::atomic::Ordering::Relaxed) {
             FIRST_FRAME.store(true, std::sync::atomic::Ordering::Relaxed);
             info!("=== First render_frame call ===");
@@ -498,6 +728,41 @@ impl App {
         let view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Draw cover background (only before game state is loaded)
+        if self.game_state.is_none() {
+            if let Some(ref gpu) = render.gpu {
+                if let (Some(pipeline), Some(bind_group)) = (&gpu.cover_pipeline, &gpu.cover_bind_group) {
+                    let mut encoder = render.device.create_command_encoder(
+                        &wgpu::CommandEncoderDescriptor { label: Some("cover_encoder") }
+                    );
+                    {
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("cover_pass"),
+                            multiview_mask: None,
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                depth_slice: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, bind_group, &[]);
+                        pass.draw(0..4, 0..1);
+                    }
+                    render.queue.submit(Some(encoder.finish()));
+                    surface_texture.present();
+                    return false;
+                }
+            }
+        }
 
         // 4. Calculate skin scale and letterbox offset
         // Scale the 800x600 skin to fit the window while maintaining aspect ratio

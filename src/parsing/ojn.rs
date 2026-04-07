@@ -183,6 +183,26 @@ pub enum OjnError {
     Truncated { expected: usize, actual: usize },
     #[error("note data offset out of bounds: {offset} (file size: {size})")]
     NoteOffsetOutOfBounds { offset: u32, size: usize },
+    #[error("no cover image in OJN file")]
+    NoCoverImage,
+}
+
+/// Extract the cover JPEG image from OJN file bytes.
+/// Returns the raw JPEG bytes if a cover image exists.
+pub fn extract_cover_image(data: &[u8]) -> Result<Vec<u8>, OjnError> {
+    let header = parse_header(data)?;
+    if header.cover_offset == 0 || header.cover_size == 0 {
+        return Err(OjnError::NoCoverImage);
+    }
+    let offset = header.cover_offset as usize;
+    let size = header.cover_size as usize;
+    if offset + size > data.len() {
+        return Err(OjnError::Truncated {
+            expected: offset + size,
+            actual: data.len(),
+        });
+    }
+    Ok(data[offset..offset + size].to_vec())
 }
 
 // ---------------------------------------------------------------------------
