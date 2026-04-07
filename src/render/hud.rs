@@ -473,24 +473,34 @@ pub fn draw_lifebar(
         );
     }
     
-    // Draw lifebar fill (clipped based on life_percent)
-    // Fill from bottom (up_to_down means empty at bottom when 0%)
+    // Draw lifebar fill using vertex-position clipping.
+    // Fill direction: up_to_down (fills from bottom to top)
+    // At 0%: show nothing (empty)
+    // At 100%: show full sprite
+    // The sprite is anchored at the bottom and clipped from the top.
+    // Uses the atlas frame's ACTUAL pixel dimensions for correct scaling.
     if let Some(bar_frame) = get_frame("lifebar") {
-        let fill_height = bar_h * life_percent;
-        let fill_y = bg_y + bar_h - fill_height;
+        // Use the atlas frame's actual dimensions (from the packed atlas)
+        let frame_w = bar_frame.width as f32 * sx;
+        let frame_h = bar_frame.height as f32 * sy;
         
+        let fill_height = frame_h * life_percent;
+
         if fill_height > 0.5 {
-            // Clip the UV to show only the filled portion
-            // For up_to_down, we clip from the top of the sprite
-            let uv_u = bar_frame.uv[0];
-            let uv_v = bar_frame.uv[1] + bar_frame.uv[3] * (1.0 - life_percent);
-            let uv_w = bar_frame.uv[2];
-            let uv_h = bar_frame.uv[3] * life_percent;
+            // Top of the fill area (move down as life decreases)
+            let fill_top_y = bg_y + frame_h - fill_height;
+
+            let [u0, v0, u1, v1] = bar_frame.uv;
+            
+            // Interpolate the top V coordinate based on life_percent
+            // At 100%: v_top = v0 (full sprite from top)
+            // At 50%: v_top = midpoint of V range
+            let life_v = v0 + (v1 - v0) * (1.0 - life_percent);
             
             renderer.draw_textured_quad(
-                bg_x, fill_y,
-                bar_w, fill_height,
-                [uv_u, uv_v, uv_w, uv_h],
+                bg_x, fill_top_y,
+                frame_w, fill_height,
+                [u0, life_v, u1, v1],
                 [1.0, 1.0, 1.0, 1.0],
             );
         }
@@ -719,7 +729,8 @@ pub fn render_hud_with_atlas(
     let get_frame = |sprite_id: &str| resolve_frame(atlas, sprite_id, current_time_ms);
 
     // 1. Draw static/background elements first
-    draw_lifebar(renderer, &get_frame, stats.life_percent(), layout, skin_scale, offset);
+    // Use life_percent_for_display() which handles startup animation vs gameplay
+    draw_lifebar(renderer, &get_frame, game_state.life_percent_for_display(), layout, skin_scale, offset);
     draw_jam_bar(renderer, &get_frame, stats.jam_counter, layout, skin_scale, offset);
     draw_pills(renderer, &get_frame, stats.pill_count, layout, skin_scale, offset);
 

@@ -121,7 +121,7 @@ impl ApplicationHandler for App {
                             "Game loaded: {} ({:.1}ms spawn lead)",
                             gs.chart.header.title, gs.spawn_lead_time_ms
                         );
-                        gs.clock.start();
+                        // clock.start() is now called automatically after 2000ms startup delay
                         self.game_state = Some(gs);
                     }
                     Err(e) => {
@@ -435,36 +435,41 @@ impl App {
             let prev_max_combo = gs.stats.max_combo;
             gs.update(delta_ms);
             gs.combo_counter.update(delta_ms as f64);
-            gs.spawn_notes();
-            gs.auto_judge_notes(); // Auto-play judgment
-            gs.cleanup_notes();
 
-            // Trigger combo counter animation when combo increases
-            if gs.stats.combo > prev_combo {
-                gs.combo_counter.increment();
-                // Only show combo title/max combo when starting a new combo streak (combo was 0)
-                if prev_combo == 0 {
-                    gs.show_combo_title();
-                    gs.show_max_combo_counter();
+            // Only run gameplay logic after startup delay (is_rendering = true)
+            if gs.is_rendering {
+                gs.spawn_notes();
+                gs.auto_judge_notes(); // Auto-play judgment
+                gs.cleanup_notes();
+
+                // Trigger combo counter animation when combo increases
+                if gs.stats.combo > prev_combo {
+                    gs.combo_counter.increment();
+                    // Only show combo title/max combo when starting a new combo streak (combo was 0)
+                    if prev_combo == 0 {
+                        gs.show_combo_title();
+                        gs.show_max_combo_counter();
+                    }
+                } else if gs.stats.combo == 0 && prev_combo > 0 {
+                    gs.combo_counter.reset();
                 }
-            } else if gs.stats.combo == 0 && prev_combo > 0 {
-                gs.combo_counter.reset();
+
+                // Show jam counter when jam combo increases
+                if gs.stats.jam_combo > prev_jam_combo {
+                    gs.show_jam_counter();
+                }
+
+                // Show max combo when max combo increases (new high score)
+                if gs.stats.max_combo > prev_max_combo {
+                    gs.show_max_combo_counter();
+                    gs.show_combo_title();
+                }
+
+                if let Some(audio_mgr) = &mut self.audio {
+                    gs.process_audio(audio_mgr);
+                }
             }
 
-            // Show jam counter when jam combo increases
-            if gs.stats.jam_combo > prev_jam_combo {
-                gs.show_jam_counter();
-            }
-
-            // Show max combo when max combo increases (new high score)
-            if gs.stats.max_combo > prev_max_combo {
-                gs.show_max_combo_counter();
-                gs.show_combo_title();
-            }
-
-            if let Some(audio_mgr) = &mut self.audio {
-                gs.process_audio(audio_mgr);
-            }
         }
 
         // 3. Acquire surface texture

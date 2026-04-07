@@ -365,6 +365,12 @@ pub struct GameState {
     pub max_combo_counter_visible_ms: f64,
     /// Combo title visibility timer (ms remaining, 0 = hidden)
     pub combo_title_visible_ms: f64,
+    /// Startup delay: time before gameplay begins (2000ms for lifebar fill animation)
+    pub startup_delay_ms: f64,
+    /// Whether the game is in rendering mode (false during startup delay)
+    pub is_rendering: bool,
+    /// Life percentage during startup animation (0.0 to 1.0)
+    pub startup_life_percent: f32,
 }
 
 impl GameState {
@@ -472,15 +478,40 @@ impl GameState {
             jam_counter_visible_ms: 0.0,
             max_combo_counter_visible_ms: 0.0,
             combo_title_visible_ms: 0.0,
+            startup_delay_ms: 2000.0, // 2 second startup delay
+            is_rendering: false,
+            startup_life_percent: 0.0,
         })
     }
 
+    /// Startup delay duration in milliseconds (2000ms for lifebar fill animation)
+    pub const STARTUP_DELAY_MS: f64 = 2000.0;
+
     /// Advance the game clock and process events.
     pub fn update(&mut self, delta_ms: u64) {
-        self.clock.advance_game_time(delta_ms);
+        let delta = delta_ms as f64;
+
+        // Handle startup delay phase
+        if !self.is_rendering {
+            if self.startup_delay_ms > 0.0 {
+                self.startup_delay_ms -= delta;
+                // Animate lifebar from 0 to 100% over 2000ms
+                self.startup_life_percent = (1.0 - self.startup_delay_ms / Self::STARTUP_DELAY_MS).min(1.0) as f32;
+            }
+            if self.startup_delay_ms <= 0.0 {
+                self.startup_delay_ms = 0.0;
+                self.is_rendering = true;
+                self.startup_life_percent = 1.0;
+                // Start the game clock after startup animation
+                self.clock.start();
+                info!("Startup delay complete, gameplay begins now");
+            }
+        } else {
+            // Normal gameplay: advance the game clock
+            self.clock.advance_game_time(delta_ms);
+        }
 
         // Update visibility timers (count down)
-        let delta = delta_ms as f64;
         if self.jam_counter_visible_ms > 0.0 {
             self.jam_counter_visible_ms -= delta;
             if self.jam_counter_visible_ms < 0.0 {
@@ -498,6 +529,17 @@ impl GameState {
             if self.combo_title_visible_ms < 0.0 {
                 self.combo_title_visible_ms = 0.0;
             }
+        }
+    }
+
+    /// Get the current life percentage (startup animation or gameplay stats)
+    pub fn life_percent_for_display(&self) -> f32 {
+        if !self.is_rendering {
+            // During startup, show animated lifebar
+            self.startup_life_percent
+        } else {
+            // During gameplay, show actual stats
+            self.stats.life_percent()
         }
     }
 
