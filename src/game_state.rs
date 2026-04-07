@@ -377,6 +377,10 @@ pub struct GameState {
     pub duration_minutes: u32,
     /// Accumulator for duration counter update (ms)
     pub duration_accumulator_ms: f64,
+    /// Song duration in milliseconds (from OJN header)
+    pub song_duration_ms: f64,
+    /// Whether the song/game has ended
+    pub is_song_ended: bool,
 }
 
 impl GameState {
@@ -466,6 +470,14 @@ impl GameState {
         let max_life = 1000;
         let stats = GameStats::new(total_playable_notes, max_life);
 
+        // 8. Get song duration from OJN header (all difficulties)
+        // OJN stores duration in SECONDS (not milliseconds) - multiply by 1000
+        let song_duration_ms = chart.header.duration_hard as f64 * 1000.0;
+        info!(
+            "Song duration (Hard): {} seconds -> {}ms ({:.1}s)",
+            chart.header.duration_hard, song_duration_ms, song_duration_ms / 1000.0
+        );
+
         Ok(Self {
             clock,
             audio_triggers,
@@ -490,6 +502,8 @@ impl GameState {
             duration_seconds: 0,
             duration_minutes: 0,
             duration_accumulator_ms: 0.0,
+            song_duration_ms,
+            is_song_ended: false,
         })
     }
 
@@ -552,6 +566,31 @@ impl GameState {
                 self.duration_seconds += 1;
             }
         }
+
+        // Check if song has ended (game time exceeds song duration)
+        if !self.is_song_ended && self.song_duration_ms > 0.0 {
+            let game_time = self.clock.game_time() as f64;
+            if game_time >= self.song_duration_ms {
+                self.is_song_ended = true;
+                info!("Song ended: game time {:.1}ms >= song duration {:.1}ms", 
+                    game_time, self.song_duration_ms);
+            }
+        }
+    }
+
+    /// Check if the song has ended (game time exceeded song duration from OJN metadata).
+    pub fn is_song_ended(&self) -> bool {
+        self.is_song_ended
+    }
+
+    /// Get song duration in milliseconds (from OJN header).
+    pub fn song_duration_ms(&self) -> f64 {
+        self.song_duration_ms
+    }
+
+    /// Get current game time in milliseconds.
+    pub fn game_time_ms(&self) -> f64 {
+        self.clock.game_time() as f64
     }
 
     /// Get the current life percentage (startup animation or gameplay stats)

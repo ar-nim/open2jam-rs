@@ -693,6 +693,25 @@ mod tests {
     }
 
     #[test]
+    fn test_ojn_durations() {
+        let chart = parse_file("test_assets/o2ma100.ojn").expect("Failed to parse OJN");
+        let h = &chart.header;
+        let dur_easy_ms = h.duration_easy as f64;
+        let dur_normal_ms = h.duration_normal as f64;
+        let dur_hard_ms = h.duration_hard as f64;
+        println!("\n=== OJN Duration Test ===");
+        println!("Song: {} - {}", h.title, h.artist);
+        println!("Base BPM: {}", h.bpm);
+        println!("Duration Easy:    {} ms ({:.1}s)", h.duration_easy, dur_easy_ms / 1000.0);
+        println!("Duration Normal:  {} ms ({:.1}s)", h.duration_normal, dur_normal_ms / 1000.0);
+        println!("Duration Hard:    {} ms ({:.1}s)", h.duration_hard, dur_hard_ms / 1000.0);
+        println!("Note Offset Easy:    {}", h.note_offset_easy);
+        println!("Note Offset Normal:  {}", h.note_offset_normal);
+        println!("Note Offset Hard:    {}", h.note_offset_hard);
+        println!("=======================\n");
+    }
+
+    #[test]
     fn test_chart_has_measure_markers() {
         let chart = parse_file("test_assets/o2ma100.ojn").expect("Failed to parse OJN");
         let measure_count = chart.events.iter().filter(|e| matches!(e, TimedEvent::Measure(_))).count();

@@ -226,7 +226,14 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                self.render_frame();
+                let song_ended = self.render_frame();
+                if song_ended {
+                    info!("Song ended, exiting game loop");
+                    if let Some(render) = self.render.as_mut() {
+                        render.shutdown();
+                    }
+                    event_loop.exit();
+                }
             }
             _ => {}
         }
@@ -403,10 +410,10 @@ impl App {
         (atlas, Some(resources), (1.0, 1.0))
     }
 
-    fn render_frame(&mut self) {
+    fn render_frame(&mut self) -> bool {
         let Some(render) = &mut self.render else {
             warn!("render_frame: render state is None");
-            return;
+            return false;
         };
 
         // Log first time we enter render_frame
@@ -474,18 +481,18 @@ impl App {
         }
 
         // 3. Acquire surface texture
-        let Some(ref surface) = render.surface else { return };
+        let Some(ref surface) = render.surface else { return false; };
         let surface_texture = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(st) => st,
             wgpu::CurrentSurfaceTexture::Suboptimal(st) => {
                 st
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return false,
             wgpu::CurrentSurfaceTexture::Outdated => {
                 surface.configure(&render.device, &render.config);
-                return;
+                return false;
             }
-            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Validation => return,
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Validation => return false,
         };
 
         let view = surface_texture
@@ -787,5 +794,8 @@ impl App {
 
         // 10. Present
         surface_texture.present();
+
+        // Return whether song has ended (for caller to handle exit)
+        self.game_state.as_ref().map_or(false, |gs| gs.is_song_ended())
     }
 }
