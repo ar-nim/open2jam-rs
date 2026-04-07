@@ -371,6 +371,12 @@ pub struct GameState {
     pub is_rendering: bool,
     /// Life percentage during startup animation (0.0 to 1.0)
     pub startup_life_percent: f32,
+    /// Duration counter: elapsed seconds since gameplay started (wall-clock)
+    pub duration_seconds: u32,
+    /// Duration counter: elapsed minutes since gameplay started
+    pub duration_minutes: u32,
+    /// Accumulator for duration counter update (ms)
+    pub duration_accumulator_ms: f64,
 }
 
 impl GameState {
@@ -481,6 +487,9 @@ impl GameState {
             startup_delay_ms: 2000.0, // 2 second startup delay
             is_rendering: false,
             startup_life_percent: 0.0,
+            duration_seconds: 0,
+            duration_minutes: 0,
+            duration_accumulator_ms: 0.0,
         })
     }
 
@@ -528,6 +537,19 @@ impl GameState {
             self.combo_title_visible_ms -= delta;
             if self.combo_title_visible_ms < 0.0 {
                 self.combo_title_visible_ms = 0.0;
+            }
+        }
+
+        // Update duration counter (wall-clock seconds, matches Java open2jam pattern)
+        // Runs every 1000ms of accumulated frame time
+        self.duration_accumulator_ms += delta;
+        if self.duration_accumulator_ms >= 1000.0 {
+            self.duration_accumulator_ms -= 1000.0;
+            if self.duration_seconds >= 59 {
+                self.duration_seconds = 0;
+                self.duration_minutes += 1;
+            } else {
+                self.duration_seconds += 1;
             }
         }
     }

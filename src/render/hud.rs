@@ -642,6 +642,61 @@ pub fn draw_judgment_popup(
     }
 }
 
+/// Draw the duration counter (minutes:seconds) using skin XML entity positions.
+/// MINUTE_COUNTER: x="346" y="569" - right-aligned position
+/// SECOND_COUNTER: x="410" y="569" - right-aligned position, shows 2 digits
+/// Uses time_number sprites for digit rendering.
+pub fn draw_duration(
+    renderer: &mut TexturedRenderer,
+    get_frame: &dyn Fn(&str) -> Option<AtlasFrame>,
+    minutes: u32,
+    seconds: u32,
+    layout: &HudLayout,
+    skin_scale: (f32, f32),
+    offset: (f32, f32),
+) {
+    let (sx, sy) = skin_scale;
+    let (ox, oy) = offset;
+
+    // Draw minute counter (right-aligned, like Java NumberEntity)
+    let mx = ox + layout.minute_x * sx;
+    let my = oy + layout.minute_y * sy;
+    draw_number(
+        renderer,
+        &|d| get_frame(&format!("time_number_{}", d)),
+        minutes,
+        mx, my,
+        0.0, // No spacing between minute digits
+        sx, sy,
+        [1.0, 1.0, 1.0, 1.0],
+    );
+
+    // Draw second counter (right-aligned, 2 digits with leading zero)
+    let sx_pos = ox + layout.second_x * sx;
+    let sy_pos = oy + layout.second_y * sy;
+    // Always show 2 digits for seconds (00-59)
+    let sec_tens = seconds / 10;
+    let sec_ones = seconds % 10;
+
+    // Draw right-to-left: ones digit first, then tens digit
+    if let Some(ones_frame) = get_frame(&format!("time_number_{}", sec_ones)) {
+        let w = ones_frame.width as f32 * sx;
+        let h = ones_frame.height as f32 * sy;
+        renderer.draw_textured_quad(
+            sx_pos - w, sy_pos, w, h,
+            ones_frame.uv, [1.0, 1.0, 1.0, 1.0],
+        );
+        if let Some(tens_frame) = get_frame(&format!("time_number_{}", sec_tens)) {
+            let tw = tens_frame.width as f32 * sx;
+            let th = tens_frame.height as f32 * sy;
+            renderer.draw_textured_quad(
+                sx_pos - w - tw, sy_pos, tw, th,
+                tens_frame.uv, [1.0, 1.0, 1.0, 1.0],
+            );
+        }
+    }
+}
+
 /// Draw all judgment count numbers (COOL/GOOD/BAD/MISS counters).
 /// Uses counter_number sprites (9x9 pixels)
 pub fn draw_judgment_counts(
@@ -736,6 +791,11 @@ pub fn render_hud_with_atlas(
 
     // 2. Draw counters
     draw_score(renderer, &get_frame, stats.score, layout, skin_scale, offset);
+    draw_duration(
+        renderer, &get_frame,
+        game_state.duration_minutes, game_state.duration_seconds,
+        layout, skin_scale, offset,
+    );
     draw_combo(
         renderer, &get_frame, stats.combo,
         game_state.combo_counter.current_y(),
