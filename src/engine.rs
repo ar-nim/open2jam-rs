@@ -1,6 +1,7 @@
 //! Frame orchestrator — winit event loop, wgpu device, oddio mixer, game loop.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -286,7 +287,7 @@ impl App {
         let mut textured_renderer = TexturedRenderer::new(&device, &queue, &config);
 
         // Try to load the skin XML and build atlas
-        let skin_dir = std::path::Path::new("/home/arnim/projects/o2jam/open2jam-modern/src/resources");
+        let skin_dir = std::path::Path::new("resources");
         let (atlas, skin, skin_scale) = Self::load_skin(&device, &queue, skin_dir);
 
         if let Some(ref atlas) = atlas {
@@ -359,17 +360,17 @@ impl App {
 
         info!("Skin has {} sprite frames to pack into atlas", frame_entries.len());
 
-        let skin_dir_owned = skin_dir.to_path_buf();
         let speed_map = sprite_speeds;
         let atlas = SkinAtlas::from_frames_with_speed(
             device, queue, &frame_entries,
             |sprite_id: &str| *speed_map.get(sprite_id).unwrap_or(&50),
             |file: &str| {
-                let path = skin_dir_owned.join(file);
+                // Paths already include the skin_dir prefix from the XML parser's base_path
+                let path = Path::new(file);
                 if !path.exists() {
                     info!("Skin image not found: {}", path.display());
                 }
-                match image::open(&path) {
+                match image::open(path) {
                     Ok(img) => Some(img.into_rgba8()),
                     Err(e) => {
                         info!("Failed to load skin image {}: {e}", path.display());
