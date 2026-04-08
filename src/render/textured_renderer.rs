@@ -5,6 +5,15 @@ use log::warn;
 
 use super::atlas::SkinAtlas;
 
+/// Blend mode for textured sprites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlendMode {
+    /// Standard alpha blending (src_alpha * src + (1 - src_alpha) * dst)
+    Alpha,
+    /// Additive blending (src_alpha * src + dst_alpha * dst) for glow effects
+    Additive,
+}
+
 /// Vertex for textured sprites: position + UV + color tint.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -81,7 +90,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
 /// Batched textured sprite renderer.
 pub struct TexturedRenderer {
-    pipeline: wgpu::RenderPipeline,
+    pipeline_alpha: wgpu::RenderPipeline,
+    pipeline_additive: wgpu::RenderPipeline,
+    current_pipeline: BlendMode,
     bind_group: Option<wgpu::BindGroup>,
     vertex_buffer: wgpu::Buffer,
     resolution_buffer: wgpu::Buffer,
@@ -163,13 +174,21 @@ impl TexturedRenderer {
             source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()),
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Textured Sprite Render Pipeline"),
+        let vertex_buffers = [vertex_layout()];
+
+        let fragment_targets_alpha = [Some(wgpu::ColorTargetState {
+            format: config.format,
+            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+
+        let pipeline_alpha = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Textured Sprite Alpha Pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[vertex_layout()],
+                buffers: &vertex_buffers,
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             primitive: wgpu::PrimitiveState::default(),
@@ -178,11 +197,46 @@ impl TexturedRenderer {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &fragment_targets_alpha,
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let fragment_targets_additive = [Some(wgpu::ColorTargetState {
+            format: config.format,
+            blend: Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::SrcAlpha,
+                    dst_factor: wgpu::BlendFactor::DstAlpha,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            }),
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+
+        let pipeline_additive = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Textured Sprite Additive Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &vertex_buffers,
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &fragment_targets_additive,
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             multiview_mask: None,
@@ -190,7 +244,9 @@ impl TexturedRenderer {
         });
 
         Self {
-            pipeline,
+            pipeline_alpha,
+            pipeline_additive,
+            current_pipeline: BlendMode::Alpha,
             bind_group: None,
             vertex_buffer,
             resolution_buffer,
@@ -199,9 +255,14 @@ impl TexturedRenderer {
         }
     }
 
+    /// Switch to a specific blend mode for subsequent draw calls.
+    pub fn set_blend_mode(&mut self, mode: BlendMode) {
+        self.current_pipeline = mode;
+    }
+
     /// Set the atlas texture and create the bind group.
     pub fn set_atlas(&mut self, device: &wgpu::Device, atlas: &SkinAtlas) {
-        let bind_group_layout = self.pipeline.get_bind_group_layout(0);
+        let bind_group_layout = self.pipeline_alpha.get_bind_group_layout(0);
         self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Textured Sprite Atlas Bind Group"),
             layout: &bind_group_layout,
@@ -311,7 +372,10 @@ impl TexturedRenderer {
                 multiview_mask: None,
             });
 
-            render_pass.set_pipeline(&self.pipeline);
+            render_pass.set_pipeline(match self.current_pipeline {
+                BlendMode::Alpha => &self.pipeline_alpha,
+                BlendMode::Additive => &self.pipeline_additive,
+            });
             render_pass.set_bind_group(0, bind_group, &[0]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.draw(0..vertex_count as u32, 0..1);

@@ -1,5 +1,9 @@
 //! Frame orchestrator — winit event loop, wgpu device, oddio mixer, game loop.
 
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::mpsc;
+use std::thread;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -16,7 +20,8 @@ use crate::gameplay::scroll::note_y_position;
 use crate::parsing::ojn::TimedEvent;
 use crate::parsing::xml::{parse_file as parse_skin_xml, Resources as SkinResources};
 use crate::render::atlas::SkinAtlas;
-use crate::render::textured_renderer::TexturedRenderer;
+use crate::render::textured_renderer::{TexturedRenderer, BlendMode};
+use crate::render::hud::{HudLayout, render_hud_with_atlas};
 
 const SCROLL_SPEED: f64 = 1.0;
 const AUTO_PLAY: bool = true;
@@ -27,6 +32,22 @@ struct GpuResources {
     textured_renderer: TexturedRenderer,
     atlas: Option<SkinAtlas>,
     skin: Option<SkinResources>,
+    cover_texture: Option<wgpu::Texture>,
+    cover_bind_group: Option<wgpu::BindGroup>,
+    cover_pipeline: Option<wgpu::RenderPipeline>,
+    cover_sampler: Option<wgpu::Sampler>,
+}
+
+/// Message sent from background loading thread to main thread.
+enum LoadingMessage {
+    /// Game state loaded successfully
+    GameLoaded(Result<GameState>),
+}
+
+/// Background loading state
+struct LoadingState {
+    receiver: mpsc::Receiver<LoadingMessage>,
+    _thread: thread::JoinHandle<()>,
 }
 
 struct RenderState {
@@ -55,6 +76,10 @@ pub struct App {
     audio: Option<AudioManager>,
     game_state: Option<GameState>,
     last_frame_time: Option<Instant>,
+    /// Whether to start loading the game state on next frame.
+    start_load_game_state: bool,
+    /// Background loading state (Some while loading is in progress)
+    loading_state: Option<LoadingState>,
 }
 
 impl App {
@@ -66,6 +91,8 @@ impl App {
             audio: None,
             game_state: None,
             last_frame_time: None,
+            start_load_game_state: false,
+            loading_state: None,
         })
     }
 
@@ -104,29 +131,7 @@ impl ApplicationHandler for App {
             let window = event_loop.create_window(attrs).unwrap();
             self.init_wgpu(window);
 
-            // Load the game state after rendering is ready
-            if let Some(path) = &self.ojn_path {
-                info!("Loading game state from: {}", path.display());
-                
-                // Get skin resources for note prefab loading
-                let skin_res = self.render.as_ref()
-                    .and_then(|r| r.gpu.as_ref())
-                    .and_then(|g| g.skin.as_ref());
-                
-                match GameState::load(path, SCROLL_SPEED, AUTO_PLAY, skin_res) {
-                    Ok(mut gs) => {
-                        info!(
-                            "Game loaded: {} ({:.1}ms spawn lead)",
-                            gs.chart.header.title, gs.spawn_lead_time_ms
-                        );
-                        gs.clock.start();
-                        self.game_state = Some(gs);
-                    }
-                    Err(e) => {
-                        info!("Failed to load game state: {e:?}");
-                    }
-                }
-            } else {
+            if self.ojn_path.is_none() {
                 info!("No OJN file specified — running in demo mode (no notes)");
             }
 
@@ -181,15 +186,14 @@ impl ApplicationHandler for App {
                             ElementState::Pressed => {
                                 // Judge the note/long note in this lane
                                 let judged = gs.handle_key_press(lane, 200.0); // 200ms judgment window
-                                if judged {
+                                if judged.is_some() {
                                     info!("Note judged in lane {}", lane);
                                 }
                             }
                             ElementState::Released => {
-                                // Release the long note in this lane
-                                let released = gs.handle_key_release(lane);
-                                if released {
-                                    info!("Long note released in lane {}", lane);
+                                let release_judgment = gs.handle_key_release(lane);
+                                if let Some(j) = release_judgment {
+                                    info!("Long note released in lane {}, judgment: {:?}", lane, j);
                                 }
                             }
                         }
@@ -224,7 +228,61 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                self.render_frame();
+                // Check for messages from background loading thread
+                if let Some(ref loading) = self.loading_state {
+                    if let Ok(msg) = loading.receiver.try_recv() {
+                        match msg {
+                            LoadingMessage::GameLoaded(result) => {
+                                match result {
+                                    Ok(gs) => {
+                                        info!(
+                                            "Game loaded: {} ({:.1}ms spawn lead)",
+                                            gs.chart.header.title, gs.spawn_lead_time_ms
+                                        );
+                                        self.game_state = Some(gs);
+                                    }
+                                    Err(e) => {
+                                        info!("Failed to load game state: {e:?}");
+                                    }
+                                }
+                                self.loading_state.take();
+                                // Reset frame timer so the first game frame doesn't get a huge delta
+                                self.last_frame_time = Some(Instant::now());
+                            }
+                        }
+                    }
+                }
+
+                // Start background loading if needed
+                if self.start_load_game_state && self.loading_state.is_none() {
+                    self.start_load_game_state = false;
+                    if let Some(path) = self.ojn_path.clone() {
+                        info!("Starting background game state load from: {}", path.display());
+                        let skin_res = self.render.as_ref()
+                            .and_then(|r| r.gpu.as_ref())
+                            .and_then(|g| g.skin.clone());
+                        
+                        let (tx, rx) = mpsc::channel();
+                        let thread_handle = thread::spawn(move || {
+                            let result = GameState::load(&path, SCROLL_SPEED, AUTO_PLAY, skin_res.as_ref());
+                            let _ = tx.send(LoadingMessage::GameLoaded(result));
+                        });
+                        
+                        self.loading_state = Some(LoadingState {
+                            receiver: rx,
+                            _thread: thread_handle,
+                        });
+                    }
+                }
+
+                let song_ended = self.render_frame();
+                if song_ended {
+                    info!("Song ended, exiting game loop");
+                    if let Some(render) = self.render.as_mut() {
+                        render.shutdown();
+                    }
+                    event_loop.exit();
+                }
             }
             _ => {}
         }
@@ -285,17 +343,29 @@ impl App {
         let mut textured_renderer = TexturedRenderer::new(&device, &queue, &config);
 
         // Try to load the skin XML and build atlas
-        let skin_dir = std::path::Path::new("/home/arnim/projects/o2jam/open2jam-modern/src/resources");
+        let skin_dir = std::path::Path::new("resources");
         let (atlas, skin, skin_scale) = Self::load_skin(&device, &queue, skin_dir);
 
         if let Some(ref atlas) = atlas {
             textured_renderer.set_atlas(&device, atlas);
         }
 
+        // Load OJN file to extract cover image (before game state loads it)
+        let (cover_texture, cover_bind_group, cover_pipeline, cover_sampler) =
+            if let Some(ref path) = self.ojn_path {
+                Self::load_cover_from_ojn(&device, &queue, &config, path)
+            } else {
+                (None, None, None, None)
+            };
+
         let gpu = GpuResources {
             textured_renderer,
             atlas,
             skin,
+            cover_texture,
+            cover_bind_group,
+            cover_pipeline,
+            cover_sampler,
         };
 
         info!("wgpu surface configured: {}x{}", config.width, config.height);
@@ -339,8 +409,11 @@ impl App {
         };
 
         // Build atlas from global sprites (all sprite definitions in the XML)
+        // Collect frame_speed map for animated sprites
+        let mut sprite_speeds: HashMap<String, u32> = HashMap::new();
         let mut frame_entries: Vec<(String, String, u32, u32, u32, u32)> = Vec::new();
         for (sprite_id, sprite_def) in &resources.sprites {
+            sprite_speeds.insert(sprite_id.clone(), sprite_def.frame_speed_ms);
             for frame in &sprite_def.frames {
                 frame_entries.push((
                     sprite_id.clone(),
@@ -355,20 +428,25 @@ impl App {
 
         info!("Skin has {} sprite frames to pack into atlas", frame_entries.len());
 
-        let skin_dir_owned = skin_dir.to_path_buf();
-        let atlas = SkinAtlas::from_frames(device, queue, &frame_entries, |file: &str| {
-            let path = skin_dir_owned.join(file);
-            if !path.exists() {
-                info!("Skin image not found: {}", path.display());
-            }
-            match image::open(&path) {
-                Ok(img) => Some(img.into_rgba8()),
-                Err(e) => {
-                    info!("Failed to load skin image {}: {e}", path.display());
-                    None
+        let speed_map = sprite_speeds;
+        let atlas = SkinAtlas::from_frames_with_speed(
+            device, queue, &frame_entries,
+            |sprite_id: &str| *speed_map.get(sprite_id).unwrap_or(&50),
+            |file: &str| {
+                // Paths already include the skin_dir prefix from the XML parser's base_path
+                let path = Path::new(file);
+                if !path.exists() {
+                    info!("Skin image not found: {}", path.display());
                 }
-            }
-        });
+                match image::open(path) {
+                    Ok(img) => Some(img.into_rgba8()),
+                    Err(e) => {
+                        info!("Failed to load skin image {}: {e}", path.display());
+                        None
+                    }
+                }
+            },
+        );
 
         if let Some(ref a) = atlas {
             info!(
@@ -393,14 +471,183 @@ impl App {
         (atlas, Some(resources), (1.0, 1.0))
     }
 
-    fn render_frame(&mut self) {
+    /// Load cover image from OJN file and create a fullscreen-textured quad.
+    fn load_cover_from_ojn(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        config: &wgpu::SurfaceConfiguration,
+        ojn_path: &std::path::Path,
+    ) -> (Option<wgpu::Texture>, Option<wgpu::BindGroup>, Option<wgpu::RenderPipeline>, Option<wgpu::Sampler>) {
+        let data = match std::fs::read(ojn_path) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("Failed to read OJN file for cover: {e}");
+                return (None, None, None, None);
+            }
+        };
+
+        let jpeg_bytes = match crate::parsing::ojn::extract_cover_image(&data) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("No cover image in OJN: {e}");
+                return (None, None, None, None);
+            }
+        };
+
+        let img = match image::load_from_memory(&jpeg_bytes) {
+            Ok(i) => i,
+            Err(e) => {
+                warn!("Failed to decode cover JPEG: {e}");
+                return (None, None, None, None);
+            }
+        };
+
+        let rgba = img.into_rgba8();
+        let (w, h) = rgba.dimensions();
+        info!("Cover image: {}x{}", w, h);
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            label: Some("cover_texture"),
+            view_formats: &[],
+        });
+
+        queue.write_texture(
+            texture.as_image_copy(),
+            &rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * w),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cover_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cover_bind_group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        let shader = device.create_shader_module(wgpu::include_wgsl!("cover_shader.wgsl"));
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("cover_pipeline_layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("cover_pipeline"),
+            layout: Some(&pipeline_layout),
+            multiview_mask: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            cache: None,
+        });
+
+        info!("Cover texture uploaded to GPU");
+        (Some(texture), Some(bind_group), Some(pipeline), Some(sampler))
+    }
+
+    fn render_frame(&mut self) -> bool {
         let Some(render) = &mut self.render else {
             warn!("render_frame: render state is None");
-            return;
+            return false;
         };
 
         // Log first time we enter render_frame
         static FIRST_FRAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+        // If game state is None and not already loading, schedule game load for next redraw
+        if self.game_state.is_none() && self.loading_state.is_none() && self.ojn_path.is_some() {
+            self.start_load_game_state = true;
+        }
         if !FIRST_FRAME.load(std::sync::atomic::Ordering::Relaxed) {
             FIRST_FRAME.store(true, std::sync::atomic::Ordering::Relaxed);
             info!("=== First render_frame call ===");
@@ -421,33 +668,102 @@ impl App {
 
         // 2. Advance game state
         if let Some(gs) = &mut self.game_state {
+            let prev_combo = gs.stats.combo;
+            let prev_jam_combo = gs.stats.jam_combo;
+            let prev_max_combo = gs.stats.max_combo;
             gs.update(delta_ms);
-            gs.spawn_notes();
-            gs.cleanup_notes();
+            gs.combo_counter.update(delta_ms as f64);
 
-            if let Some(audio_mgr) = &mut self.audio {
-                gs.process_audio(audio_mgr);
+            // Only run gameplay logic after startup delay (is_rendering = true)
+            if gs.is_rendering {
+                gs.spawn_notes();
+                gs.auto_judge_notes(); // Auto-play judgment
+                gs.cleanup_notes();
+                gs.cleanup_effects(); // Remove expired effects
+
+                // Trigger combo counter animation when combo increases
+                if gs.stats.combo > prev_combo {
+                    gs.combo_counter.increment();
+                    // Only show combo title/max combo when starting a new combo streak (combo was 0)
+                    if prev_combo == 0 {
+                        gs.show_combo_title();
+                        gs.show_max_combo_counter();
+                    }
+                } else if gs.stats.combo == 0 && prev_combo > 0 {
+                    gs.combo_counter.reset();
+                }
+
+                // Show jam counter when jam combo increases
+                if gs.stats.jam_combo > prev_jam_combo {
+                    gs.show_jam_counter();
+                }
+
+                // Show max combo when max combo increases (new high score)
+                if gs.stats.max_combo > prev_max_combo {
+                    gs.show_max_combo_counter();
+                    gs.show_combo_title();
+                }
+
+                if let Some(audio_mgr) = &mut self.audio {
+                    gs.process_audio(audio_mgr);
+                }
             }
+
         }
 
         // 3. Acquire surface texture
-        let Some(ref surface) = render.surface else { return };
+        let Some(ref surface) = render.surface else { return false; };
         let surface_texture = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(st) => st,
             wgpu::CurrentSurfaceTexture::Suboptimal(st) => {
                 st
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return false,
             wgpu::CurrentSurfaceTexture::Outdated => {
                 surface.configure(&render.device, &render.config);
-                return;
+                return false;
             }
-            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Validation => return,
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Validation => return false,
         };
 
         let view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Draw cover background (only before game state is loaded)
+        if self.game_state.is_none() {
+            if let Some(ref gpu) = render.gpu {
+                if let (Some(pipeline), Some(bind_group)) = (&gpu.cover_pipeline, &gpu.cover_bind_group) {
+                    let mut encoder = render.device.create_command_encoder(
+                        &wgpu::CommandEncoderDescriptor { label: Some("cover_encoder") }
+                    );
+                    {
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("cover_pass"),
+                            multiview_mask: None,
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                depth_slice: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, bind_group, &[]);
+                        pass.draw(0..4, 0..1);
+                    }
+                    render.queue.submit(Some(encoder.finish()));
+                    surface_texture.present();
+                    return false;
+                }
+            }
+        }
 
         // 4. Calculate skin scale and letterbox offset
         // Scale the 800x600 skin to fit the window while maintaining aspect ratio
@@ -488,11 +804,11 @@ impl App {
                         "note_bg",
                         "dashboard",
                         "lifebar_bg",
-                        "timebar",
                         "judgmentarea",
                         "lifebar",
-                        "pill",
-                        "jam_bar",
+                        // "pill" is drawn by HUD based on pill_count
+                        // "jam_bar" is drawn by HUD with fill clipping, not as static sprite
+                        // "timebar" is drawn by HUD with progress-based fill clipping
                         "static_keyboard",
                     ];
 
@@ -529,180 +845,283 @@ impl App {
             let judgment_line_y = skin_judgment_line_y as f64;
 
             if let (Some(atlas), Some(_skin_res)) = (&gpu.atlas, &gpu.skin) {
-                // Draw measure marks scrolling with the notes
-                if let Some(measure_frame) = atlas.get_frame("measure_mark") {
-                    let mw = measure_frame.width as f32 * skin_scale_x;
-                    let mh = measure_frame.height as f32 * skin_scale_y;
+                // Only draw chart elements (measure marks, notes, long notes) after startup delay
+                // During startup: chart is invisible, not frozen
+                if gs.is_rendering {
+                    // Draw measure marks scrolling with the notes (animated)
+                    if let Some(measure_frame) = atlas.get_frame_at_time("measure_mark", render_time as f64)
+                        .or_else(|| atlas.get_frame("measure_mark").copied()) {
+                        let mw = measure_frame.width as f32 * skin_scale_x;
+                        let mh = measure_frame.height as f32 * skin_scale_y;
 
-                    // Center measure mark on the judgment area
-                    // judgmentarea: x=3, w=192; measure_mark: w=188 → centered at 3 + (192-188)/2 = 5
-                    let mark_skin_x: f32 = 5.0;
-                    let mx = offset_x + mark_skin_x * skin_scale_x;
+                        // Center measure mark on the judgment area
+                        // judgmentarea: x=3, w=192; measure_mark: w=188 → centered at 3 + (192-188)/2 = 5
+                        let mark_skin_x: f32 = 5.0;
+                        let mx = offset_x + mark_skin_x * skin_scale_x;
 
-                    for event in &gs.chart.events {
-                        if let TimedEvent::Measure(ev) = event {
-                            // Skip measures that have already passed the judgment line
-                            if render_time > ev.time_ms {
-                                continue;
-                            }
+                        for event in &gs.chart.events {
+                            if let TimedEvent::Measure(ev) = event {
+                                // Skip measures that have already passed the judgment line
+                                if render_time > ev.time_ms {
+                                    continue;
+                                }
 
-                            let y = note_y_position(
-                                render_time,
-                                ev.time_ms,
-                                bpm,
-                                judgment_line_y,
-                                viewport_height,
-                                gs.scroll_speed,
-                            );
-                            // Only draw if within viewport (above top, below bottom skip)
-                            let screen_y = offset_y + y as f32 * skin_scale_y - mh / 2.0;
-                            if screen_y > -mh && screen_y < config_height + mh {
-                                gpu.textured_renderer.draw_textured_quad(
-                                    mx, screen_y, mw, mh, measure_frame.uv, [1.0, 1.0, 1.0, 0.5],
+                                let y = note_y_position(
+                                    render_time,
+                                    ev.time_ms,
+                                    bpm,
+                                    judgment_line_y,
+                                    viewport_height,
+                                    gs.scroll_speed,
                                 );
+                                // Only draw if within viewport (above top, below bottom skip)
+                                let screen_y = offset_y + y as f32 * skin_scale_y - mh / 2.0;
+                                if screen_y > -mh && screen_y < config_height + mh {
+                                    gpu.textured_renderer.draw_textured_quad(
+                                        mx, screen_y, mw, mh, measure_frame.uv, [1.0, 1.0, 1.0, 0.5],
+                                    );
+                                }
                             }
                         }
                     }
-                }
 
-                for note in &gs.active_notes {
-                    let y = note_y_position(
-                        render_time,
-                        note.target_time_ms,
-                        bpm,
-                        judgment_line_y,
-                        viewport_height,
-                        gs.scroll_speed,
-                    );
-
-                    let lane_prefab = &gs.note_prefabs.lanes[note.lane];
-                    let lane_x = offset_x + lane_prefab.x as f32 * skin_scale_x;
-
-                    // Use the sprite ID from the skin XML prefab, fallback to lane-based default
-                    let head_frame_name = lane_prefab.sprite_id.as_deref().unwrap_or_else(|| {
-                        match note.lane {
-                            0 | 1 | 2 => "head_note_white",
-                            3 => "head_note_blue",
-                            _ => "head_note_yellow",
-                        }
-                    });
-
-                    if let Some(head_frame) = atlas.get_frame(head_frame_name) {
-                        let note_w = head_frame.width as f32 * skin_scale_x;
-                        let note_h = head_frame.height as f32 * skin_scale_y;
-                        let x = lane_x; // Left edge aligned with receptor (entity.x is left edge in skin XML)
-                        let y = offset_y + y as f32 * skin_scale_y - note_h / 2.0;
-                        gpu.textured_renderer.draw_textured_quad(
-                            x, y, note_w, note_h, head_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                    for note in &gs.active_notes {
+                        let y = note_y_position(
+                            render_time,
+                            note.target_time_ms,
+                            bpm,
+                            judgment_line_y,
+                            viewport_height,
+                            gs.scroll_speed,
                         );
-                    }
-                }
 
-                // Draw long notes dynamically from game state
-                for long_note in &gs.active_long_notes {
-                    let lane_prefab = &gs.note_prefabs.lanes[long_note.lane];
-                    let lane_x = offset_x + lane_prefab.x as f32 * skin_scale_x;
+                        let lane_prefab = &gs.note_prefabs.lanes[note.lane];
+                        let lane_x = offset_x + lane_prefab.x as f32 * skin_scale_x;
 
-                    // Calculate head and tail Y positions
-                    let head_y = note_y_position(
-                        render_time,
-                        long_note.head_time_ms,
-                        bpm,
-                        judgment_line_y,
-                        viewport_height,
-                        gs.scroll_speed,
-                    );
-
-                    let tail_y = note_y_position(
-                        render_time,
-                        long_note.tail_time_ms,
-                        bpm,
-                        judgment_line_y,
-                        viewport_height,
-                        gs.scroll_speed,
-                    );
-
-                    // Determine sprite names for this lane
-                    let head_frame_name = lane_prefab.head_sprite.as_deref()
-                        .or(lane_prefab.sprite_id.as_deref())
-                        .unwrap_or_else(|| match long_note.lane {
-                            0 | 1 | 2 => "head_note_white",
-                            3 => "head_note_blue",
-                            _ => "head_note_yellow",
-                        });
-
-                    let body_frame_name = lane_prefab.body_sprite.as_deref()
-                        .or(lane_prefab.sprite_id.as_deref())
-                        .unwrap_or_else(|| match long_note.lane {
-                            0 | 1 | 2 => "body_note_white",
-                            3 => "body_note_blue",
-                            _ => "body_note_yellow",
-                        });
-
-                    // Tail uses the same sprite as head (or can be customized)
-                    let tail_frame_name = lane_prefab.tail_sprite.as_deref()
-                        .or(lane_prefab.sprite_id.as_deref())
-                        .unwrap_or(head_frame_name);
-
-                    if let (Some(head_frame), Some(body_frame), Some(tail_frame)) = (
-                        atlas.get_frame(head_frame_name),
-                        atlas.get_frame(body_frame_name),
-                        atlas.get_frame(tail_frame_name),
-                    ) {
-                        let note_w = head_frame.width as f32 * skin_scale_x;
-                        let head_h = head_frame.height as f32 * skin_scale_y;
-                        let tail_h = tail_frame.height as f32 * skin_scale_y;
-
-                        // Long note rendering follows Java pattern:
-                        // - head_sprite (tap note) at the bottom (end_y position, near judgment line)
-                        // - body_sprite stretched between head and tail
-                        // - tail_sprite at the top (tail_y position, where long note started)
-                        //
-                        // CLAMPING: When the head passes the judgment line (head_y > judgment_line_y),
-                        // the head sprite should NOT be drawn, but the body (clipped at the judgment line)
-                        // and tail should continue rendering above the judgment line.
-
-                        let judgment_line_screen_y = offset_y + judgment_line_y as f32 * skin_scale_y;
-                        let head_unclamped_screen_y = offset_y + head_y as f32 * skin_scale_y - head_h / 2.0;
-                        let tail_screen_y = offset_y + tail_y as f32 * skin_scale_y - tail_h / 2.0;
-
-                        // Determine if head is past the judgment line (use skin coords, not scaled screen)
-                        let head_past_judgment = head_y > judgment_line_y;
-
-                        // Calculate effective body bottom: if head is past judgment line, clamp to line
-                        let effective_head_y = if head_past_judgment { judgment_line_y } else { head_y };
-                        let effective_head_screen_y = offset_y + effective_head_y as f32 * skin_scale_y;
-
-                        // In screen coords, body stretches from tail (higher/smaller Y) to head (lower/larger Y)
-                        let body_top = tail_screen_y.min(effective_head_screen_y);
-                        let body_bottom = tail_screen_y.max(effective_head_screen_y);
-                        let body_pixel_height = (body_bottom - body_top).max(0.0);
-
-                        if body_pixel_height > 0.5 {
-                            let body_x = lane_x;
-                            let body_y = body_top;
-
-                            // Draw order (Java): body first, then tail, then head
-                            // 1. Body (middle, stretched) — clipped at judgment line if head is past
-                            gpu.textured_renderer.draw_textured_quad(
-                                body_x, body_y, note_w, body_pixel_height,
-                                body_frame.uv, [1.0, 1.0, 1.0, 1.0],
-                            );
-
-                            // 2. Tail (top cap) — only render if above judgment line
-                            if !head_past_judgment || tail_y < judgment_line_y {
-                                gpu.textured_renderer.draw_textured_quad(
-                                    lane_x, tail_screen_y, note_w, tail_h,
-                                    tail_frame.uv, [1.0, 1.0, 1.0, 1.0],
-                                );
+                        // Use the sprite ID from the skin XML prefab, fallback to lane-based default
+                        let head_frame_name = lane_prefab.sprite_id.as_deref().unwrap_or_else(|| {
+                            match note.lane {
+                                0 | 1 | 2 => "head_note_white",
+                                3 => "head_note_blue",
+                                _ => "head_note_yellow",
                             }
+                        });
 
-                            // 3. Head (bottom tap note) — only render if head is above judgment line
-                            if !head_past_judgment {
+                        // Use animated frame if available, fall back to static frame
+                        let head_frame = atlas.get_frame_at_time(head_frame_name, render_time as f64)
+                            .or_else(|| atlas.get_frame(head_frame_name).copied());
+                        if let Some(head_frame) = head_frame {
+                            let note_w = head_frame.width as f32 * skin_scale_x;
+                            let note_h = head_frame.height as f32 * skin_scale_y;
+                            let x = lane_x; // Left edge aligned with receptor (entity.x is left edge in skin XML)
+                            let y = offset_y + y as f32 * skin_scale_y - note_h / 2.0;
+                            gpu.textured_renderer.draw_textured_quad(
+                                x, y, note_w, note_h, head_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                            );
+                        }
+                    }
+
+                    // Draw long notes dynamically from game state
+                    for long_note in &gs.active_long_notes {
+                        let lane_prefab = &gs.note_prefabs.lanes[long_note.lane];
+                        let lane_x = offset_x + lane_prefab.x as f32 * skin_scale_x;
+
+                        // Calculate head and tail Y positions
+                        let head_y = note_y_position(
+                            render_time,
+                            long_note.head_time_ms,
+                            bpm,
+                            judgment_line_y,
+                            viewport_height,
+                            gs.scroll_speed,
+                        );
+
+                        let tail_y = note_y_position(
+                            render_time,
+                            long_note.tail_time_ms,
+                            bpm,
+                            judgment_line_y,
+                            viewport_height,
+                            gs.scroll_speed,
+                        );
+
+                        // Determine sprite names for this lane
+                        let head_frame_name = lane_prefab.head_sprite.as_deref()
+                            .or(lane_prefab.sprite_id.as_deref())
+                            .unwrap_or_else(|| match long_note.lane {
+                                0 | 1 | 2 => "head_note_white",
+                                3 => "head_note_blue",
+                                _ => "head_note_yellow",
+                            });
+
+                        let body_frame_name = lane_prefab.body_sprite.as_deref()
+                            .or(lane_prefab.sprite_id.as_deref())
+                            .unwrap_or_else(|| match long_note.lane {
+                                0 | 1 | 2 => "body_note_white",
+                                3 => "body_note_blue",
+                                _ => "body_note_yellow",
+                            });
+
+                        // Tail uses the same sprite as head (or can be customized)
+                        let tail_frame_name = lane_prefab.tail_sprite.as_deref()
+                            .or(lane_prefab.sprite_id.as_deref())
+                            .unwrap_or(head_frame_name);
+
+                        if let (Some(head_frame), Some(body_frame), Some(tail_frame)) = (
+                            atlas.get_frame(head_frame_name),
+                            atlas.get_frame(body_frame_name),
+                            atlas.get_frame(tail_frame_name),
+                        ) {
+                            let note_w = head_frame.width as f32 * skin_scale_x;
+                            let head_h = head_frame.height as f32 * skin_scale_y;
+                            let tail_h = tail_frame.height as f32 * skin_scale_y;
+
+                            // Long note rendering follows Java pattern:
+                            // - head_sprite (tap note) at the bottom (end_y position, near judgment line)
+                            // - body_sprite stretched between head and tail
+                            // - tail_sprite at the top (tail_y position, where long note started)
+                            //
+                            // CLAMPING: When the head passes the judgment line (head_y > judgment_line_y),
+                            // the head sprite should NOT be drawn, but the body (clipped at the judgment line)
+                            // and tail should continue rendering above the judgment line.
+
+                            let judgment_line_screen_y = offset_y + judgment_line_y as f32 * skin_scale_y;
+                            let head_unclamped_screen_y = offset_y + head_y as f32 * skin_scale_y - head_h / 2.0;
+                            let tail_screen_y = offset_y + tail_y as f32 * skin_scale_y - tail_h / 2.0;
+
+                            // Determine if head is past the judgment line (use skin coords, not scaled screen)
+                            let head_past_judgment = head_y > judgment_line_y;
+
+                            // Calculate effective body bottom: if head is past judgment line, clamp to line
+                            let effective_head_y = if head_past_judgment { judgment_line_y } else { head_y };
+                            let effective_head_screen_y = offset_y + effective_head_y as f32 * skin_scale_y;
+
+                            // In screen coords, body stretches from tail (higher/smaller Y) to head (lower/larger Y)
+                            let body_top = tail_screen_y.min(effective_head_screen_y);
+                            let body_bottom = tail_screen_y.max(effective_head_screen_y);
+                            let body_pixel_height = (body_bottom - body_top).max(0.0);
+
+                            if body_pixel_height > 0.5 {
+                                let body_x = lane_x;
+                                let body_y = body_top;
+
+                                // Draw order (Java): body first, then tail, then head
+                                // 1. Body (middle, stretched) — clipped at judgment line if head is past
                                 gpu.textured_renderer.draw_textured_quad(
-                                    lane_x, head_unclamped_screen_y - head_h, note_w, head_h,
-                                    head_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                    body_x, body_y, note_w, body_pixel_height,
+                                    body_frame.uv, [1.0, 1.0, 1.0, 1.0],
                                 );
+
+                                // 2. Tail (top cap) — only render if above judgment line
+                                if !head_past_judgment || tail_y < judgment_line_y {
+                                    gpu.textured_renderer.draw_textured_quad(
+                                        lane_x, tail_screen_y, note_w, tail_h,
+                                        tail_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                    );
+                                }
+
+                                // 3. Head (bottom tap note) — only render if head is above judgment line
+                                if !head_past_judgment {
+                                    gpu.textured_renderer.draw_textured_quad(
+                                        lane_x, head_unclamped_screen_y - head_h, note_w, head_h,
+                                        head_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                    );
+                                }
+                            }
+                        }
+                    }
+                } // end if gs.is_rendering
+            }
+        }
+
+        // 8. Draw note click effects (EFFECT_CLICK for Cool/Good on tap notes)
+        // These are drawn centered on each lane at the judgment line position
+        if let (Some(ref mut gpu), Some(gs)) = (&mut render.gpu, &self.game_state) {
+            if gs.is_rendering {
+                if let Some(atlas) = &gpu.atlas {
+                    let render_time = gs.clock.render_time() as f64;
+
+                    // Draw EFFECT_CLICK effects (11 frames, framespeed=60 → 16.67ms per frame)
+                    // Match Java: ee.setPos(ne.getX()+ne.getWidth()/2-ee.getWidth()/2, getViewport()-ee.getHeight()/2)
+                    if let Some(ref click_sprite) = gs.effect_click_sprite {
+                        if let Some(anim) = atlas.animations.get(click_sprite) {
+                            // frame_speed_ms already converted from FPS in XML parser
+                            let frame_speed_ms = anim.frame_speed_ms;
+                            for effect in &gs.note_click_effects {
+                                let frame_idx = effect.frame_index(render_time, frame_speed_ms, anim.frame_count);
+                                let atlas_id = format!("{}_{}", click_sprite, frame_idx);
+                                if let Some(frame) = atlas.get_frame(&atlas_id) {
+                                    let lane_prefab = &gs.note_prefabs.lanes[effect.lane];
+                                    // Match Java: ne.getX() + ne.getWidth()/2 - ee.getWidth()/2
+                                    // lane_prefab.x is the left edge (ne.getX())
+                                    // Get note width from the sprite atlas to center properly
+                                    let note_sprite = lane_prefab.sprite_id.as_deref().unwrap_or_else(|| {
+                                        match effect.lane {
+                                            0 | 1 | 2 => "head_note_white",
+                                            3 => "head_note_blue",
+                                            _ => "head_note_yellow",
+                                        }
+                                    });
+                                    let note_width = atlas.get_frame(note_sprite)
+                                        .map(|f| f.width as f32)
+                                        .unwrap_or(50.0); // fallback width
+                                    let effect_x = offset_x + lane_prefab.x as f32 * skin_scale_x
+                                        + (note_width * skin_scale_x / 2.0)
+                                        - (frame.width as f32 * skin_scale_x / 2.0);
+                                    let effect_y = offset_y + skin_judgment_line_y as f32 * skin_scale_y
+                                        - (frame.height as f32 * skin_scale_y / 2.0);
+
+                                    // Alpha blending handled by renderer (textures have alpha channel)
+                                    gpu.textured_renderer.draw_textured_quad(
+                                        effect_x, effect_y,
+                                        frame.width as f32 * skin_scale_x,
+                                        frame.height as f32 * skin_scale_y,
+                                        frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    // Draw EFFECT_LONGFLARE effects (15 frames, framespeed=33.3 → 30.03ms per frame)
+                    // Match Java: ee.setPos(ne.getX() + ne.getWidth()/2 - ee.getWidth()/2, ee.getY())
+                    if let Some(ref flare_sprite) = gs.effect_longflare_sprite {
+                        if let Some(anim) = atlas.animations.get(flare_sprite) {
+                            // frame_speed_ms already converted from FPS in XML parser
+                            let frame_speed_ms = anim.frame_speed_ms;
+                            for effect in &gs.long_flare_effects {
+                                let frame_idx = effect.frame_index(render_time, frame_speed_ms, anim.frame_count);
+                                let atlas_id = format!("{}_{}", flare_sprite, frame_idx);
+                                if let Some(frame) = atlas.get_frame(&atlas_id) {
+                                    let lane_prefab = &gs.note_prefabs.lanes[effect.lane];
+                                    // Match Java: ne.getX() + ne.getWidth()/2 - ee.getWidth()/2, ee.getY()
+                                    let note_sprite = lane_prefab.sprite_id.as_deref().unwrap_or_else(|| {
+                                        match effect.lane {
+                                            0 | 1 | 2 => "head_note_white",
+                                            3 => "head_note_blue",
+                                            _ => "head_note_yellow",
+                                        }
+                                    });
+                                    let note_width = atlas.get_frame(note_sprite)
+                                        .map(|f| f.width as f32)
+                                        .unwrap_or(50.0); // fallback width
+                                    let flare_x = offset_x + lane_prefab.x as f32 * skin_scale_x
+                                        + (note_width * skin_scale_x / 2.0)
+                                        - (frame.width as f32 * skin_scale_x / 2.0);
+                                    // Use entity Y from skin XML (y="460"), top-aligned at that position
+                                    let flare_y = offset_y + gs.effect_longflare_y as f32 * skin_scale_y;
+
+                                    // EFFECT_LONGFLARE uses additive blending for glow effect (GL_SRC_ALPHA, GL_DST_ALPHA)
+                                    gpu.textured_renderer.set_blend_mode(BlendMode::Additive);
+                                    gpu.textured_renderer.draw_textured_quad(
+                                        flare_x, flare_y,
+                                        frame.width as f32 * skin_scale_x,
+                                        frame.height as f32 * skin_scale_y,
+                                        frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                    );
+                                    // Reset to alpha blending for subsequent draws
+                                    gpu.textured_renderer.set_blend_mode(BlendMode::Alpha);
+                                }
                             }
                         }
                     }
@@ -710,12 +1129,34 @@ impl App {
             }
         }
 
-        // 8. Flush render pass
+        // 9. Draw HUD elements (score, combo, lifebar, judgment popups)
+        // Use separate borrows to avoid conflicting borrows
+        let hud_layout = HudLayout::from_skin();
+        if let Some(gs) = &self.game_state {
+            let render_time = gs.clock.render_time();
+            if let Some(ref mut gpu) = render.gpu {
+                let atlas_ref = gpu.atlas.as_ref();
+                render_hud_with_atlas(
+                    &mut gpu.textured_renderer,
+                    atlas_ref,
+                    gs,
+                    &hud_layout,
+                    (skin_scale_x, skin_scale_y),
+                    (offset_x, offset_y),
+                    render_time as f64,
+                );
+            }
+        }
+
+        // 9. Flush render pass
         if let Some(ref mut gpu) = render.gpu {
             gpu.textured_renderer.end(&view, &render.queue, &render.device);
         }
 
-        // 9. Present
+        // 10. Present
         surface_texture.present();
+
+        // Return whether song has ended (for caller to handle exit)
+        self.game_state.as_ref().map_or(false, |gs| gs.is_song_ended())
     }
 }
