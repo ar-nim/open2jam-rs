@@ -10,7 +10,7 @@ pub const DEFAULT_CHART_PADDING_MS: u64 = 1500;
 #[derive(Debug, Clone)]
 pub struct Clock {
     raw_time_ms: u64,
-    game_start_offset_ms: Option<u64>,
+    pub(crate) game_start_offset_ms: Option<u64>,
     render_interpolation: f32,
     chart_padding_ms: u64,
     current_bpm: f32,

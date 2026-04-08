@@ -459,6 +459,8 @@ pub struct GameState {
     pub duration_minutes: u32,
     /// Accumulator for duration counter update (ms)
     pub duration_accumulator_ms: f64,
+    /// Last absolute game time (for computing internal delta in update_to)
+    pub last_absolute_ms: u64,
     /// Song duration in milliseconds (from OJN header)
     pub song_duration_ms: f64,
     /// Whether the song/game has ended
@@ -629,6 +631,7 @@ impl GameState {
             duration_seconds: 0,
             duration_minutes: 0,
             duration_accumulator_ms: 0.0,
+            last_absolute_ms: 0,
             song_duration_ms,
             is_song_ended: false,
             note_click_effects: Vec::new(),
@@ -644,9 +647,26 @@ impl GameState {
     /// Startup delay duration in milliseconds (2000ms for lifebar fill animation)
     pub const STARTUP_DELAY_MS: f64 = 2000.0;
 
-    /// Advance the game clock and process events.
-    pub fn update(&mut self, delta_ms: u64) {
+    /// Update game state to the given absolute elapsed time.
+    /// No accumulation — the clock is driven directly.
+    /// Computes the internal delta from the previous call for timers and animations.
+    pub fn update(&mut self, absolute_ms: u64) {
+        // Compute internal delta from last absolute time (for timers/animations)
+        let delta_ms = absolute_ms.saturating_sub(self.last_absolute_ms);
+        self.last_absolute_ms = absolute_ms;
         let delta = delta_ms as f64;
+
+        // DEBUG: log first 30 frames and around startup end
+        static DEBUG_FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let debug_n = DEBUG_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let was_rendering = self.is_rendering;
+        if debug_n < 30 || (was_rendering == false && self.startup_delay_ms <= 200.0) {
+            info!("DEBUG[{:>3}] abs={} delta={} raw_time_before={} startup_delay={} is_rendering={}",
+                debug_n, absolute_ms, delta_ms, self.clock.raw_time(), self.startup_delay_ms, self.is_rendering);
+        }
+
+        // Set clock directly to the absolute time
+        self.clock.set_raw_time(absolute_ms);
 
         // Handle startup delay phase
         if !self.is_rendering {
@@ -706,9 +726,17 @@ impl GameState {
             let game_time = self.clock.game_time() as f64;
             if game_time >= self.song_duration_ms {
                 self.is_song_ended = true;
-                info!("Song ended: game time {:.1}ms >= song duration {:.1}ms", 
+                info!("Song ended: game time {:.1}ms >= song duration {:.1}ms",
                     game_time, self.song_duration_ms);
             }
+        }
+
+        // DEBUG: log game_time after update
+        let debug_n2 = DEBUG_FRAME.load(std::sync::atomic::Ordering::Relaxed) - 1;
+        if debug_n2 < 30 || (was_rendering == false && self.startup_delay_ms <= 0.0) {
+            let gt = self.clock.game_time();
+            info!("DEBUG[{:>3}] → raw_time={} game_start_offset={:?} game_time={}",
+                debug_n2, self.clock.raw_time(), self.clock.game_start_offset_ms, gt);
         }
     }
 
