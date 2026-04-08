@@ -82,6 +82,12 @@ pub struct App {
     start_load_game_state: bool,
     /// Background loading state (Some while loading is in progress)
     loading_state: Option<LoadingState>,
+    /// Hybrid clock validation state (tracks previous frame time for monotonicity checks).
+    hybrid_clock_prev: Option<f64>,
+    /// Running average of hybrid clock delta (for jitter detection).
+    hybrid_clock_prev_delta: Option<f64>,
+    /// Frame counter for clock validation warmup.
+    hybrid_clock_frame_count: u64,
 }
 
 impl App {
@@ -96,6 +102,9 @@ impl App {
             game_start_instant: None,
             start_load_game_state: false,
             loading_state: None,
+            hybrid_clock_prev: None,
+            hybrid_clock_prev_delta: None,
+            hybrid_clock_frame_count: 0,
         })
     }
 
@@ -668,6 +677,10 @@ impl App {
             // Record start instant once when game state becomes available
             if self.game_start_instant.is_none() {
                 self.game_start_instant = Some(now);
+                // Reset clock validation state for a fresh warmup period
+                self.hybrid_clock_prev = None;
+                self.hybrid_clock_prev_delta = None;
+                self.hybrid_clock_frame_count = 0;
             }
             let elapsed_ms = self.game_start_instant
                 .map(|t| now.duration_since(t).as_millis() as u64)
@@ -710,6 +723,27 @@ impl App {
 
                 if let Some(audio_mgr) = &mut self.audio {
                     gs.process_audio(audio_mgr);
+
+                    // ── Step 1: Hybrid Clock Validation ──
+                    let base = Instant::now();
+                    let (now_ms, delta_ms, monotonic) = audio_mgr.validate_hybrid_clock(
+                        base,
+                        10.0, // max jitter ms (deviation from running average); 10ms is normal tolerance at 60fps
+                        &mut self.hybrid_clock_prev,
+                        &mut self.hybrid_clock_prev_delta,
+                        &mut self.hybrid_clock_frame_count,
+                    );
+                    // Log every 60 frames so we have a visible heartbeat without spam
+                    static FRAME_COUNTER: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let fc = FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if fc % 60 == 0 {
+                        log::info!(
+                            "Hybrid clock: time={:.1}ms delta={:.3}ms monotonic={} samples={}",
+                            now_ms, delta_ms, monotonic,
+                            audio_mgr.state().samples_played.load(std::sync::atomic::Ordering::Relaxed)
+                        );
+                    }
                 }
             }
 
