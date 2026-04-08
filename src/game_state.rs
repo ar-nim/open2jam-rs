@@ -647,12 +647,10 @@ impl GameState {
     /// Startup delay duration in milliseconds (2000ms for lifebar fill animation)
     pub const STARTUP_DELAY_MS: f64 = 2000.0;
 
-    /// Update game state from the audio playback position.
-    /// The audio clock is the authoritative time source — derived from actual
-    /// samples consumed by the audio output callback.
+    /// Update game state to the given absolute elapsed time.
+    /// No accumulation — the clock is driven directly.
     /// Computes the internal delta from the previous call for timers and animations.
-    pub fn update_from_audio_clock(&mut self, audio_ms: f64) {
-        let absolute_ms = audio_ms.max(0.0) as u64;
+    pub fn update(&mut self, absolute_ms: u64) {
         // Compute internal delta from last absolute time (for timers/animations)
         let delta_ms = absolute_ms.saturating_sub(self.last_absolute_ms);
         self.last_absolute_ms = absolute_ms;
