@@ -76,8 +76,6 @@ pub struct App {
     audio: Option<AudioManager>,
     game_state: Option<GameState>,
     last_frame_time: Option<Instant>,
-    /// When the gameplay started (for absolute time, no delta accumulation).
-    game_start_instant: Option<Instant>,
     /// Whether to start loading the game state on next frame.
     start_load_game_state: bool,
     /// Background loading state (Some while loading is in progress)
@@ -93,7 +91,6 @@ impl App {
             audio: None,
             game_state: None,
             last_frame_time: None,
-            game_start_instant: None,
             start_load_game_state: false,
             loading_state: None,
         })
@@ -659,24 +656,24 @@ impl App {
                 render.gpu.as_ref().map(|g| g.skin.is_some()).unwrap_or(false));
         }
 
-        // 1. Absolute time — no delta accumulation drift
+        // 1. Record frame timestamp (for delta calculation, not game time)
         let now = Instant::now();
         self.last_frame_time = Some(now);
 
-        // 2. Advance game state using absolute elapsed time
+        // 2. Advance game state from audio clock (authoritative time source)
         if let Some(gs) = &mut self.game_state {
-            // Record start instant once when game state becomes available
-            if self.game_start_instant.is_none() {
-                self.game_start_instant = Some(now);
-            }
-            let elapsed_ms = self.game_start_instant
-                .map(|t| now.duration_since(t).as_millis() as u64)
-                .unwrap_or(0);
-
             let prev_combo = gs.stats.combo;
             let prev_jam_combo = gs.stats.jam_combo;
             let prev_max_combo = gs.stats.max_combo;
-            gs.update(elapsed_ms);
+
+            // Use audio playback position as the game clock.
+            // This guarantees zero drift: game time = where the audio actually is.
+            let audio_ms = if let Some(ref audio) = self.audio {
+                audio.playback_position_ms()
+            } else {
+                0.0
+            };
+            gs.update_from_audio_clock(audio_ms);
 
             // Only run gameplay logic after startup delay (is_rendering = true)
             if gs.is_rendering {
