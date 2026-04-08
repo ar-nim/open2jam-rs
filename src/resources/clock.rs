@@ -42,6 +42,16 @@ impl Clock {
         self.raw_time_ms = time_ms;
     }
 
+    pub fn advance_game_time(&mut self, delta_ms: u64) {
+        if !self.is_started() {
+            self.start();
+        }
+        self.raw_time_ms = self.raw_time_ms.saturating_add(delta_ms);
+        self.game_start_offset_ms = self
+            .game_start_offset_ms
+            .map(|offset| offset.saturating_sub(delta_ms));
+    }
+
     // Game time
     pub fn game_time(&self) -> u64 {
         self.game_start_offset_ms
@@ -125,15 +135,5 @@ impl Clock {
             self.game_start_offset_ms =
                 Some(self.raw_time_ms.saturating_sub(game_time_ms));
         }
-    }
-
-    pub fn advance_game_time(&mut self, delta_ms: u64) {
-        if !self.is_started() {
-            self.start();
-        }
-        self.raw_time_ms = self.raw_time_ms.saturating_add(delta_ms);
-        self.game_start_offset_ms = self
-            .game_start_offset_ms
-            .map(|offset| offset.saturating_sub(delta_ms));
     }
 }
