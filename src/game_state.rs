@@ -235,11 +235,13 @@ impl GameStats {
                 self.bad_count += 1;
                 self.combo = 0;
                 self.jam_counter = 0;
+                self.jam_combo = 0; // Reset jam combo multiplier on combo break
             }
             JudgmentType::Miss => {
                 self.miss_count += 1;
                 self.combo = 0;
                 self.jam_counter = 0;
+                self.jam_combo = 0; // Reset jam combo multiplier on combo break
                 self.consecutive_cools = 0;
             }
         }
