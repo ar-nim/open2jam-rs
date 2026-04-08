@@ -227,7 +227,15 @@ fn parse_sprite<R: std::io::BufRead>(
     let id = get_attr(&attrs, "id")
         .unwrap_or("unnamed_sprite")
         .to_string();
-    let frame_speed_ms = parse_attr_u32(&attrs, "framespeed", 50);
+    // framespeed in XML is in FPS (e.g., 60 = 60fps), convert to ms per frame
+    // Java code: framespeed /= 1000, then sub_frame += delta_ms * (framespeed/1000)
+    // So ms_per_frame = 1000 / framespeed_value
+    let framespeed_value = parse_attr_f32(&attrs, "framespeed", 50.0);
+    let frame_speed_ms = if framespeed_value > 0.0 {
+        (1000.0 / framespeed_value) as u32
+    } else {
+        50
+    };
     let alpha = parse_attr_bool(&attrs, "alpha", false);
 
     let mut frames: Vec<FrameDef> = Vec::new();

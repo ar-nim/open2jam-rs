@@ -20,7 +20,7 @@ use crate::gameplay::scroll::note_y_position;
 use crate::parsing::ojn::TimedEvent;
 use crate::parsing::xml::{parse_file as parse_skin_xml, Resources as SkinResources};
 use crate::render::atlas::SkinAtlas;
-use crate::render::textured_renderer::TexturedRenderer;
+use crate::render::textured_renderer::{TexturedRenderer, BlendMode};
 use crate::render::hud::{HudLayout, render_hud_with_atlas};
 
 const SCROLL_SPEED: f64 = 1.0;
@@ -679,6 +679,7 @@ impl App {
                 gs.spawn_notes();
                 gs.auto_judge_notes(); // Auto-play judgment
                 gs.cleanup_notes();
+                gs.cleanup_effects(); // Remove expired effects
 
                 // Trigger combo counter animation when combo increases
                 if gs.stats.combo > prev_combo {
@@ -1033,7 +1034,102 @@ impl App {
             }
         }
 
-        // 8. Draw HUD elements (score, combo, lifebar, judgment popups)
+        // 8. Draw note click effects (EFFECT_CLICK for Cool/Good on tap notes)
+        // These are drawn centered on each lane at the judgment line position
+        if let (Some(ref mut gpu), Some(gs)) = (&mut render.gpu, &self.game_state) {
+            if gs.is_rendering {
+                if let Some(atlas) = &gpu.atlas {
+                    let render_time = gs.clock.render_time() as f64;
+
+                    // Draw EFFECT_CLICK effects (11 frames, framespeed=60 → 16.67ms per frame)
+                    // Match Java: ee.setPos(ne.getX()+ne.getWidth()/2-ee.getWidth()/2, getViewport()-ee.getHeight()/2)
+                    if let Some(ref click_sprite) = gs.effect_click_sprite {
+                        if let Some(anim) = atlas.animations.get(click_sprite) {
+                            // frame_speed_ms already converted from FPS in XML parser
+                            let frame_speed_ms = anim.frame_speed_ms;
+                            for effect in &gs.note_click_effects {
+                                let frame_idx = effect.frame_index(render_time, frame_speed_ms, anim.frame_count);
+                                let atlas_id = format!("{}_{}", click_sprite, frame_idx);
+                                if let Some(frame) = atlas.get_frame(&atlas_id) {
+                                    let lane_prefab = &gs.note_prefabs.lanes[effect.lane];
+                                    // Match Java: ne.getX() + ne.getWidth()/2 - ee.getWidth()/2
+                                    // lane_prefab.x is the left edge (ne.getX())
+                                    // Get note width from the sprite atlas to center properly
+                                    let note_sprite = lane_prefab.sprite_id.as_deref().unwrap_or_else(|| {
+                                        match effect.lane {
+                                            0 | 1 | 2 => "head_note_white",
+                                            3 => "head_note_blue",
+                                            _ => "head_note_yellow",
+                                        }
+                                    });
+                                    let note_width = atlas.get_frame(note_sprite)
+                                        .map(|f| f.width as f32)
+                                        .unwrap_or(50.0); // fallback width
+                                    let effect_x = offset_x + lane_prefab.x as f32 * skin_scale_x
+                                        + (note_width * skin_scale_x / 2.0)
+                                        - (frame.width as f32 * skin_scale_x / 2.0);
+                                    let effect_y = offset_y + skin_judgment_line_y as f32 * skin_scale_y
+                                        - (frame.height as f32 * skin_scale_y / 2.0);
+
+                                    // Alpha blending handled by renderer (textures have alpha channel)
+                                    gpu.textured_renderer.draw_textured_quad(
+                                        effect_x, effect_y,
+                                        frame.width as f32 * skin_scale_x,
+                                        frame.height as f32 * skin_scale_y,
+                                        frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    // Draw EFFECT_LONGFLARE effects (15 frames, framespeed=33.3 → 30.03ms per frame)
+                    // Match Java: ee.setPos(ne.getX() + ne.getWidth()/2 - ee.getWidth()/2, ee.getY())
+                    if let Some(ref flare_sprite) = gs.effect_longflare_sprite {
+                        if let Some(anim) = atlas.animations.get(flare_sprite) {
+                            // frame_speed_ms already converted from FPS in XML parser
+                            let frame_speed_ms = anim.frame_speed_ms;
+                            for effect in &gs.long_flare_effects {
+                                let frame_idx = effect.frame_index(render_time, frame_speed_ms, anim.frame_count);
+                                let atlas_id = format!("{}_{}", flare_sprite, frame_idx);
+                                if let Some(frame) = atlas.get_frame(&atlas_id) {
+                                    let lane_prefab = &gs.note_prefabs.lanes[effect.lane];
+                                    // Match Java: ne.getX() + ne.getWidth()/2 - ee.getWidth()/2, ee.getY()
+                                    let note_sprite = lane_prefab.sprite_id.as_deref().unwrap_or_else(|| {
+                                        match effect.lane {
+                                            0 | 1 | 2 => "head_note_white",
+                                            3 => "head_note_blue",
+                                            _ => "head_note_yellow",
+                                        }
+                                    });
+                                    let note_width = atlas.get_frame(note_sprite)
+                                        .map(|f| f.width as f32)
+                                        .unwrap_or(50.0); // fallback width
+                                    let flare_x = offset_x + lane_prefab.x as f32 * skin_scale_x
+                                        + (note_width * skin_scale_x / 2.0)
+                                        - (frame.width as f32 * skin_scale_x / 2.0);
+                                    // Use entity Y from skin XML (y="460"), top-aligned at that position
+                                    let flare_y = offset_y + gs.effect_longflare_y as f32 * skin_scale_y;
+
+                                    // EFFECT_LONGFLARE uses additive blending for glow effect (GL_SRC_ALPHA, GL_DST_ALPHA)
+                                    gpu.textured_renderer.set_blend_mode(BlendMode::Additive);
+                                    gpu.textured_renderer.draw_textured_quad(
+                                        flare_x, flare_y,
+                                        frame.width as f32 * skin_scale_x,
+                                        frame.height as f32 * skin_scale_y,
+                                        frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                    );
+                                    // Reset to alpha blending for subsequent draws
+                                    gpu.textured_renderer.set_blend_mode(BlendMode::Alpha);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 9. Draw HUD elements (score, combo, lifebar, judgment popups)
         // Use separate borrows to avoid conflicting borrows
         let hud_layout = HudLayout::from_skin();
         if let Some(gs) = &self.game_state {

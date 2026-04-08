@@ -17,6 +17,86 @@ use crate::resources::clock::Clock;
 use crate::skin::prefab::NotePrefabs;
 use crate::parsing::xml::Resources as SkinResources;
 
+/// A note click effect instance (EFFECT_CLICK sprite, shown for Cool/Good).
+///
+/// Animation behavior: plays through all frames of the effect_click_1 sprite once,
+/// then disappears. Centered on the lane at the judgment line position.
+#[derive(Debug, Clone)]
+pub struct NoteClickEffect {
+    /// Lane index (0-6)
+    pub lane: usize,
+    /// Time when the effect was triggered (for animation timing)
+    pub time_created_ms: f64,
+    /// Total duration the effect is displayed (based on frame count * frame_speed)
+    pub duration_ms: f64,
+}
+
+impl NoteClickEffect {
+    pub fn new(lane: usize, time_ms: f64, duration_ms: f64) -> Self {
+        Self {
+            lane,
+            time_created_ms: time_ms,
+            duration_ms,
+        }
+    }
+
+    /// Check if this effect is still active (animating).
+    pub fn is_active(&self, current_time_ms: f64) -> bool {
+        (current_time_ms - self.time_created_ms) < self.duration_ms
+    }
+
+    /// Get the current animation frame index.
+    /// Loops through frames indefinitely (matches Java AnimatedEntity modulo behavior).
+    pub fn frame_index(&self, current_time_ms: f64, frame_speed_ms: u32, frame_count: usize) -> usize {
+        let elapsed = current_time_ms - self.time_created_ms;
+        if frame_speed_ms == 0 || frame_count == 0 {
+            return 0;
+        }
+        let idx = (elapsed / frame_speed_ms as f64) as usize;
+        idx % frame_count  // loops, matches Java: sub_frame %= frames.size()
+    }
+}
+
+/// A long note flare effect instance (EFFECT_LONGFLARE sprite, shown for Cool/Good).
+///
+/// Animation behavior: plays through all frames of the longflare sprite once,
+/// then disappears. Centered on the lane at the judgment line position.
+#[derive(Debug, Clone)]
+pub struct LongFlareEffect {
+    /// Lane index (0-6)
+    pub lane: usize,
+    /// Time when the effect was triggered (for animation timing)
+    pub time_created_ms: f64,
+    /// Total duration the effect is displayed (based on frame count * frame_speed)
+    pub duration_ms: f64,
+}
+
+impl LongFlareEffect {
+    pub fn new(lane: usize, time_ms: f64, duration_ms: f64) -> Self {
+        Self {
+            lane,
+            time_created_ms: time_ms,
+            duration_ms,
+        }
+    }
+
+    /// Check if this effect is still active (animating).
+    pub fn is_active(&self, current_time_ms: f64) -> bool {
+        (current_time_ms - self.time_created_ms) < self.duration_ms
+    }
+
+    /// Get the current animation frame index.
+    /// Loops through frames indefinitely (matches Java AnimatedEntity modulo behavior).
+    pub fn frame_index(&self, current_time_ms: f64, frame_speed_ms: u32, frame_count: usize) -> usize {
+        let elapsed = current_time_ms - self.time_created_ms;
+        if frame_speed_ms == 0 || frame_count == 0 {
+            return 0;
+        }
+        let idx = (elapsed / frame_speed_ms as f64) as usize;
+        idx % frame_count  // loops, matches Java: sub_frame %= frames.size()
+    }
+}
+
 /// Total number of notes in the chart (for scoring).
 pub fn count_playable_notes(chart: &Chart) -> u32 {
     chart.events.iter().filter(|e| {
@@ -381,6 +461,20 @@ pub struct GameState {
     pub song_duration_ms: f64,
     /// Whether the song/game has ended
     pub is_song_ended: bool,
+    /// Active note click effects (EFFECT_CLICK, triggered on Cool/Good for tap notes)
+    pub note_click_effects: Vec<NoteClickEffect>,
+    /// Active long note flare effects (EFFECT_LONGFLARE, triggered on Cool/Good for long notes)
+    pub long_flare_effects: Vec<LongFlareEffect>,
+    /// EFFECT_CLICK sprite ID from skin XML
+    pub effect_click_sprite: Option<String>,
+    /// EFFECT_CLICK animation duration (frame_count * frame_speed_ms)
+    pub effect_click_duration_ms: f64,
+    /// EFFECT_LONGFLARE sprite ID from skin XML
+    pub effect_longflare_sprite: Option<String>,
+    /// EFFECT_LONGFLARE animation duration (frame_count * frame_speed_ms)
+    pub effect_longflare_duration_ms: f64,
+    /// EFFECT_LONGFLARE Y position from skin XML (default 460)
+    pub effect_longflare_y: i32,
 }
 
 impl GameState {
@@ -424,18 +518,49 @@ impl GameState {
         info!("Sound cache: {} decoded samples", sound_cache.len());
 
         // 4. Build note prefabs from skin XML if available, otherwise use defaults
-        let note_prefabs = if let Some(skin_res) = skin_resources {
-            if let Some(skin) = skin_res.get_skin("o2jam") {
-                info!("Building note prefabs from skin XML (o2jam)");
-                NotePrefabs::from_skin(skin)
+        // Also extract effect entity info
+        let (note_prefabs, click_sprite, click_duration, longflare_sprite, longflare_duration, longflare_y) =
+            if let Some(skin_res) = skin_resources {
+                if let Some(skin) = skin_res.get_skin("o2jam") {
+                    info!("Building note prefabs from skin XML (o2jam)");
+                    let prefabs = NotePrefabs::from_skin(skin);
+
+                    // Extract EFFECT_CLICK entity and sprite data
+                    let click_entity = skin.entities.iter()
+                        .find(|e| e.id.as_deref() == Some("EFFECT_CLICK"));
+                    let click_sprite = click_entity.and_then(|e| e.sprite.clone());
+                    let click_duration = click_sprite.as_ref()
+                        .and_then(|sprite_id| skin_res.sprites.get(sprite_id))
+                        .map(|s| s.frames.len() as f64 * s.frame_speed_ms as f64)
+                        .unwrap_or(660.0); // fallback: 11 frames × 60ms
+                    if click_sprite.is_some() {
+                        info!("EFFECT_CLICK sprite: {:?}, duration: {}ms", click_sprite, click_duration);
+                    }
+
+                    // Extract EFFECT_LONGFLARE entity and sprite data
+                    let longflare_entity = skin.entities.iter()
+                        .find(|e| e.id.as_deref() == Some("EFFECT_LONGFLARE"));
+                    let longflare_sprite = longflare_entity.and_then(|e| e.sprite.clone());
+                    let longflare_y = longflare_entity.map(|e| e.y).unwrap_or(460);
+                    let longflare_duration = longflare_sprite.as_ref()
+                        .and_then(|sprite_id| skin_res.sprites.get(sprite_id))
+                        .map(|s| s.frames.len() as f64 * s.frame_speed_ms as f64)
+                        .unwrap_or(450.0); // fallback: 15 frames × 30ms
+                    if longflare_sprite.is_some() {
+                        info!("EFFECT_LONGFLARE sprite: {:?}, y={}, duration: {}ms", longflare_sprite, longflare_y, longflare_duration);
+                    }
+
+                    (prefabs, click_sprite, click_duration, longflare_sprite, longflare_duration, longflare_y)
+                } else {
+                    info!("Skin 'o2jam' not found, using default 7-lane layout");
+                    let prefabs = NotePrefabs::default_7lan(1000, 750, 600);
+                    (prefabs, None, 660.0, None, 450.0, 460)
+                }
             } else {
-                info!("Skin 'o2jam' not found, using default 7-lane layout");
-                NotePrefabs::default_7lan(1000, 750, 600)
-            }
-        } else {
-            info!("No skin resources provided, using default 7-lane layout");
-            NotePrefabs::default_7lan(1000, 750, 600)
-        };
+                info!("No skin resources provided, using default 7-lane layout");
+                let prefabs = NotePrefabs::default_7lan(1000, 750, 600);
+                (prefabs, None, 660.0, None, 450.0, 460)
+            };
 
         // 5. Calculate spawn lead time based on BPM and viewport
         let base_bpm = chart.header.bpm as f64;
@@ -504,6 +629,13 @@ impl GameState {
             duration_accumulator_ms: 0.0,
             song_duration_ms,
             is_song_ended: false,
+            note_click_effects: Vec::new(),
+            long_flare_effects: Vec::new(),
+            effect_click_sprite: click_sprite,
+            effect_click_duration_ms: click_duration,
+            effect_longflare_sprite: longflare_sprite,
+            effect_longflare_duration_ms: longflare_duration,
+            effect_longflare_y: longflare_y,
         })
     }
 
@@ -738,6 +870,9 @@ impl GameState {
 
         // Collect judgments to add after iteration (avoid borrow conflicts)
         let mut judgments_to_add: Vec<PendingJudgment> = Vec::new();
+        // Collect lanes that got judged (for triggering effects after iteration)
+        let mut click_effect_lanes: Vec<usize> = Vec::new();
+        let mut longflare_effect_lanes: Vec<(usize, f64)> = Vec::new(); // (lane, hold_duration)
 
         // Judge tap notes that have reached the judgment line
         // Use a wider tolerance for auto-play to ensure all notes are hit
@@ -752,6 +887,8 @@ impl GameState {
                     
                     self.stats.record_judgment(JudgmentType::Cool, false);
                     
+                    click_effect_lanes.push(note.lane);
+                    
                     // Instant replace: clear previous judgments, add new one
                     judgments_to_add.push(PendingJudgment::new(
                         JudgmentType::Cool,
@@ -760,6 +897,11 @@ impl GameState {
                     ));
                 }
             }
+        }
+        
+        // Trigger effects after iteration (avoid borrow conflicts)
+        for lane in click_effect_lanes.drain(..) {
+            self.trigger_note_click_effect(lane, render_time);
         }
 
         // Check for missed tap notes
@@ -788,6 +930,11 @@ impl GameState {
                     long_note.head_judgment = Some(JudgmentType::Cool);
                     long_note.holding = true;
                     self.stats.record_judgment(JudgmentType::Cool, false);
+
+                    // Calculate hold duration for this long note
+                    let hold_duration = (long_note.tail_time_ms - long_note.head_time_ms).max(0.0);
+                    longflare_effect_lanes.push((long_note.lane, hold_duration));
+
                     // Instant replace: clear previous judgments, add new one
                     judgments_to_add.push(PendingJudgment::new(
                         JudgmentType::Cool,
@@ -796,6 +943,11 @@ impl GameState {
                     ));
                 }
             }
+        }
+
+        // Trigger longflare effects after iteration (avoid borrow conflicts)
+        for (lane, hold_duration) in longflare_effect_lanes.drain(..) {
+            self.trigger_longflare_effect(lane, render_time, Some(hold_duration));
         }
 
         // Judge long note tails (auto-release when tail passes judgment line)
@@ -887,9 +1039,19 @@ impl GameState {
         }
         
         // Apply judgment after iteration (avoid borrow conflicts)
-        if let Some((judgment, _is_long)) = judgment_result {
+        if let Some((judgment, is_long)) = judgment_result {
             self.stats.record_judgment(judgment, false);
             self.add_pending_judgment(PendingJudgment::new(judgment, lane, render_time));
+            
+            // Trigger effects only for Cool and Good
+            if matches!(judgment, JudgmentType::Cool | JudgmentType::Good) {
+                if is_long {
+                    self.trigger_longflare_effect(lane, render_time, None);
+                } else {
+                    self.trigger_note_click_effect(lane, render_time);
+                }
+            }
+            
             return Some(judgment);
         }
         
@@ -946,5 +1108,34 @@ impl GameState {
 
     pub fn active_long_note_count(&self) -> usize {
         self.active_long_notes.len()
+    }
+
+    /// Trigger EFFECT_CLICK for a lane when a Cool or Good judgment occurs (tap note).
+    ///
+    /// Duration is pre-calculated from the sprite's frame count and frame speed during skin loading.
+    pub fn trigger_note_click_effect(&mut self, lane: usize, render_time: f64) {
+        if self.effect_click_sprite.is_some() {
+            let duration = self.effect_click_duration_ms;
+            self.note_click_effects.push(NoteClickEffect::new(lane, render_time, duration));
+        }
+    }
+
+    /// Trigger EFFECT_LONGFLARE for a lane when a Cool or Good judgment occurs (long note head).
+    ///
+    /// Duration is pre-calculated from the sprite's frame count and frame speed during skin loading.
+    /// If custom_duration_ms is provided, it overrides the sprite-based duration (used for autoplay
+    /// to match the actual hold duration of the long note).
+    pub fn trigger_longflare_effect(&mut self, lane: usize, render_time: f64, custom_duration_ms: Option<f64>) {
+        if self.effect_longflare_sprite.is_some() {
+            let duration = custom_duration_ms.unwrap_or(self.effect_longflare_duration_ms);
+            self.long_flare_effects.push(LongFlareEffect::new(lane, render_time, duration));
+        }
+    }
+
+    /// Clean up expired effects (no longer active).
+    pub fn cleanup_effects(&mut self) {
+        let render_time = self.clock.render_time() as f64;
+        self.note_click_effects.retain(|e| e.is_active(render_time));
+        self.long_flare_effects.retain(|e| e.is_active(render_time));
     }
 }
