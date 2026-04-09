@@ -422,6 +422,7 @@ fn build_timed_events(
 ) -> Result<Vec<TimedEvent>, OjnError> {
     let mut events: Vec<TimedEvent> = Vec::new();
     let mut current_bpm = base_bpm;
+    let mut frac_measure: f64 = 1.0; // Fractional measure size, resets per measure
 
     // Add initial measure 0 event
     events.push(TimedEvent::Measure(MeasureEvent {
@@ -450,8 +451,13 @@ fn build_timed_events(
         // Advance time by the actual gap in measure numbers
         if let Some(prev_measure) = last_measure_num {
             let measures_diff = measure_num.saturating_sub(prev_measure);
-            time_ms += measure_duration(measures_diff as f64, current_bpm);
+            for _ in 0..measures_diff {
+                time_ms += measure_duration(frac_measure, current_bpm);
+                frac_measure = 1.0; // Each skipped measure is a new measure → reset
+            }
         }
+        // Reset frac_measure for the current measure; TIME_SIGNATURE events below will set it
+        frac_measure = 1.0;
         last_measure_num = Some(measure_num);
 
         let channels = &measures[&measure_num];
@@ -465,8 +471,26 @@ fn build_timed_events(
         }
 
         // Process channels in this measure
+        // Phase 1: Process TIME_SIGNATURE events first (they affect frac_measure for this measure)
         for &(channel_num, events_count, ref event_data) in channels {
             let channel = Channel::from_number(channel_num);
+            if channel == Channel::TimeSignature {
+                for (i, event_bytes) in event_data.iter().enumerate() {
+                    let value = f32::from_le_bytes(*event_bytes) as f64;
+                    if value > 0.0 {
+                        frac_measure = value;
+                    }
+                }
+            }
+        }
+
+        // Phase 2: Process all other channels
+        for &(channel_num, events_count, ref event_data) in channels {
+            let channel = Channel::from_number(channel_num);
+
+            if channel == Channel::TimeSignature {
+                continue; // Already handled above
+            }
 
             for (i, event_bytes) in event_data.iter().enumerate() {
                 let position = i as f64 / events_count as f64;
@@ -477,18 +501,13 @@ fn build_timed_events(
                         if bpm > 0.0 {
                             current_bpm = bpm;
                         }
-                        let event_time = time_ms + measure_duration(position, current_bpm);
+                        let event_time = time_ms + measure_duration(frac_measure, current_bpm) * position;
                         events.push(TimedEvent::BpmChange(BpmChangeEvent {
                             time_ms: event_time,
                             bpm: current_bpm,
                             measure: measure_num,
                             position,
                         }));
-                    }
-                    Channel::TimeSignature => {
-                        // Time signature events are float values (beats per measure)
-                        // For simplicity, treat as regular timing
-                        let _value = f32::from_le_bytes(*event_bytes);
                     }
                     _ => {
                         // Note event
@@ -511,7 +530,7 @@ fn build_timed_events(
                             None
                         };
 
-                        let event_time = time_ms + measure_duration(position, current_bpm);
+                        let event_time = time_ms + measure_duration(frac_measure, current_bpm) * position;
 
                         let note_event = NoteEvent {
                             time_ms: event_time,
@@ -588,10 +607,10 @@ fn pair_long_notes(events: &mut [TimedEvent]) {
     }
 }
 
-fn measure_duration(position_fraction: f64, bpm: f64) -> f64 {
-    // 4 beats per measure, each beat = 60000 / bpm ms
-    // position_fraction goes from 0.0 to 1.0 for a full measure
-    4.0 * 60000.0 / bpm * position_fraction
+fn measure_duration(frac_measure: f64, bpm: f64) -> f64 {
+    // Java: (BEATS_PER_MESC * frac_measure) / bpm
+    // where BEATS_PER_MESC = 4 * 60 * 1000 = 240000
+    240000.0 * frac_measure / bpm
 }
 
 // ---------------------------------------------------------------------------
