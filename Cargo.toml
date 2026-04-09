@@ -25,6 +25,9 @@ env_logger = "0.11"
 # For loading PNG/JPEG images as textures
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
+# Lock-free SPSC queue for BGM scheduling (main thread → audio thread)
+rtrb = "0.3"
+
 [profile.release]
 opt-level = 3
 lto = true

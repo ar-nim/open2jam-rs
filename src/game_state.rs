@@ -1,9 +1,10 @@
 //! Game state machine: integrates clock, chart, audio, and note lifecycle.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use log::info;
+use log::{info, warn};
 
 use crate::audio::manager::AudioManager;
 use crate::audio::trigger::{AudioTriggerEvent, AudioTriggerSystem};
@@ -451,6 +452,8 @@ pub struct GameState {
     pub startup_delay_ms: f64,
     /// Whether the game is in rendering mode (false during startup delay)
     pub is_rendering: bool,
+    /// Audio stream needs to be started (set true when startup delay completes)
+    pub startup_audio_pending: bool,
     /// Life percentage during startup animation (0.0 to 1.0)
     pub startup_life_percent: f32,
     /// Duration counter: elapsed seconds since gameplay started (wall-clock)
@@ -479,6 +482,10 @@ pub struct GameState {
     pub effect_longflare_duration_ms: f64,
     /// EFFECT_LONGFLARE Y position from skin XML (default 460)
     pub effect_longflare_y: i32,
+    /// Index of the next BGM note to schedule (into chart.events)
+    pub next_bgm_event_idx: usize,
+    /// Lookahead window in milliseconds (how far ahead to schedule BGM notes)
+    pub bgm_lookahead_ms: f64,
 }
 
 impl GameState {
@@ -507,6 +514,66 @@ impl GameState {
         // Count playable notes
         let total_playable_notes = count_playable_notes(&chart);
         info!("Total playable notes: {}", total_playable_notes);
+
+        // ── DEBUG: Dump events around 13-15 seconds ──
+        info!("=== DEBUG: Events around 13-15s ===");
+        for (i, event) in chart.events.iter().enumerate() {
+            match event {
+                TimedEvent::Note(n) => {
+                    let t = n.time_ms / 1000.0;
+                    if t >= 12.0 && t <= 17.0 {
+                        info!(
+                            "  [{}] Note at {:.1}s ({:.0}ms) lane={:?} type={:?} sample={:?} vol={:.1} pan={:.1}",
+                            i, t, n.time_ms, n.channel, n.note_type, n.sample_id, n.volume, n.pan
+                        );
+                    }
+                }
+                TimedEvent::BpmChange(b) => {
+                    let t = b.time_ms / 1000.0;
+                    if t >= 12.0 && t <= 17.0 {
+                        info!("  [{}] BPM at {:.1}s, bpm={:.1}", i, t, b.bpm);
+                    }
+                }
+                TimedEvent::Measure(m) => {
+                    let t = m.time_ms / 1000.0;
+                    if t >= 12.0 && t <= 17.0 {
+                        info!("  [{}] Measure {} at {:.1}s", i, m.measure, t);
+                    }
+                }
+            }
+        }
+        info!("=== END DEBUG ===");
+
+        // ── DEBUG: Find gaps > 1 measure between consecutive BGM notes ──
+        let base_bpm_check = chart.header.bpm as f64;
+        let measure_duration_ms = 4.0 * 60000.0 / base_bpm_check;
+        let mut prev_bgm_time: Option<f64> = None;
+        let mut large_gap_count = 0;
+        for event in &chart.events {
+            if let TimedEvent::Note(n) = event {
+                if n.note_type == NoteType::Release {
+                    continue;
+                }
+                if let Some(prev) = prev_bgm_time {
+                    let gap = n.time_ms - prev;
+                    if gap > measure_duration_ms * 1.5 {
+                        warn!(
+                            "BGM gap at {:.1}ms: {:.1}ms ({:.1}x measure duration, bpm={:.0})",
+                            n.time_ms, gap, gap / measure_duration_ms, base_bpm_check
+                        );
+                        large_gap_count += 1;
+                    }
+                }
+                prev_bgm_time = Some(n.time_ms);
+            }
+        }
+        if large_gap_count > 0 {
+            warn!("Found {} BGM gaps > 1.5x measure duration ({:.1}ms at {:.0}bpm)",
+                large_gap_count, measure_duration_ms, base_bpm_check);
+        } else {
+            info!("No large BGM gaps detected (measure duration = {:.1}ms at {:.0}bpm)",
+                measure_duration_ms, base_bpm_check);
+        }
 
         // 2. Find and parse the OJM audio file
         let ojm_filename = &chart.header.ojm_filename;
@@ -573,22 +640,13 @@ impl GameState {
         let spawn_lead_time_ms = travel_time + 500.0;
 
         // 6. Schedule audio triggers for BGM events (auto-play mode)
-        let mut audio_triggers = AudioTriggerSystem::new();
-        if auto_play {
-            for event in &chart.events {
-                if let TimedEvent::Note(note_event) = event {
-                    if note_event.note_type == NoteType::Release {
-                        continue;
-                    }
-                    if let Some(sample_id) = note_event.sample_id {
-                        audio_triggers.schedule(AudioTriggerEvent::new(
-                            sample_id,
-                            note_event.time_ms.round() as u64,
-                        ).with_volume(note_event.volume).with_pan(note_event.pan));
-                    }
-                }
-            }
-            info!("Scheduled {} audio triggers (auto-play mode)", audio_triggers.pending_count());
+        // In autoplay, we use the BGM lookahead scheduler instead of AudioTriggerSystem
+        let audio_triggers = AudioTriggerSystem::new();
+        let next_bgm_event_idx = 0;
+        let bgm_lookahead_ms = 500.0; // 500ms lookahead
+        if !auto_play {
+            // Manual play: schedule BGM via lookahead scheduler (not AudioTriggerSystem)
+            // AudioTriggerSystem is kept empty; BGM is scheduled via push_bgm_command
         }
 
         let mut clock = Clock::new();
@@ -627,6 +685,7 @@ impl GameState {
             combo_title_visible_ms: 0.0,
             startup_delay_ms: 2000.0, // 2 second startup delay
             is_rendering: false,
+            startup_audio_pending: false,
             startup_life_percent: 0.0,
             duration_seconds: 0,
             duration_minutes: 0,
@@ -641,6 +700,8 @@ impl GameState {
             effect_longflare_sprite: longflare_sprite,
             effect_longflare_duration_ms: longflare_duration,
             effect_longflare_y: longflare_y,
+            next_bgm_event_idx,
+            bgm_lookahead_ms,
         })
     }
 
@@ -672,6 +733,7 @@ impl GameState {
                 self.startup_life_percent = 1.0;
                 // Start the game clock after startup animation
                 self.clock.start();
+                self.startup_audio_pending = true;
                 info!("Startup delay complete, gameplay begins now");
             }
         }
@@ -786,6 +848,15 @@ impl GameState {
     pub fn spawn_notes(&mut self) {
         let render_time = self.clock.render_time();
 
+        // ── DEBUG: Log note spawning around 13-15s ──
+        let spawn_debug = render_time >= 11000.0 && render_time <= 16000.0;
+        if spawn_debug {
+            log::info!(
+                "spawn_notes: render_time={:.0}ms next_idx={}/{} lead={:.0}ms",
+                render_time, self.next_event_idx, self.chart.events.len(), self.spawn_lead_time_ms
+            );
+        }
+
         while self.next_event_idx < self.chart.events.len() {
             let event = &self.chart.events[self.next_event_idx];
             let target_time = match event {
@@ -798,6 +869,14 @@ impl GameState {
 
             if target_time > render_time as f64 + self.spawn_lead_time_ms {
                 break;
+            }
+
+            if spawn_debug {
+                log::info!(
+                    "  SPAWN [{}] note at {:.0}ms (render={:.0}ms, lead={:.0}ms, diff={:.0}ms)",
+                    self.next_event_idx, target_time, render_time, self.spawn_lead_time_ms,
+                    target_time - render_time
+                );
             }
 
             if let TimedEvent::Note(note_event) = event {
@@ -853,12 +932,110 @@ impl GameState {
     }
 
     /// Process audio triggers for the current game time.
+    ///
+    /// In autoplay mode, this scans the chart for BGM notes within the lookahead
+    /// window and pushes them to the BGM signal queue via `audio_manager.push_bgm_command()`.
+    /// This ensures sample-accurate timing regardless of frame rate.
+    ///
+    /// Returns the number of BGM notes scheduled this frame.
     pub fn process_audio(&mut self, audio_manager: &mut AudioManager) -> usize {
-        self.audio_triggers.process(
-            &self.clock,
-            &self.sound_cache,
-            audio_manager,
-        )
+        use crate::audio::bgm_signal::BgmCommand;
+        use crate::parsing::ojn::{NoteType, TimedEvent};
+
+        let game_time = self.clock.game_time() as f64;
+        let lookahead_end = game_time + self.bgm_lookahead_ms;
+        let mut scheduled_count = 0;
+
+        // ── DEBUG: Log scheduler state around 13-14s ──
+        let debug_enabled = game_time >= 11000.0 && game_time <= 16000.0;
+        if debug_enabled {
+            log::info!(
+                "BGM sched: game_time={:.0}ms lookahead={:.0}ms next_idx={}/{}",
+                game_time, lookahead_end, self.next_bgm_event_idx, self.chart.events.len()
+            );
+        }
+        if debug_enabled && self.next_bgm_event_idx < self.chart.events.len() {
+            let next_ev = &self.chart.events[self.next_bgm_event_idx];
+            if let TimedEvent::Note(n) = next_ev {
+                log::info!(
+                    "BGM next: note_time={:.0}ms (diff={:.0}ms) type={:?} lane={:?}",
+                    n.time_ms, n.time_ms - game_time, n.note_type, n.channel
+                );
+            }
+        }
+
+        // Scan chart for BGM notes within the lookahead window
+        while self.next_bgm_event_idx < self.chart.events.len() {
+            let event = &self.chart.events[self.next_bgm_event_idx];
+
+            match event {
+                TimedEvent::Note(note_event) => {
+                    // Skip release notes (tails of long notes)
+                    if note_event.note_type == NoteType::Release {
+                        self.next_bgm_event_idx += 1;
+                        continue;
+                    }
+
+                    // Skip notes that are already in the past
+                    if note_event.time_ms < game_time {
+                        if debug_enabled {
+                            log::debug!(
+                                "BGM SKIP (past): note at {:.0}ms < game_time {:.0}ms (diff={:.0}ms)",
+                                note_event.time_ms, game_time, game_time - note_event.time_ms
+                            );
+                        }
+                        self.next_bgm_event_idx += 1;
+                        continue;
+                    }
+
+                    // Stop if we've gone past the lookahead window
+                    if note_event.time_ms > lookahead_end {
+                        break;
+                    }
+
+                    // Schedule this BGM note
+                    if let Some(sample_id) = note_event.sample_id {
+                        if let Some(frames) = self.sound_cache.get_sound(sample_id) {
+                            // Calculate delay in samples from now to the note's target time
+                            let delay_ms = note_event.time_ms - game_time;
+                            let delay_samples = audio_manager.ms_to_samples(delay_ms.max(0.0));
+
+                            if debug_enabled {
+                                log::debug!(
+                                    "BGM SCHEDULE: note at {:.0}ms, delay={:.0}ms ({} samples), sample_id={}",
+                                    note_event.time_ms, delay_ms, delay_samples, sample_id
+                                );
+                            }
+
+                            let command = BgmCommand {
+                                frames: Arc::clone(frames),
+                                delay_samples,
+                                volume: note_event.volume,
+                                pan: note_event.pan,
+                            };
+
+                            // Push to BGM queue (ignore if queue is full — rare)
+                            if let Err(_err) = audio_manager.push_bgm_command(command) {
+                                log::warn!(
+                                    "BGM queue full, dropping note: sample_id={} time={:.1}ms",
+                                    sample_id, note_event.time_ms
+                                );
+                            } else {
+                                scheduled_count += 1;
+                            }
+                        }
+                    }
+
+                    self.next_bgm_event_idx += 1;
+                }
+                _ => {
+                    // Skip non-note events
+                    self.next_bgm_event_idx += 1;
+                }
+            }
+        }
+
+        scheduled_count
     }
 
     /// Clear all pending judgments (original O2Jam behavior: instant replace).

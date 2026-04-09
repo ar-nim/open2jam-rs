@@ -693,6 +693,14 @@ impl App {
 
             // Only run gameplay logic after startup delay (is_rendering = true)
             if gs.is_rendering {
+                // Start audio stream when startup just completed
+                if gs.startup_audio_pending {
+                    gs.startup_audio_pending = false;
+                    if let Some(audio_mgr) = &mut self.audio {
+                        audio_mgr.play();
+                    }
+                }
+
                 gs.spawn_notes();
                 gs.auto_judge_notes(); // Auto-play judgment
                 gs.cleanup_notes();
@@ -733,15 +741,43 @@ impl App {
                         &mut self.hybrid_clock_prev_delta,
                         &mut self.hybrid_clock_frame_count,
                     );
-                    // Log every 60 frames so we have a visible heartbeat without spam
+
                     static FRAME_COUNTER: std::sync::atomic::AtomicU64 =
                         std::sync::atomic::AtomicU64::new(0);
                     let fc = FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                     if fc % 60 == 0 {
                         log::info!(
                             "Hybrid clock: time={:.1}ms delta={:.3}ms monotonic={} samples={}",
                             now_ms, delta_ms, monotonic,
                             audio_mgr.state().samples_played.load(std::sync::atomic::Ordering::Relaxed)
+                        );
+
+                        // ── DEBUG: Clock sync check ──
+                        let audio_time_ms = audio_mgr.audio_time_ms(base);
+                        if let Some(gs) = &self.game_state {
+                            let game_time = gs.game_time_ms();
+                            let diff = game_time - audio_time_ms;
+                            if diff.abs() > 50.0 {
+                                log::warn!(
+                                    "CLOCK SYNC: game_time={:.1}ms audio_time={:.1}ms diff={:.1}ms",
+                                    game_time, audio_time_ms, diff
+                                );
+                            }
+                        }
+                    }
+
+                    // ── Audio CPU Usage Monitor ──
+                    // Log every 600 frames (~10s at 60fps)
+                    static CPU_FRAME_COUNTER: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let cpu_fc = CPU_FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if cpu_fc % 600 == 0 {
+                        let (avg, max, budget, pct) = audio_mgr.callback_cpu_usage();
+                        let bar = "█".repeat((pct / 2.0).max(0.5) as usize);
+                        log::info!(
+                            "Audio CPU: avg={}µs max={}µs budget={}µs [{:5.1}%] {}",
+                            avg, max, budget, pct, bar
                         );
                     }
                 }

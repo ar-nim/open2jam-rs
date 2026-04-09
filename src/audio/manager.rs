@@ -15,6 +15,9 @@ use std::time::Instant;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{info, warn};
 use oddio::{Mixer, MixerControl};
+use rtrb::RingBuffer;
+
+use super::bgm_signal::BgmSignalQueue;
 
 pub type StereoFrame = [f32; 2];
 
@@ -33,6 +36,10 @@ pub struct AudioState {
     /// A stable reference instant captured once at stream start.
     /// All `last_callback_instant` values are relative to this via `.elapsed().as_nanos()`.
     pub callback_token: AtomicU64,
+    /// Max callback duration in microseconds (updated atomically from audio thread).
+    pub max_callback_us: AtomicU32,
+    /// Average callback duration in microseconds (exponential moving average, alpha=0.01).
+    pub avg_callback_us: AtomicU32,
 }
 
 pub struct AudioManager {
@@ -40,6 +47,8 @@ pub struct AudioManager {
     _stream: Option<cpal::Stream>,
     state: Arc<AudioState>,
     active: bool,
+    /// BGM signal queue producer (main thread pushes commands here)
+    bgm_producer: Option<rtrb::Producer<super::bgm_signal::BgmCommand>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -51,13 +60,14 @@ pub enum AudioPlayError {
 impl AudioManager {
     pub fn new() -> Self {
         match Self::init() {
-            Ok((mixer, stream, state)) => {
-                info!("AudioManager initialised (oddio + cpal).");
+            Ok((mixer, stream, state, bgm_producer)) => {
+                info!("AudioManager initialised (oddio + cpal). Stream paused — call play() to start.");
                 Self {
                     mixer: Some(mixer),
                     _stream: Some(stream),
                     state,
-                    active: true,
+                    active: false,  // Stream created but not started
+                    bgm_producer: Some(bgm_producer),
                 }
             }
             Err(e) => {
@@ -71,14 +81,22 @@ impl AudioManager {
                         samples_played: AtomicU64::new(0),
                         last_callback_instant: AtomicU64::new(0),
                         callback_token: AtomicU64::new(0),
+                        max_callback_us: AtomicU32::new(0),
+                        avg_callback_us: AtomicU32::new(0),
                     }),
                     active: false,
+                    bgm_producer: None,
                 }
             }
         }
     }
 
-    fn init() -> anyhow::Result<(MixerControl<StereoFrame>, cpal::Stream, Arc<AudioState>)> {
+    fn init() -> anyhow::Result<(
+        MixerControl<StereoFrame>,
+        cpal::Stream,
+        Arc<AudioState>,
+        rtrb::Producer<super::bgm_signal::BgmCommand>,
+    )> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
@@ -92,7 +110,12 @@ impl AudioManager {
             sample_rate, channels, config.sample_format()
         );
 
-        let (mixer_control, mut mixer) = Mixer::<StereoFrame>::new();
+        let (mut mixer_control, mut mixer) = Mixer::<StereoFrame>::new();
+
+        // Create BGM signal queue and rtrb channel
+        let (producer, consumer) = RingBuffer::new(1024);
+        let mut bgm_queue = BgmSignalQueue::new();
+        bgm_queue.set_consumer(consumer);
 
         // Capture a stable reference instant before stream creation.
         // All callback timestamps will be relative to this via `.elapsed().as_nanos()`.
@@ -104,6 +127,8 @@ impl AudioManager {
             samples_played: AtomicU64::new(0),
             last_callback_instant: AtomicU64::new(0),
             callback_token: AtomicU64::new(callback_token.elapsed().as_nanos() as u64),
+            max_callback_us: AtomicU32::new(0),
+            avg_callback_us: AtomicU32::new(0),
         });
 
         let stream_config = cpal::StreamConfig {
@@ -112,8 +137,8 @@ impl AudioManager {
             buffer_size: cpal::BufferSize::Fixed(256),
         };
 
-        // Helper: record frames played and timestamp into the shared state.
-        let record_callback = move |frames_len: usize, state: &Arc<AudioState>| {
+        // Helper: record frames played, timestamp, and CPU usage into the shared state.
+        let record_callback = move |frames_len: usize, elapsed_us: u32, state: &Arc<AudioState>| {
             state
                 .samples_played
                 .fetch_add(frames_len as u64, Ordering::Relaxed);
@@ -121,6 +146,22 @@ impl AudioManager {
             state
                 .last_callback_instant
                 .store(now_ns, Ordering::Relaxed);
+
+            // Update max (compare-exchange loop)
+            let mut current_max = state.max_callback_us.load(Ordering::Relaxed);
+            while elapsed_us > current_max {
+                match state.max_callback_us.compare_exchange_weak(
+                    current_max, elapsed_us, Ordering::Relaxed, Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(val) => current_max = val,
+                }
+            }
+
+            // Update EMA (alpha = 0.01 for slow, stable response)
+            let prev_avg = state.avg_callback_us.load(Ordering::Relaxed);
+            let new_avg = ((prev_avg as u64 * 99 + elapsed_us as u64) / 100) as u32;
+            state.avg_callback_us.store(new_avg, Ordering::Relaxed);
         };
 
         let state_for_f32 = Arc::clone(&state);
@@ -131,9 +172,11 @@ impl AudioManager {
             cpal::SampleFormat::F32 => device.build_output_stream(
                 &stream_config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    let start = Instant::now();
                     let frames = oddio::frame_stereo(data);
                     oddio::run(&mut mixer, sample_rate, frames);
-                    record_callback(frames.len(), &state_for_f32);
+                    let elapsed_us = start.elapsed().as_micros() as u32;
+                    record_callback(frames.len(), elapsed_us, &state_for_f32);
                 },
                 |err| warn!("Audio error: {}", err),
                 None,
@@ -141,6 +184,7 @@ impl AudioManager {
             cpal::SampleFormat::I16 => device.build_output_stream(
                 &stream_config,
                 move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                    let start = Instant::now();
                     let mut buf = [0.0f32; 8192];
                     let len = data.len().min(buf.len());
                     let frames = oddio::frame_stereo(&mut buf[..len]);
@@ -149,7 +193,8 @@ impl AudioManager {
                     for i in 0..len {
                         data[i] = (buf[i] * 32767.0).clamp(-32768.0, 32767.0) as i16;
                     }
-                    record_callback(frame_count, &state_for_i16);
+                    let elapsed_us = start.elapsed().as_micros() as u32;
+                    record_callback(frame_count, elapsed_us, &state_for_i16);
                 },
                 |err| warn!("Audio error: {}", err),
                 None,
@@ -157,6 +202,7 @@ impl AudioManager {
             cpal::SampleFormat::U16 => device.build_output_stream(
                 &stream_config,
                 move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
+                    let start = Instant::now();
                     let mut buf = [0.0f32; 8192];
                     let len = data.len().min(buf.len());
                     let frames = oddio::frame_stereo(&mut buf[..len]);
@@ -165,7 +211,8 @@ impl AudioManager {
                     for i in 0..len {
                         data[i] = ((buf[i] * 32767.0 + 32767.0).clamp(0.0, 65535.0)) as u16;
                     }
-                    record_callback(frame_count, &state_for_u16);
+                    let elapsed_us = start.elapsed().as_micros() as u32;
+                    record_callback(frame_count, elapsed_us, &state_for_u16);
                 },
                 |err| warn!("Audio error: {}", err),
                 None,
@@ -173,8 +220,12 @@ impl AudioManager {
             fmt => return Err(anyhow::anyhow!("Unsupported sample format: {:?}", fmt)),
         };
 
-        stream.play()?;
-        Ok((mixer_control, stream, state))
+        // Add the BGM queue to the mixer so it's always playing.
+        // The queue is now owned by the mixer; we only keep the producer.
+        mixer_control.play(bgm_queue);
+
+        // Stream is created but NOT started. Call audio_mgr.play() to begin playback.
+        Ok((mixer_control, stream, state, producer))
     }
 
     pub fn mixer(&mut self) -> Option<&mut MixerControl<StereoFrame>> {
@@ -185,8 +236,51 @@ impl AudioManager {
         self.active
     }
 
+    /// Start the audio stream. Call this after the startup animation completes.
+    ///
+    /// This begins actual audio output through cpal. Before this call,
+    /// the stream exists but is paused — the BGM queue and mixer are ready,
+    /// but no audio reaches the speakers.
+    pub fn play(&mut self) {
+        if let Some(ref stream) = self._stream {
+            match stream.play() {
+                Ok(()) => {
+                    self.active = true;
+                    info!("Audio stream started.");
+                }
+                Err(e) => warn!("Failed to start audio stream: {}", e),
+            }
+        }
+    }
+
     pub fn state(&self) -> &Arc<AudioState> {
         &self.state
+    }
+
+    // ── CPU Usage Monitoring ───────────────────────────────────────
+
+    /// Returns `(avg_us, max_us, budget_us, percent_used)`.
+    ///
+    /// - `avg_us`: Exponential moving average of callback duration
+    /// - `max_us`: Worst-case callback duration since startup
+    /// - `budget_us`: Maximum allowed time (buffer_size / sample_rate)
+    /// - `percent_used`: avg / budget × 100
+    ///
+    /// **Rule of thumb:** `percent_used` should stay below 50%.
+    /// If `max_us` approaches `budget_us`, you'll hear crackling (ALSA underruns).
+    pub fn callback_cpu_usage(&self) -> (u32, u32, u32, f64) {
+        let rate = self.state.sample_rate.load(Ordering::Relaxed) as f64;
+        let budget_us = (256.0 / rate * 1_000_000.0) as u32;
+
+        let avg = self.state.avg_callback_us.load(Ordering::Relaxed);
+        let max = self.state.max_callback_us.load(Ordering::Relaxed);
+        let percent = if budget_us > 0 {
+            avg as f64 / budget_us as f64 * 100.0
+        } else {
+            0.0
+        };
+
+        (avg, max, budget_us, percent)
     }
 
     // ── Hybrid Phase-Locked Clock ──────────────────────────────────
@@ -329,6 +423,26 @@ impl AudioManager {
 
         mixer.play(signal);
         Ok(())
+    }
+
+    /// Push a BGM command to the sample-accurate scheduling queue.
+    ///
+    /// This sends a BGM note to the audio thread via a lock-free SPSC queue.
+    /// The note will be played at the precise sample offset specified by
+    /// `delay_samples`, ensuring sample-accurate timing regardless of when
+    /// this method is called relative to the audio callback.
+    ///
+    /// Returns `Err(PushError)` if the queue is full (rare, capacity is 1024).
+    pub fn push_bgm_command(
+        &mut self,
+        command: super::bgm_signal::BgmCommand,
+    ) -> Result<(), rtrb::PushError<super::bgm_signal::BgmCommand>> {
+        if let Some(producer) = &mut self.bgm_producer {
+            producer.push(command)
+        } else {
+            // If no producer, silently succeed (degraded mode)
+            Ok(())
+        }
     }
 }
 
