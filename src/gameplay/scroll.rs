@@ -7,6 +7,12 @@
 //! distance_px = speed × beats_remaining × measure_size / 4
 //! measure_size = 0.8 × viewport_height
 //! ```
+//!
+//! For charts with BPM changes, use `scroll_distance_bpm_aware()` and
+//! `note_y_position_bpm_aware()` which use `TimingData::getBeat()` to
+//! correctly accumulate beats across BPM changes (matches Java HiSpeed).
+
+use super::timing_data::TimingData;
 
 /// The fraction of viewport height used as the measure size.
 pub const MEASURE_SIZE_FRACTION: f64 = 0.8;
@@ -64,6 +70,43 @@ pub fn note_y_position(
     speed: f64,
 ) -> f64 {
     let distance = scroll_distance(render_time_ms, target_time_ms, bpm, viewport_height, speed);
+    judgment_line_y - distance
+}
+
+// ── BPM-aware scroll functions (uses TimingData velocity tree) ─────────
+
+/// Calculate scroll distance using the BPM-aware velocity tree.
+///
+/// This matches Java's HiSpeed formula:
+///   pixels = speed × (getBeat(target) - getBeat(now)) × measureSize / 4
+///
+/// Correctly accounts for all intermediate BPM changes between `render_time_ms`
+/// and `target_time_ms`.
+pub fn scroll_distance_bpm_aware(
+    render_time_ms: f64,
+    target_time_ms: f64,
+    timing: &TimingData,
+    viewport_height: f64,
+    speed: f64,
+) -> f64 {
+    if timing.is_empty() {
+        return 0.0;
+    }
+    let beats_remaining = timing.get_beat(target_time_ms) - timing.get_beat(render_time_ms);
+    let measure_size = viewport_height * MEASURE_SIZE_FRACTION;
+    speed * beats_remaining * measure_size / 4.0
+}
+
+/// Calculate the Y position of a note on screen using BPM-aware timing.
+pub fn note_y_position_bpm_aware(
+    render_time_ms: f64,
+    target_time_ms: f64,
+    timing: &TimingData,
+    judgment_line_y: f64,
+    viewport_height: f64,
+    speed: f64,
+) -> f64 {
+    let distance = scroll_distance_bpm_aware(render_time_ms, target_time_ms, timing, viewport_height, speed);
     judgment_line_y - distance
 }
 

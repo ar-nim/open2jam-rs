@@ -3,6 +3,7 @@
 pub mod judgment;
 pub mod modifiers;
 pub mod scroll;
+pub mod timing_data;
 
 pub use judgment::{
     JudgmentType,

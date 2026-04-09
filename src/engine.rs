@@ -16,7 +16,7 @@ use winit::window::Window;
 
 use crate::audio::AudioManager;
 use crate::game_state::GameState;
-use crate::gameplay::scroll::note_y_position;
+use crate::gameplay::scroll::note_y_position_bpm_aware;
 use crate::parsing::ojn::TimedEvent;
 use crate::parsing::xml::{parse_file as parse_skin_xml, Resources as SkinResources};
 use crate::render::atlas::SkinAtlas;
@@ -940,10 +940,10 @@ impl App {
                                     continue;
                                 }
 
-                                let y = note_y_position(
+                                let y = note_y_position_bpm_aware(
                                     render_time,
                                     ev.time_ms,
-                                    bpm,
+                                    &gs.timing,
                                     judgment_line_y,
                                     viewport_height,
                                     gs.scroll_speed,
@@ -960,10 +960,10 @@ impl App {
                     }
 
                     for note in &gs.active_notes {
-                        let y = note_y_position(
+                        let y = note_y_position_bpm_aware(
                             render_time,
                             note.target_time_ms,
-                            bpm,
+                            &gs.timing,
                             judgment_line_y,
                             viewport_height,
                             gs.scroll_speed,
@@ -1000,20 +1000,20 @@ impl App {
                         let lane_prefab = &gs.note_prefabs.lanes[long_note.lane];
                         let lane_x = offset_x + lane_prefab.x as f32 * skin_scale_x;
 
-                        // Calculate head and tail Y positions
-                        let head_y = note_y_position(
+                        // Calculate head and tail Y positions (BPM-aware)
+                        let head_y = note_y_position_bpm_aware(
                             render_time,
                             long_note.head_time_ms,
-                            bpm,
+                            &gs.timing,
                             judgment_line_y,
                             viewport_height,
                             gs.scroll_speed,
                         );
 
-                        let tail_y = note_y_position(
+                        let tail_y = note_y_position_bpm_aware(
                             render_time,
                             long_note.tail_time_ms,
-                            bpm,
+                            &gs.timing,
                             judgment_line_y,
                             viewport_height,
                             gs.scroll_speed,
