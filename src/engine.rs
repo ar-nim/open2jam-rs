@@ -752,19 +752,6 @@ impl App {
                             now_ms, delta_ms, monotonic,
                             audio_mgr.state().samples_played.load(std::sync::atomic::Ordering::Relaxed)
                         );
-
-                        // ── DEBUG: Clock sync check ──
-                        let audio_time_ms = audio_mgr.audio_time_ms(base);
-                        if let Some(gs) = &self.game_state {
-                            let game_time = gs.game_time_ms();
-                            let diff = game_time - audio_time_ms;
-                            if diff.abs() > 50.0 {
-                                log::warn!(
-                                    "CLOCK SYNC: game_time={:.1}ms audio_time={:.1}ms diff={:.1}ms",
-                                    game_time, audio_time_ms, diff
-                                );
-                            }
-                        }
                     }
 
                     // ── Audio CPU Usage Monitor ──

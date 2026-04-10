@@ -2,12 +2,12 @@
 
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::path::Path;
+use std::sync::Arc;
 
 use log::{info, warn};
 use oddio::Frames;
 
-use crate::parsing::ojm::{self, SampleEntry, SampleMap};
+use crate::parsing::ojm::{SampleEntry, SampleMap};
 
 // ---------------------------------------------------------------------------
 // Sound cache
@@ -19,8 +19,6 @@ pub struct SoundCache {
     source_path: String,
     loaded: bool,
 }
-
-use std::sync::Arc;
 
 impl Default for SoundCache {
     fn default() -> Self {

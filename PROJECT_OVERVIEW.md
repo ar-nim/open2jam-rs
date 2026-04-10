@@ -10,10 +10,10 @@
 | **Version** | 0.1.0 (Preview Mode) |
 | **Render** | wgpu 29 (GPU-accelerated, textured sprites, dual blend modes) |
 | **Window/Input** | winit 0.30 |
-| **Audio** | oddio 0.7.4 + cpal 0.17.3 (low-latency) |
+| **Audio** | oddio 0.7.4 + cpal 0.17.3 (low-latency, sample-accurate BGM scheduling) |
 | **Audio Formats** | Ogg Vorbis (lewton), WAV (hound) |
 | **Parsing** | quick-xml (skin XML), custom binary (OJN/OJM) |
-| **Upstream** | `git@github.com:ar-nim/open2jam-rs.git` → `ar-nim/gameplay-logic` |
+| **Upstream** | `git@github.com:ar-nim/open2jam-rs.git` → `ar-nim/improve-sync-consistency` |
 
 ## What Is This?
 
@@ -27,7 +27,6 @@ The project is currently in **preview mode**: no song selection UI, no menus. Yo
 open2jam-rs/
 ├── Cargo.toml                 # Project manifest, dependencies
 ├── assets/                    # Game assets directory
-│   └── audio/
 ├── test_assets/               # Test fixtures
 │   └── README.md
 ├── src/
@@ -37,21 +36,28 @@ open2jam-rs/
 │   ├── test_harness.rs        # Test utilities
 │   │
 │   ├── audio/                 # Audio subsystem
-│   │   ├── mod.rs             # Exports AudioManager
-│   │   ├── manager.rs         # oddio + cpal host setup, mixer control
+│   │   ├── mod.rs             # Exports AudioManager, bgm_signal
+│   │   ├── manager.rs         # oddio + cpal host, mixer control, BGM queue producer,
+│   │   │                      # hybrid phase-locked clock, CPU usage monitor
+│   │   │                      # stream created paused → play() starts after startup delay
+│   │   ├── bgm_signal.rs      # BgmSignalQueue + ScheduledSignal — custom oddio::Signal
+│   │   │                      # that mixes multiple concurrent BGM notes by accumulation
 │   │   ├── cache.rs           # Decoded sample cache (SoundCache)
 │   │   ├── chart_audio.rs     # Chart-to-audio linkage
-│   │   └── trigger.rs         # Time-driven audio trigger system (schedule, fire, skip)
+│   │   └── trigger.rs         # Time-driven audio trigger system (legacy, kept for reference)
 │   │
 │   ├── gameplay/              # Gameplay mechanics
 │   │   ├── mod.rs             # Module exports
-│   │   ├── scroll.rs          # Beat-to-pixel scroll math (core BPM-based formula)
+│   │   ├── scroll.rs          # Beat-to-pixel scroll math (static BPM + BPM-aware variants)
+│   │   ├── timing_data.rs     # Velocity tree (TimingData) — BPM-aware beat calculation
+│   │   │                      # matches Java's TimingData/VelocityChange with getBeat()
 │   │   ├── judgment.rs        # Hit detection (COOL/GOOD/BAD/MISS, tap + release)
 │   │   └── modifiers.rs       # Game modifiers (Hi-Speed, etc.)
 │   │
 │   ├── parsing/               # File format parsers
 │   │   ├── mod.rs             # Module exports
-│   │   ├── ojn.rs             # OJN binary chart parser (.ojn) — notes, BPM changes, measures
+│   │   ├── ojn.rs             # OJN binary chart parser (.ojn) — notes, BPM changes,
+│   │   │                      # measure markers, time signature (channel 0), sample IDs
 │   │   ├── ojm.rs             # OJM binary audio parser (.ojm) — sample extraction
 │   │   ├── chart.rs           # Chart data model (TimedEvent, NoteEvent, BpmChangeEvent)
 │   │   └── xml.rs             # Skin XML parser (resources.xml) — sprites, entities, effects
@@ -59,7 +65,7 @@ open2jam-rs/
 │   ├── render/                # Rendering subsystem (wgpu)
 │   │   ├── mod.rs             # Module exports
 │   │   ├── atlas.rs           # Texture atlas builder — packs sprite frames into GPU texture
-│   │   ├── textured_renderer.rs  # Batch textured quad renderer with dual blend modes (alpha/additive)
+│   │   ├── textured_renderer.rs  # Batch textured quad renderer with dual blend modes
 │   │   ├── pipeline.rs        # wgpu render pipeline (solid color quads)
 │   │   ├── states.rs          # Render pipeline state management
 │   │   └── hud.rs             # HUD rendering (score, combo, lifebar, timer, judgment popups)
@@ -97,13 +103,21 @@ main() → App::new() → App::run()
                   │     └─ HudLayout — HUD position data from skin
                   │
                   ├─ Audio (oddio + cpal)
-                  │     ├─ AudioManager → mixer handle
+                  │     ├─ AudioManager → mixer handle + BGM queue producer
+                  │     │     ├─ Stream created PAUSED during init
+                  │     │     ├─ stream.play() called after startup delay completes
+                  │     │     └─ samples_played reset on play() (compensates ALSA callback)
+                  │     ├─ BgmSignalQueue → single oddio::Signal in mixer
+                  │     │     ├─ Receives BgmCommand via rtrb SPSC queue (lock-free)
+                  │     │     ├─ Drains commands in sample() callback
+                  │     │     └─ Mixes all active notes by ACCUMULATION (not overwrite)
                   │     ├─ SoundCache → decoded OGG/WAV buffers
-                  │     └─ AudioTriggerSystem → time-driven sample playback (schedule, fire, skip tracking)
+                  │     └─ ScheduledSignal → per-note wrapper with delay_samples
                   │
                   └─ GameState
                         ├─ Clock → game_time, render_time, BPM, interpolation
-                        ├─ Chart → parsed OJN events (notes, BPM changes)
+                        ├─ Chart → parsed OJN events (notes, BPM changes, measures)
+                        ├─ TimingData → velocity tree (BPM-aware beat calculation)
                         ├─ active_notes → tap notes on screen
                         ├─ active_long_notes → long notes (head/body/tail, holding state)
                         ├─ pending_judgments → visual judgment popups (pop-in animation)
@@ -118,39 +132,70 @@ main() → App::new() → App::run()
 
 1. **Delta Time** — measured per frame (rounded to prevent cumulative drift)
 2. **Game State Update** — advance clock by delta_ms (startup delay phase → gameplay)
-3. **Note Spawning** — spawn notes within lead-time window from chart events
+3. **Note Spawning** — spawn notes within lead-time window from chart events (2x travel time + 500ms)
 4. **Auto-Judge / Input** — auto-play mode judges all notes as COOL; manual mode processes keyboard input
 5. **Judgment Processing** — COOL/GOOD triggers effects (click/flare), records stats, updates combo
 6. **Long Note Tail Judgment** — auto-release when tail passes judgment line
-7. **Audio Processing** — trigger samples at scheduled game times via AudioTriggerSystem
-8. **Effect Cleanup** — remove expired click/flare effects (duration-based lifecycle)
-9. **Render** — draw skin background → judgment line → notes → effects → HUD (layered order)
+7. **BGM Lookahead Scheduling** — scan chart 500ms ahead, push BgmCommand to rtrb queue with sample-accurate delay
+8. **Audio Callback** — cpal drains rtrb, creates ScheduledSignal, BgmSignalQueue mixes all active notes
+9. **Effect Cleanup** — remove expired click/flare effects (duration-based lifecycle)
+10. **Render** — draw skin background → judgment line → notes → effects → HUD (layered order)
 
 ## The Scroll Formula
 
-The single most important calculation. Notes scroll based on **BPM**, not fixed speed:
+### Static BPM (used when no BPM changes exist)
+Notes scroll based on **BPM**, not fixed speed:
 
 ```
 distance_px = speed × beats_remaining × (0.8 × viewport_height) / 4
 beats_remaining = (target_time_ms - render_time_ms) / (60000 / BPM)
 ```
 
+### BPM-Aware (used when chart has BPM changes — matches Java HiSpeed)
+Uses a velocity tree (`TimingData`) that stores BPM change points with cumulative beat counts:
+
+```
+beats = timing.getBeat(target_time) - timing.getBeat(render_time)
+distance_px = speed × beats × (0.8 × viewport_height) / 4
+```
+
+`getBeat()` uses binary search to find the correct BPM segment and correctly accumulates beats across all intermediate BPM changes. This ensures scroll speed changes smoothly when BPM shifts mid-chart.
+
 **Higher BPM = faster scroll.** A note at 200 BPM moves twice as fast as one at 100 BPM.
 
 The travel time determines spawn lead:
 ```
 travel_time_ms = (4 × viewport_height / (speed × measure_size)) × 60000 / BPM
+spawn_lead = 2 × travel_time + 500ms   // 2x ensures notes appear at very top even at low BPM/1x speed
 ```
 
 ## File Formats
 
 | Format | Extension | Purpose | Parser |
 |--------|-----------|---------|--------|
-| **OJN** | `.ojn` | Chart — note events, BPM changes, measures, sample IDs | `parsing/ojn.rs` |
+| **OJN** | `.ojn` | Chart — note events, BPM changes, time signatures, measures, sample IDs | `parsing/ojn.rs` |
 | **OJM** | `.ojm` | Audio — individual samples (WAV IDs 0-999, OGG IDs 1000+) | `parsing/ojm.rs` |
 | **Skin XML** | `resources.xml` | Sprite definitions, entity layouts, judgment line Y, effect sprites | `parsing/xml.rs` |
 
-**Chart-to-Audio Linkage:** OJN contains `sample_id` values that map to samples within the OJM file. There is **no continuous background track** — BGM is individual samples triggered automatically at the right game time.
+**Chart-to-Audio Linkage:** OJN contains `sample_id` values that map to samples within the OJM file. BGM is composed from individual samples triggered at precise game times via the BGM lookahead scheduler (rtrb queue → ScheduledSignal → BgmSignalQueue).
+
+## BGM Scheduling Architecture
+
+```
+Main Thread (per frame):                     Audio Thread (cpal callback):
+─────────────────────────                    ─────────────────────────────
+1. Scan chart events 500ms ahead             1. BgmSignalQueue.sample() fires
+   for playable notes                        2. Drain rtrb consumer → create
+2. For each note found:                         ScheduledSignal with delay_samples
+   a. Calculate delay_samples =              3. For each active signal:
+      ms_to_samples(note_time - now)            a. Sample into temp buffer
+   b. Push BgmCommand {                         b. ACCUMULATE into output buffer
+      frames, delay_samples,                     (add samples, don't overwrite)
+      volume, pan } to rtrb producer          4. Remove finished signals
+3. Continue rendering                        5. Mixer writes accumulated output
+```
+
+**Key insight:** BgmSignalQueue is a SINGLE `oddio::Signal` that manages multiple notes internally. The mixer sees it as one entity. Inside `sample()`, it mixes all active notes by **accumulation**, preventing the overwrite bug where simultaneous BGM notes would erase each other.
 
 ## Key Input
 
@@ -228,14 +273,33 @@ Long Note:
 - **Animation**: pop-in (50%→100% scale over 100ms), stays full size for 750ms
 - **Behavior**: instant-replace — new judgment kills previous one immediately
 
+## Hybrid Phase-Locked Clock
+
+The audio hardware is the sovereign authority for timing:
+
+```
+Audio Thread (cpal callback):
+  samples_played += frames_per_callback    // atomic counter
+  last_callback_instant = now.elapsed()    // atomic timestamp
+
+Main Thread (rendering):
+  T_audio   = (samples_played / sample_rate) × 1000
+  T_wall    = (base_instant.elapsed() - callback_timestamp) in ms
+  T_visual  = T_audio + T_wall             // smooth, continuous, monotonic
+```
+
+- `samples_played` never resets (except on `stream.play()`) — only ever increases
+- `T_visual` provides continuous interpolation between discrete audio callback steps
+- At 144Hz+ rendering, this eliminates micro-stutter while staying phase-locked to audio
+
 ## Current Status — What Works
 
 - [x] Window creation & wgpu rendering
 - [x] OJN chart parsing (notes, BPM changes, measures, sample IDs)
 - [x] OJM audio decoding (WAV + OGG samples)
 - [x] Texture atlas building from skin XML sprites
-- [x] Beat-based note scrolling (BPM-dependent)
-- [x] Note spawning & cleanup (lead-time calculation)
+- [x] Beat-based note scrolling (BPM-dependent, velocity tree for BPM changes)
+- [x] Note spawning & cleanup (lead-time calculation, 2x travel time buffer)
 - [x] Auto-play mode (auto-judge all notes as COOL)
 - [x] Long note rendering (head/body/tail with stretchable body)
 - [x] Keyboard input → judgment (press + release)
@@ -253,13 +317,20 @@ Long Note:
 - [x] Audio trigger system (time-driven sample playback)
 - [x] Startup delay animation (2000ms lifebar fill)
 - [x] Dual blend mode pipelines (alpha + additive)
+- [x] **BGM signal queue with proper mixing** — multiple concurrent notes mix by accumulation (rtrb + oddio::Signal)
+- [x] **Fractional measure size (channel 0)** — time signature events parsed and applied per measure
+- [x] **BPM-aware velocity tree** — scroll correctly accounts for mid-chart BPM changes (TimingData)
+- [x] **Audio clock synchronization** — stream starts paused, play() resets counters after startup delay
+- [x] **Sample-accurate BGM scheduling** — lookahead scheduler pushes commands with delay_samples
+- [x] **CPU usage monitor** — callback timing (avg/max/budget logged every 10s)
 - [ ] Song selection menu
 - [ ] Skin selection UI
-- [ ] Audio latency compensation
+- [ ] Audio latency compensation (manual offset adjustment)
 - [ ] Stop channels (chart events that pause audio)
 - [ ] Hi-Speed modifier (UI + scroll adjustment)
 - [ ] Note judgment windows (COOL/GOOD/BAD/MISS text popups — partially done)
 - [ ] Max combo counter display
+- [ ] Manual input mode (keyboard → judgment)
 
 ## How to Run
 
@@ -281,6 +352,7 @@ cargo run -- /path/to/song.ojn
 | `winit` | Cross-platform window creation & input events |
 | `oddio` | Low-latency audio mixing (hotswap + buffer ring) |
 | `cpal` | Cross-platform audio device (output to speakers) |
+| `rtrb` | Lock-free SPSC queue for BGM scheduling (main → audio thread) |
 | `lewton` | Pure-Rust Ogg Vorbis decoder |
 | `hound` | WAV file reader/writer |
 | `quick-xml` | Fast XML parsing (skin definitions) |
@@ -294,9 +366,10 @@ cargo run -- /path/to/song.ojn
 
 1. **Time-based, not frame-based** — all positions derived from game clock
 2. **No singletons** — dependency injection via explicit state
-3. **Separate time authorities** — game time for logic, render time (+interpolation) for visuals
+3. **Separate time authorities** — audio hardware for playback, hybrid clock for rendering
 4. **Skin XML is the authority for visuals** — layout, dimensions, sprite mappings
 5. **Match Java open2jam behavior** — judgment logic, effect lifecycle, animation looping, blend modes
+6. **Real-time safe audio** — no allocations, locks, or panics in cpal callback
 
 ## Key Implementation Details
 
@@ -324,3 +397,27 @@ Effects call `set_blend_mode(BlendMode::Additive)` before drawing the longflare,
 
 ### Instant-Replace Judgments
 Pending judgments use "instant replace" behavior: `clear_pending_judgments()` is called before adding a new one. This matches Java open2jam where the previous judgment entity is killed immediately.
+
+### Fractional Measure Size (Channel 0)
+OJN channel 0 contains a float value that scales the measure duration. E.g., `0.75` means the measure is 75% of normal size. The value is **per-measure** — it resets to `1.0` at each measure boundary unless a new channel 0 event overrides it. This matches Java's `frac_measure` behavior in `construct_velocity_tree()`.
+
+Measure duration formula:
+```
+measure_duration_ms = 240000.0 * frac_measure / BPM
+```
+Where `240000 = 4 * 60 * 1000` (4 beats × 60 seconds × 1000ms).
+
+### Audio Stream Lifecycle
+1. `AudioManager::new()` — creates cpal stream but does NOT start it (`active = false`)
+2. Startup animation plays (2000ms lifebar fill)
+3. `GameState::update()` detects startup complete → sets `startup_audio_pending = true`
+4. `engine.rs` sees the flag → calls `audio_mgr.play()`
+5. `play()` resets `samples_played` to 0 (compensates ALSA starting callback early) → calls `stream.play()` → `active = true`
+6. BGM scheduling only begins after `is_active() == true` (prevents stale delay values)
+
+### CPU Usage Monitor
+Callback timing is tracked atomically in every cpal callback:
+- `max_callback_us`: peak duration since startup (compare-exchange update)
+- `avg_callback_us`: exponential moving average (alpha = 0.01)
+- Logged every ~10 seconds on the main thread (zero impact on audio thread)
+- Budget at 256 samples / 44.1kHz ≈ 5805µs; healthy is <20%, danger is >50%

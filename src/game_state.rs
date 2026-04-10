@@ -724,16 +724,19 @@ impl GameState {
             }
         }
 
-        // Update duration counter (wall-clock seconds, matches Java open2jam pattern)
-        // Runs every 1000ms of accumulated frame time
-        self.duration_accumulator_ms += delta;
-        if self.duration_accumulator_ms >= 1000.0 {
-            self.duration_accumulator_ms -= 1000.0;
-            if self.duration_seconds >= 59 {
-                self.duration_seconds = 0;
-                self.duration_minutes += 1;
-            } else {
-                self.duration_seconds += 1;
+        // Update duration counter — only after startup delay completes.
+        // This ensures the on-screen timer starts at 0:00 when gameplay begins,
+        // so the end of song matches the OJN header duration metadata.
+        if self.is_rendering {
+            self.duration_accumulator_ms += delta;
+            if self.duration_accumulator_ms >= 1000.0 {
+                self.duration_accumulator_ms -= 1000.0;
+                if self.duration_seconds >= 59 {
+                    self.duration_seconds = 0;
+                    self.duration_minutes += 1;
+                } else {
+                    self.duration_seconds += 1;
+                }
             }
         }
 
@@ -893,7 +896,6 @@ impl GameState {
         use crate::parsing::ojn::{NoteType, TimedEvent};
 
         // Don't push BGM commands until the audio stream is running.
-        // Commands pushed before stream.start() accumulate with stale delay values.
         if !audio_manager.is_active() {
             return 0;
         }
@@ -902,66 +904,30 @@ impl GameState {
         let lookahead_end = game_time + self.bgm_lookahead_ms;
         let mut scheduled_count = 0;
 
-        // ── DEBUG: Log scheduler state around 13-14s ──
-        let debug_enabled = game_time >= 11000.0 && game_time <= 16000.0;
-        if debug_enabled {
-            log::info!(
-                "BGM sched: game_time={:.0}ms lookahead={:.0}ms next_idx={}/{}",
-                game_time, lookahead_end, self.next_bgm_event_idx, self.chart.events.len()
-            );
-        }
-        if debug_enabled && self.next_bgm_event_idx < self.chart.events.len() {
-            let next_ev = &self.chart.events[self.next_bgm_event_idx];
-            if let TimedEvent::Note(n) = next_ev {
-                log::info!(
-                    "BGM next: note_time={:.0}ms (diff={:.0}ms) type={:?} lane={:?}",
-                    n.time_ms, n.time_ms - game_time, n.note_type, n.channel
-                );
-            }
-        }
-
         // Scan chart for BGM notes within the lookahead window
         while self.next_bgm_event_idx < self.chart.events.len() {
             let event = &self.chart.events[self.next_bgm_event_idx];
 
             match event {
                 TimedEvent::Note(note_event) => {
-                    // Skip release notes (tails of long notes)
                     if note_event.note_type == NoteType::Release {
                         self.next_bgm_event_idx += 1;
                         continue;
                     }
 
-                    // Skip notes that are already in the past
                     if note_event.time_ms < game_time {
-                        if debug_enabled {
-                            log::debug!(
-                                "BGM SKIP (past): note at {:.0}ms < game_time {:.0}ms (diff={:.0}ms)",
-                                note_event.time_ms, game_time, game_time - note_event.time_ms
-                            );
-                        }
                         self.next_bgm_event_idx += 1;
                         continue;
                     }
 
-                    // Stop if we've gone past the lookahead window
                     if note_event.time_ms > lookahead_end {
                         break;
                     }
 
-                    // Schedule this BGM note
                     if let Some(sample_id) = note_event.sample_id {
                         if let Some(frames) = self.sound_cache.get_sound(sample_id) {
-                            // Calculate delay in samples from now to the note's target time
                             let delay_ms = note_event.time_ms - game_time;
                             let delay_samples = audio_manager.ms_to_samples(delay_ms.max(0.0));
-
-                            if debug_enabled {
-                                log::debug!(
-                                    "BGM SCHEDULE: note at {:.0}ms, delay={:.0}ms ({} samples), sample_id={}",
-                                    note_event.time_ms, delay_ms, delay_samples, sample_id
-                                );
-                            }
 
                             let command = BgmCommand {
                                 frames: Arc::clone(frames),

@@ -75,6 +75,13 @@ impl ScheduledSignal {
             pan,
         }
     }
+
+    /// Returns true if this signal has fully played (delay exhausted and inner
+    /// signal done).
+    /// Delegates to the inner signal's `is_finished()` once the delay period has passed.
+    pub fn is_finished(&self) -> bool {
+        self.delay == 0 && self.inner.is_finished()
+    }
 }
 
 impl Signal for ScheduledSignal {
@@ -104,19 +111,13 @@ impl Signal for ScheduledSignal {
 
                 // Apply volume and pan to the audio portion
                 for frame in out[silence_len..].iter_mut() {
-                    // Apply volume
                     frame[0] *= self.volume;
                     frame[1] *= self.volume;
 
-                    // Apply pan: -1.0 = full left, 0.0 = center, +1.0 = full right
-                    // Linear panning with center at full volume
-                    // pan=-1.0: left=1.0, right=0.0
-                    // pan=0.0: left=1.0, right=1.0
-                    // pan=1.0: left=0.0, right=1.0
                     let (left_gain, right_gain) = if self.pan < 0.0 {
-                        (1.0, 1.0 + self.pan) // pan is negative, so 1+pan < 1
+                        (1.0, 1.0 + self.pan)
                     } else {
-                        (1.0 - self.pan, 1.0) // pan is positive, so 1-pan < 1
+                        (1.0 - self.pan, 1.0)
                     };
 
                     frame[0] *= left_gain;
@@ -232,36 +233,8 @@ impl Signal for BgmSignalQueue {
                 out_frame[1] += temp_frame[1];
             }
 
-            // Check if signal is finished (delay == 0 and inner signal exhausted)
-            // We'll mark it for removal if it has no more audio to output
-            // A simple heuristic: if delay is 0, it might still be playing,
-            // so we rely on the inner FramesSignal to output silence when done.
-            // oddio's FramesSignal outputs silence after the samples end,
-            // so we need a different strategy: track if the signal has been
-            // fully consumed.
-            //
-            // For now, we'll use a simple approach: remove signals after
-            // they've output silence for a while. But this is complex.
-            //
-            // Better approach: wrap the signal to track completion.
-            // We'll do this by checking if the signal's inner FramesSignal
-            // has been fully consumed. Since FramesSignal doesn't expose this,
-            // we'll use a different strategy: remove signals that have had
-            // delay == 0 for longer than their sample count.
-            //
-            // Simplest correct approach: track sample count and remove when done.
-            // But for correctness, let's just keep signals until they're done.
-            // The FramesSignal will output silence when exhausted, so we need
-            // to track the total sample count.
-            //
-            // Actually, the simplest correct approach: keep a counter in ScheduledSignal
-            // and mark it done when delay + samples_played >= total_samples.
-            // But we don't have total_samples here.
-            //
-            // Final approach: use a "done" flag in ScheduledSignal that gets set
-            // when the inner signal outputs all zeros. Check for all-zeros output.
-            let is_silent = temp[..out_len].iter().all(|f| f[0] == 0.0 && f[1] == 0.0);
-            if signal.delay == 0 && is_silent {
+            // Remove signals that have fully played
+            if signal.is_finished() {
                 finished_indices.push(i);
             }
         }
