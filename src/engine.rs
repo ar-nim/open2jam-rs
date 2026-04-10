@@ -691,7 +691,13 @@ impl App {
                 }
 
                 gs.spawn_notes();
-                gs.auto_judge_notes(); // Auto-play judgment
+                gs.auto_judge_notes(); // Auto-play judgment (returns early in manual mode)
+                
+                // Detect missed notes in both auto and manual modes
+                let render_time = gs.clock.render_time() as f64;
+                let bpm = gs.clock.bpm() as f64;
+                gs.detect_missed_notes(render_time, bpm);
+                
                 gs.cleanup_notes();
                 gs.cleanup_effects(); // Remove expired effects
 
@@ -939,15 +945,18 @@ impl App {
                     for lane in 0..7 {
                         if gs.pressed_lanes[lane] {
                             if let Some(pressed_sprite) = gs.note_prefabs.pressed_note_sprites.get(lane).and_then(|s| s.as_deref()) {
-                                if let Some(pressed_frame) = atlas.get_frame(pressed_sprite).copied() {
+                                // Draw each frame of the pressed note animation
+                                if let Some(pressed_frame) = atlas.get_frame_at_time(pressed_sprite, render_time as f64)
+                                    .or_else(|| atlas.get_frame(pressed_sprite).copied())
+                                {
                                     let lane_x = offset_x + gs.note_prefabs.lanes[lane].x as f32 * skin_scale_x;
                                     let sprite_w = pressed_frame.width as f32 * skin_scale_x;
                                     let sprite_h = pressed_frame.height as f32 * skin_scale_y;
-                                    // Center the overlay on the lane
+                                    // Position at the judgment line area, centered on lane
                                     let x = lane_x - sprite_w / 2.0;
-                                    let y = offset_y; // Draw from top of viewport
+                                    let y = offset_y + (judgment_line_y as f32 - sprite_h / 2.0) * skin_scale_y;
                                     gpu.textured_renderer.draw_textured_quad(
-                                        x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.5],
+                                        x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
                                     );
                                 }
                             }

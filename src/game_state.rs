@@ -1006,6 +1006,50 @@ impl GameState {
         self.pending_judgments.push(judgment);
     }
 
+    /// Detect missed notes that have passed the judgment window.
+    /// Returns the lanes that were missed (for judgment popup rendering).
+    /// This runs in both auto-play and manual modes.
+    pub fn detect_missed_notes(&mut self, render_time: f64, bpm: f64) {
+        // Check for missed tap notes
+        let mut missed_lanes: Vec<usize> = Vec::new();
+        
+        for note in &mut self.active_notes {
+            if !note.judged && !note.missed {
+                if is_missed(render_time, note.target_time_ms, bpm) {
+                    note.missed = true;
+                    note.judgment_type = Some(JudgmentType::Miss);
+                    self.stats.record_judgment(JudgmentType::Miss, false);
+                    missed_lanes.push(note.lane);
+                }
+            }
+        }
+
+        // Check for missed long notes (head passed without being hit)
+        for long_note in &mut self.active_long_notes {
+            if !long_note.judged && !long_note.missed {
+                if is_missed(render_time, long_note.head_time_ms, bpm) {
+                    long_note.missed = true;
+                    long_note.head_judgment = Some(JudgmentType::Miss);
+                    long_note.dead = true;
+                    self.stats.record_judgment(JudgmentType::Miss, false);
+                    missed_lanes.push(long_note.lane);
+                }
+            }
+        }
+
+        // Add miss judgments (instant replace: only the last one survives)
+        if !missed_lanes.is_empty() {
+            self.clear_pending_judgments();
+            if let Some(&last_lane) = missed_lanes.last() {
+                self.pending_judgments.push(PendingJudgment::new(
+                    JudgmentType::Miss,
+                    last_lane,
+                    render_time,
+                ));
+            }
+        }
+    }
+
     /// Auto-play judgment: automatically judge all notes that have reached the judgment line.
     /// In auto-play mode, all notes are judged as COOL.
     pub fn auto_judge_notes(&mut self) {
@@ -1025,18 +1069,18 @@ impl GameState {
         // Judge tap notes that have reached the judgment line
         // Use a wider tolerance for auto-play to ensure all notes are hit
         let auto_play_tolerance_ms = 10.0; // 10ms tolerance for auto-play
-        
+
         for note in &mut self.active_notes {
             if !note.judged && !note.missed {
                 let time_diff = (render_time - note.target_time_ms).abs();
                 if time_diff < auto_play_tolerance_ms {
                     note.judged = true;
                     note.judgment_type = Some(JudgmentType::Cool);
-                    
+
                     self.stats.record_judgment(JudgmentType::Cool, false);
-                    
+
                     click_effect_lanes.push(note.lane);
-                    
+
                     // Instant replace: clear previous judgments, add new one
                     judgments_to_add.push(PendingJudgment::new(
                         JudgmentType::Cool,
@@ -1046,28 +1090,14 @@ impl GameState {
                 }
             }
         }
-        
+
         // Trigger effects after iteration (avoid borrow conflicts)
         for lane in click_effect_lanes.drain(..) {
             self.trigger_note_click_effect(lane, render_time);
         }
 
         // Check for missed tap notes
-        for note in &mut self.active_notes {
-            if !note.judged && !note.missed {
-                if is_missed(render_time, note.target_time_ms, bpm) {
-                    note.missed = true;
-                    note.judgment_type = Some(JudgmentType::Miss);
-                    self.stats.record_judgment(JudgmentType::Miss, false);
-                    // Instant replace: clear previous judgments, add new one
-                    judgments_to_add.push(PendingJudgment::new(
-                        JudgmentType::Miss,
-                        note.lane,
-                        render_time,
-                    ));
-                }
-            }
-        }
+        self.detect_missed_notes(render_time, bpm);
 
         // Judge long note heads
         for long_note in &mut self.active_long_notes {
