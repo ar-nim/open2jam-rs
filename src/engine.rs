@@ -935,6 +935,25 @@ impl App {
                         }
                     }
 
+                    // Draw PRESSED_NOTE lane overlays (behind notes, matching original game)
+                    for lane in 0..7 {
+                        if gs.pressed_lanes[lane] {
+                            if let Some(pressed_sprite) = gs.note_prefabs.pressed_note_sprites.get(lane).and_then(|s| s.as_deref()) {
+                                if let Some(pressed_frame) = atlas.get_frame(pressed_sprite).copied() {
+                                    let lane_x = offset_x + gs.note_prefabs.lanes[lane].x as f32 * skin_scale_x;
+                                    let sprite_w = pressed_frame.width as f32 * skin_scale_x;
+                                    let sprite_h = pressed_frame.height as f32 * skin_scale_y;
+                                    // Center the overlay on the lane
+                                    let x = lane_x - sprite_w / 2.0;
+                                    let y = offset_y; // Draw from top of viewport
+                                    gpu.textured_renderer.draw_textured_quad(
+                                        x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.5],
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     for note in &gs.active_notes {
                         let y = note_y_position_bpm_aware(
                             render_time,
@@ -948,24 +967,14 @@ impl App {
                         let lane_prefab = &gs.note_prefabs.lanes[note.lane];
                         let lane_x = offset_x + lane_prefab.x as f32 * skin_scale_x;
 
-                        // Use pressed sprite if key is held, otherwise use normal sprite
-                        let is_pressed = gs.pressed_lanes.get(note.lane).copied().unwrap_or(false);
-                        let head_frame_name = if is_pressed {
-                            lane_prefab.pressed_sprite_id.as_deref()
-                                .or(lane_prefab.sprite_id.as_deref())
-                                .unwrap_or_else(|| match note.lane {
-                                    0 | 1 | 2 => "head_note_white",
-                                    3 => "head_note_blue",
-                                    _ => "head_note_yellow",
-                                })
-                        } else {
-                            lane_prefab.sprite_id.as_deref()
-                                .unwrap_or_else(|| match note.lane {
-                                    0 | 1 | 2 => "head_note_white",
-                                    3 => "head_note_blue",
-                                    _ => "head_note_yellow",
-                                })
-                        };
+                        // Use the sprite ID from the skin XML prefab, fallback to lane-based default
+                        let head_frame_name = lane_prefab.sprite_id.as_deref().unwrap_or_else(|| {
+                            match note.lane {
+                                0 | 1 | 2 => "head_note_white",
+                                3 => "head_note_blue",
+                                _ => "head_note_yellow",
+                            }
+                        });
 
                         // Use animated frame if available, fall back to static frame
                         let head_frame = atlas.get_frame_at_time(head_frame_name, render_time as f64)
