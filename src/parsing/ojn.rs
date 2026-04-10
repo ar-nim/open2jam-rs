@@ -421,14 +421,6 @@ fn build_timed_events(
     base_bpm: f64,
 ) -> Result<Vec<TimedEvent>, OjnError> {
     let mut events: Vec<TimedEvent> = Vec::new();
-    let mut current_bpm = base_bpm;
-    let mut frac_measure: f64 = 1.0; // Fractional measure size, resets per measure
-
-    // Add initial measure 0 event
-    events.push(TimedEvent::Measure(MeasureEvent {
-        time_ms: CHART_PADDING_MS,
-        measure: 0,
-    }));
 
     // Group blocks by measure number
     let mut measures: HashMap<u32, Vec<(u16, u16, Vec<[u8; 4]>)>> = HashMap::new();
@@ -443,26 +435,40 @@ fn build_timed_events(
     let mut sorted_measures: Vec<u32> = measures.keys().copied().collect();
     sorted_measures.sort();
 
-    // Calculate time for each measure
-    let mut time_ms = CHART_PADDING_MS;
-    let mut last_measure_num: Option<u32> = None;
+    // Java-style incremental timing:
+    // BEATS_PER_MSEC = 4 * 60 * 1000 = 240000
+    // timer advances incrementally: delta_time = 240000 * delta_position / current_bpm
+    const BEATS_PER_MSEC: f64 = 240000.0;
+
+    let mut current_bpm = base_bpm;
+    let mut frac_measure: f64 = 1.0; // fraction of full measure (set by TIME_SIGNATURE)
+    let mut measure_pointer: f64 = 0.0; // current position within the measure
+    let mut time_ms: f64 = CHART_PADDING_MS;
+    let mut last_measure_num: u32 = 0;
 
     for &measure_num in sorted_measures.iter() {
-        // Advance time by the actual gap in measure numbers
-        if let Some(prev_measure) = last_measure_num {
-            let measures_diff = measure_num.saturating_sub(prev_measure);
-            for _ in 0..measures_diff {
-                time_ms += measure_duration(frac_measure, current_bpm);
-                frac_measure = 1.0; // Each skipped measure is a new measure → reset
+        // Advance across skipped measure boundaries
+        if measure_num > last_measure_num {
+            for _ in 0..(measure_num - last_measure_num) {
+                // Advance from current pointer to end of this measure
+                time_ms += BEATS_PER_MSEC * (frac_measure - measure_pointer) / current_bpm;
+                // Add measure marker
+                events.push(TimedEvent::Measure(MeasureEvent {
+                    time_ms,
+                    measure: last_measure_num,
+                }));
+                // Reset for next measure
+                frac_measure = 1.0;
+                measure_pointer = 0.0;
+                last_measure_num += 1;
+            }
+            // Adjust for the last iteration overshoot
+            if measure_num > last_measure_num {
+                last_measure_num = measure_num;
             }
         }
-        // Reset frac_measure for the current measure; TIME_SIGNATURE events below will set it
-        frac_measure = 1.0;
-        last_measure_num = Some(measure_num);
 
-        let channels = &measures[&measure_num];
-
-        // Add measure marker
+        // Add measure marker for current measure (before processing events)
         if !events.iter().any(|e| matches!(e, TimedEvent::Measure(m) if m.measure == measure_num)) {
             events.push(TimedEvent::Measure(MeasureEvent {
                 time_ms,
@@ -470,82 +476,75 @@ fn build_timed_events(
             }));
         }
 
-        // Process channels in this measure
-        // Phase 1: Process TIME_SIGNATURE events first (they affect frac_measure for this measure)
-        for &(channel_num, events_count, ref event_data) in channels {
+        // Collect all events in this measure with their positions, then sort
+        let mut sorted_events: Vec<(f64, Channel, [u8; 4])> = Vec::new();
+        for &(channel_num, events_count, ref event_data) in &measures[&measure_num] {
             let channel = Channel::from_number(channel_num);
-            if channel == Channel::TimeSignature {
-                for (i, event_bytes) in event_data.iter().enumerate() {
-                    let value = f32::from_le_bytes(*event_bytes) as f64;
+            for (i, event_bytes) in event_data.iter().enumerate() {
+                let position = i as f64 / events_count as f64;
+                sorted_events.push((position, channel, *event_bytes));
+            }
+        }
+        // Sort by position within the measure
+        sorted_events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Process events sequentially, advancing timer incrementally
+        for (position, channel, event_bytes) in sorted_events {
+            // Advance timer from current measure_pointer to this event's position
+            let delta_position = position - measure_pointer;
+            if delta_position > 0.0 {
+                time_ms += BEATS_PER_MSEC * delta_position / current_bpm;
+                measure_pointer = position;
+            }
+
+            match channel {
+                Channel::TimeSignature => {
+                    let value = f32::from_le_bytes(event_bytes) as f64;
                     if value > 0.0 {
                         frac_measure = value;
                     }
                 }
-            }
-        }
-
-        // Phase 2: Process all other channels
-        for &(channel_num, events_count, ref event_data) in channels {
-            let channel = Channel::from_number(channel_num);
-
-            if channel == Channel::TimeSignature {
-                continue; // Already handled above
-            }
-
-            for (i, event_bytes) in event_data.iter().enumerate() {
-                let position = i as f64 / events_count as f64;
-
-                match channel {
-                    Channel::BpmChange => {
-                        let bpm = f32::from_le_bytes(*event_bytes) as f64;
-                        if bpm > 0.0 {
-                            current_bpm = bpm;
-                        }
-                        let event_time = time_ms + measure_duration(frac_measure, current_bpm) * position;
-                        events.push(TimedEvent::BpmChange(BpmChangeEvent {
-                            time_ms: event_time,
-                            bpm: current_bpm,
-                            measure: measure_num,
-                            position,
-                        }));
+                Channel::BpmChange => {
+                    let bpm = f32::from_le_bytes(event_bytes) as f64;
+                    if bpm > 0.0 {
+                        current_bpm = bpm;
                     }
-                    _ => {
-                        // Note event
-                        let raw_value = u16::from_le_bytes([event_bytes[0], event_bytes[1]]);
-                        let volume_pan = event_bytes[2];
-                        let type_byte = event_bytes[3];
-
-                        // Skip if sample ID is 0 (empty event)
-                        if raw_value == 0 {
-                            continue;
-                        }
-
-                        let (adjusted_value, note_type) = decode_note_type_byte(type_byte, raw_value);
-                        let (volume, pan) = decode_volume_pan(volume_pan);
-
-                        // Convert 1-based sample ID to 0-based
-                        let sample_id = if adjusted_value > 0 {
-                            Some((adjusted_value - 1) as u32)
-                        } else {
-                            None
-                        };
-
-                        let event_time = time_ms + measure_duration(frac_measure, current_bpm) * position;
-
-                        let note_event = NoteEvent {
-                            time_ms: event_time,
-                            channel,
-                            sample_id,
-                            volume,
-                            pan,
-                            note_type,
-                            measure: measure_num,
-                            position,
-                            end_time_ms: None, // Will be populated in pair_long_notes pass
-                        };
-
-                        events.push(TimedEvent::Note(note_event));
+                    events.push(TimedEvent::BpmChange(BpmChangeEvent {
+                        time_ms,
+                        bpm: current_bpm,
+                        measure: measure_num,
+                        position,
+                    }));
+                }
+                _ => {
+                    // Note event
+                    let raw_value = u16::from_le_bytes([event_bytes[0], event_bytes[1]]);
+                    if raw_value == 0 {
+                        continue; // Skip empty events
                     }
+
+                    let volume_pan = event_bytes[2];
+                    let type_byte = event_bytes[3];
+                    let (adjusted_value, note_type) = decode_note_type_byte(type_byte, raw_value);
+                    let (volume, pan) = decode_volume_pan(volume_pan);
+                    let sample_id = if adjusted_value > 0 {
+                        Some((adjusted_value - 1) as u32)
+                    } else {
+                        None
+                    };
+
+                    let note_event = NoteEvent {
+                        time_ms,
+                        channel,
+                        sample_id,
+                        volume,
+                        pan,
+                        note_type,
+                        measure: measure_num,
+                        position,
+                        end_time_ms: None,
+                    };
+                    events.push(TimedEvent::Note(note_event));
                 }
             }
         }
