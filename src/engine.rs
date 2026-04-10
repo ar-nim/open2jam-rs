@@ -178,22 +178,20 @@ impl ApplicationHandler for App {
                 use winit::keyboard::{Key, NamedKey};
                 use crate::resources::key_bindings::key_to_lane;
 
-                // Only process input when game state is loaded and rendering
-                if self.game_state.as_ref().map_or(false, |gs| gs.is_rendering) {
-                    if let Some(lane) = key_to_lane(&event.logical_key) {
-                        if let Some(gs) = &mut self.game_state {
-                            match event.state {
-                                ElementState::Pressed => {
-                                    let judged = gs.handle_key_press(lane, 200.0);
-                                    if judged.is_some() {
-                                        info!("Note judged in lane {}", lane);
-                                    }
+                // Process lane key input during rendering and startup
+                if let Some(lane) = key_to_lane(&event.logical_key) {
+                    if let Some(gs) = &mut self.game_state {
+                        match event.state {
+                            ElementState::Pressed => {
+                                let judged = gs.handle_key_press(lane, 200.0);
+                                if judged.is_some() {
+                                    info!("Note judged in lane {}", lane);
                                 }
-                                ElementState::Released => {
-                                    let release_judgment = gs.handle_key_release(lane);
-                                    if let Some(j) = release_judgment {
-                                        info!("Long note released in lane {}, judgment: {:?}", lane, j);
-                                    }
+                            }
+                            ElementState::Released => {
+                                let release_judgment = gs.handle_key_release(lane);
+                                if let Some(j) = release_judgment {
+                                    info!("Long note released in lane {}, judgment: {:?}", lane, j);
                                 }
                             }
                         }
@@ -941,20 +939,17 @@ impl App {
                         }
                     }
 
-                    // Draw PRESSED_NOTE lane overlays (behind notes, matching original game)
+                    // Draw PRESSED_NOTE overlays (key press feedback at bottom keyboard)
                     for lane in 0..7 {
                         if gs.pressed_lanes[lane] {
-                            if let Some(pressed_sprite) = gs.note_prefabs.pressed_note_sprites.get(lane).and_then(|s| s.as_deref()) {
-                                // Draw each frame of the pressed note animation
-                                if let Some(pressed_frame) = atlas.get_frame_at_time(pressed_sprite, render_time as f64)
-                                    .or_else(|| atlas.get_frame(pressed_sprite).copied())
+                            for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_note_overlays[lane] {
+                                if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
+                                    .or_else(|| atlas.get_frame(sprite_id).copied())
                                 {
-                                    let lane_x = offset_x + gs.note_prefabs.lanes[lane].x as f32 * skin_scale_x;
                                     let sprite_w = pressed_frame.width as f32 * skin_scale_x;
                                     let sprite_h = pressed_frame.height as f32 * skin_scale_y;
-                                    // Position at the judgment line area, centered on lane
-                                    let x = lane_x - sprite_w / 2.0;
-                                    let y = offset_y + (judgment_line_y as f32 - sprite_h / 2.0) * skin_scale_y;
+                                    let x = offset_x + *x_pos as f32 * skin_scale_x;
+                                    let y = offset_y + *y_pos as f32 * skin_scale_y;
                                     gpu.textured_renderer.draw_textured_quad(
                                         x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
                                     );

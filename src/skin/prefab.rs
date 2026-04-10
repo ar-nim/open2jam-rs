@@ -31,9 +31,9 @@ pub struct NotePrefabs {
     pub judgment_line_y: u32,
     pub skin_width: u32,
     pub skin_height: u32,
-    /// PRESSED_NOTE sprites: one per lane (lane glow overlays)
-    /// These are drawn as static overlays when a key is held down.
-    pub pressed_note_sprites: [Option<String>; NUM_LANES],
+    /// PRESSED_NOTE overlays: per lane, list of (sprite_id, x_position, y_position).
+    /// Multiple overlays per lane are supported (e.g. white keys have 2 sprites).
+    pub pressed_note_overlays: [Vec<(String, i32, i32)>; NUM_LANES],
 }
 
 impl NotePrefabs {
@@ -57,24 +57,26 @@ impl NotePrefabs {
             judgment_line_y,
             skin_width,
             skin_height,
-            pressed_note_sprites: Default::default(),
+            pressed_note_overlays: Default::default(),
         }
     }
 
     /// Build note prefabs from a parsed skin definition.
     ///
     /// Follows the Java pattern: NOTE_N entities create both regular and long note prefabs.
-    /// PRESSED_NOTE_N entities provide lane glow overlays shown when keys are held.
+    /// PRESSED_NOTE_N entities provide key press overlays with their sprite AND Y position.
     /// Long note sprites use `head`, `body`, `tail` attributes (falling back to `sprite`).
     pub fn from_skin(skin: &SkinDef) -> Self {
         let mut lanes: [Option<NotePrefab>; NUM_LANES] = Default::default();
-        let mut pressed_note_sprites: [Option<String>; NUM_LANES] = Default::default();
+        let mut pressed_note_overlays: [Vec<(String, i32, i32)>; NUM_LANES] = Default::default();
 
         for entity in &skin.entities {
-            // Check for PRESSED_NOTE_N (lane glow overlays)
+            // Check for PRESSED_NOTE_N (key press overlays)
             if let Some(lane) = Self::extract_pressed_lane_from_entity(entity) {
                 if lane < NUM_LANES {
-                    pressed_note_sprites[lane] = entity.sprite.clone();
+                    if let Some(ref sprite) = entity.sprite {
+                        pressed_note_overlays[lane].push((sprite.clone(), entity.x, entity.y));
+                    }
                 }
                 continue;
             }
@@ -124,7 +126,7 @@ impl NotePrefabs {
             judgment_line_y: skin.judgment_line_y,
             skin_width: skin.width,
             skin_height: skin.height,
-            pressed_note_sprites,
+            pressed_note_overlays,
         }
     }
 
