@@ -948,14 +948,24 @@ impl App {
                         let lane_prefab = &gs.note_prefabs.lanes[note.lane];
                         let lane_x = offset_x + lane_prefab.x as f32 * skin_scale_x;
 
-                        // Use the sprite ID from the skin XML prefab, fallback to lane-based default
-                        let head_frame_name = lane_prefab.sprite_id.as_deref().unwrap_or_else(|| {
-                            match note.lane {
-                                0 | 1 | 2 => "head_note_white",
-                                3 => "head_note_blue",
-                                _ => "head_note_yellow",
-                            }
-                        });
+                        // Use pressed sprite if key is held, otherwise use normal sprite
+                        let is_pressed = gs.pressed_lanes.get(note.lane).copied().unwrap_or(false);
+                        let head_frame_name = if is_pressed {
+                            lane_prefab.pressed_sprite_id.as_deref()
+                                .or(lane_prefab.sprite_id.as_deref())
+                                .unwrap_or_else(|| match note.lane {
+                                    0 | 1 | 2 => "head_note_white",
+                                    3 => "head_note_blue",
+                                    _ => "head_note_yellow",
+                                })
+                        } else {
+                            lane_prefab.sprite_id.as_deref()
+                                .unwrap_or_else(|| match note.lane {
+                                    0 | 1 | 2 => "head_note_white",
+                                    3 => "head_note_blue",
+                                    _ => "head_note_yellow",
+                                })
+                        };
 
                         // Use animated frame if available, fall back to static frame
                         let head_frame = atlas.get_frame_at_time(head_frame_name, render_time as f64)

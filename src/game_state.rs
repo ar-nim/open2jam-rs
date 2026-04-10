@@ -437,6 +437,8 @@ pub struct GameState {
     pub timing: TimingData,
     /// Whether we're in auto-play mode
     pub auto_play: bool,
+    /// Which lanes currently have keys held down (for pressed note visual)
+    pub pressed_lanes: [bool; 7],
     /// Spawn lead time in milliseconds
     pub spawn_lead_time_ms: f64,
     /// Game statistics
@@ -688,6 +690,7 @@ impl GameState {
             scroll_speed,
             timing,
             auto_play,
+            pressed_lanes: [false; 7],
             spawn_lead_time_ms,
             stats,
             pending_judgments: Vec::new(),
@@ -1144,6 +1147,11 @@ impl GameState {
     /// Handle key press for a lane.
     /// Uses instant-replace behavior: new judgment kills previous one immediately.
     pub fn handle_key_press(&mut self, lane: usize, _judgment_window_ms: f64) -> Option<JudgmentType> {
+        // Track pressed state for visual feedback
+        if lane < 7 {
+            self.pressed_lanes[lane] = true;
+        }
+
         let render_time = self.clock.render_time() as f64;
         let bpm = self.clock.bpm() as f64;
         
@@ -1208,6 +1216,11 @@ impl GameState {
     /// Evaluates the release timing against the long note's tail time.
     /// Returns the release judgment type, or None if no long note was released.
     pub fn handle_key_release(&mut self, lane: usize) -> Option<JudgmentType> {
+        // Clear pressed state for visual feedback
+        if lane < 7 {
+            self.pressed_lanes[lane] = false;
+        }
+
         let render_time = self.clock.render_time() as f64;
         let bpm = self.clock.bpm() as f64;
 
