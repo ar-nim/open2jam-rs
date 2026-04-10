@@ -176,38 +176,24 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 use winit::event::ElementState;
                 use winit::keyboard::{Key, NamedKey};
-                
-                // Map keys to lanes (SDF JKL; for lanes 1-7)
-                let lane_from_key = |logical_key: &Key| -> Option<usize> {
-                    match logical_key {
-                        Key::Character(c) => match c.as_str() {
-                            "s" | "S" => Some(0), // Lane 1
-                            "d" | "D" => Some(1), // Lane 2
-                            "f" | "F" => Some(2), // Lane 3
-                            "j" | "J" => Some(3), // Lane 4
-                            "k" | "K" => Some(4), // Lane 5
-                            "l" | "L" => Some(5), // Lane 6
-                            ";" => Some(6),       // Lane 7
-                            _ => None,
-                        },
-                        _ => None,
-                    }
-                };
+                use crate::resources::key_bindings::key_to_lane;
 
-                if let Some(lane) = lane_from_key(&event.logical_key) {
-                    if let Some(gs) = &mut self.game_state {
-                        match event.state {
-                            ElementState::Pressed => {
-                                // Judge the note/long note in this lane
-                                let judged = gs.handle_key_press(lane, 200.0); // 200ms judgment window
-                                if judged.is_some() {
-                                    info!("Note judged in lane {}", lane);
+                // Only process input when game state is loaded and rendering
+                if self.game_state.as_ref().map_or(false, |gs| gs.is_rendering) {
+                    if let Some(lane) = key_to_lane(&event.logical_key) {
+                        if let Some(gs) = &mut self.game_state {
+                            match event.state {
+                                ElementState::Pressed => {
+                                    let judged = gs.handle_key_press(lane, 200.0);
+                                    if judged.is_some() {
+                                        info!("Note judged in lane {}", lane);
+                                    }
                                 }
-                            }
-                            ElementState::Released => {
-                                let release_judgment = gs.handle_key_release(lane);
-                                if let Some(j) = release_judgment {
-                                    info!("Long note released in lane {}, judgment: {:?}", lane, j);
+                                ElementState::Released => {
+                                    let release_judgment = gs.handle_key_release(lane);
+                                    if let Some(j) = release_judgment {
+                                        info!("Long note released in lane {}, judgment: {:?}", lane, j);
+                                    }
                                 }
                             }
                         }
