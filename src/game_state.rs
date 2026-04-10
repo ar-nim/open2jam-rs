@@ -13,6 +13,7 @@ use crate::gameplay::judgment::{
     JudgmentType, judge_tap_note, judge_release, is_missed, cool_score_with_jam_bonus, good_score_with_jam_bonus,
 };
 use crate::gameplay::scroll::scroll_travel_time_ms;
+use crate::gameplay::timing_data::TimingData;
 use crate::parsing::ojn::{Chart, NoteType, TimedEvent};
 use crate::resources::clock::Clock;
 use crate::skin::prefab::NotePrefabs;
@@ -432,6 +433,8 @@ pub struct GameState {
     pub next_event_idx: usize,
     /// Scroll speed multiplier
     pub scroll_speed: f64,
+    /// BPM-aware timing data (velocity tree) for scroll calculation.
+    pub timing: TimingData,
     /// Whether we're in auto-play mode
     pub auto_play: bool,
     /// Spawn lead time in milliseconds
@@ -515,66 +518,6 @@ impl GameState {
         let total_playable_notes = count_playable_notes(&chart);
         info!("Total playable notes: {}", total_playable_notes);
 
-        // ── DEBUG: Dump events around 13-15 seconds ──
-        info!("=== DEBUG: Events around 13-15s ===");
-        for (i, event) in chart.events.iter().enumerate() {
-            match event {
-                TimedEvent::Note(n) => {
-                    let t = n.time_ms / 1000.0;
-                    if t >= 12.0 && t <= 17.0 {
-                        info!(
-                            "  [{}] Note at {:.1}s ({:.0}ms) lane={:?} type={:?} sample={:?} vol={:.1} pan={:.1}",
-                            i, t, n.time_ms, n.channel, n.note_type, n.sample_id, n.volume, n.pan
-                        );
-                    }
-                }
-                TimedEvent::BpmChange(b) => {
-                    let t = b.time_ms / 1000.0;
-                    if t >= 12.0 && t <= 17.0 {
-                        info!("  [{}] BPM at {:.1}s, bpm={:.1}", i, t, b.bpm);
-                    }
-                }
-                TimedEvent::Measure(m) => {
-                    let t = m.time_ms / 1000.0;
-                    if t >= 12.0 && t <= 17.0 {
-                        info!("  [{}] Measure {} at {:.1}s", i, m.measure, t);
-                    }
-                }
-            }
-        }
-        info!("=== END DEBUG ===");
-
-        // ── DEBUG: Find gaps > 1 measure between consecutive BGM notes ──
-        let base_bpm_check = chart.header.bpm as f64;
-        let measure_duration_ms = 4.0 * 60000.0 / base_bpm_check;
-        let mut prev_bgm_time: Option<f64> = None;
-        let mut large_gap_count = 0;
-        for event in &chart.events {
-            if let TimedEvent::Note(n) = event {
-                if n.note_type == NoteType::Release {
-                    continue;
-                }
-                if let Some(prev) = prev_bgm_time {
-                    let gap = n.time_ms - prev;
-                    if gap > measure_duration_ms * 1.5 {
-                        warn!(
-                            "BGM gap at {:.1}ms: {:.1}ms ({:.1}x measure duration, bpm={:.0})",
-                            n.time_ms, gap, gap / measure_duration_ms, base_bpm_check
-                        );
-                        large_gap_count += 1;
-                    }
-                }
-                prev_bgm_time = Some(n.time_ms);
-            }
-        }
-        if large_gap_count > 0 {
-            warn!("Found {} BGM gaps > 1.5x measure duration ({:.1}ms at {:.0}bpm)",
-                large_gap_count, measure_duration_ms, base_bpm_check);
-        } else {
-            info!("No large BGM gaps detected (measure duration = {:.1}ms at {:.0}bpm)",
-                measure_duration_ms, base_bpm_check);
-        }
-
         // 2. Find and parse the OJM audio file
         let ojm_filename = &chart.header.ojm_filename;
         let ojm_path = dir.join(ojm_filename);
@@ -634,10 +577,12 @@ impl GameState {
             };
 
         // 5. Calculate spawn lead time based on BPM and viewport
+        // 2x travel time ensures notes appear at the very top even at low BPM / 1x speed.
+        // The +500ms padding gives extra margin for the scroll offset.
         let base_bpm = chart.header.bpm as f64;
         let viewport_height = note_prefabs.skin_height as f64;
         let travel_time = scroll_travel_time_ms(base_bpm, viewport_height, scroll_speed);
-        let spawn_lead_time_ms = travel_time + 500.0;
+        let spawn_lead_time_ms = (travel_time * 2.0) + 500.0;
 
         // 6. Schedule audio triggers for BGM events (auto-play mode)
         // In autoplay, we use the BGM lookahead scheduler instead of AudioTriggerSystem
@@ -653,7 +598,24 @@ impl GameState {
         clock.set_bpm(chart.header.bpm);
         clock.set_chart_padding(1500);
 
-        // 7. Initialize game stats
+        // 7. Build the velocity tree (TimingData) from BPM change events
+        let mut timing = TimingData::new();
+        // Add initial BPM at chart padding time (matches Java: timing.add(timer, bpm) at start)
+        timing.add(1500.0, chart.header.bpm as f64);
+        // Add each BPM change event
+        for event in &chart.events {
+            if let TimedEvent::BpmChange(bpm_event) = event {
+                timing.add(bpm_event.time_ms, bpm_event.bpm);
+            }
+        }
+        timing.finish();
+        info!(
+            "TimingData: {} BPM change points (base BPM={:.1})",
+            timing.len(),
+            chart.header.bpm
+        );
+
+        // 8. Initialize game stats
         let max_life = 1000;
         let stats = GameStats::new(total_playable_notes, max_life);
 
@@ -675,6 +637,7 @@ impl GameState {
             active_long_notes: Vec::new(),
             next_event_idx: 0,
             scroll_speed,
+            timing,
             auto_play,
             spawn_lead_time_ms,
             stats,
@@ -848,15 +811,6 @@ impl GameState {
     pub fn spawn_notes(&mut self) {
         let render_time = self.clock.render_time();
 
-        // ── DEBUG: Log note spawning around 13-15s ──
-        let spawn_debug = render_time >= 11000.0 && render_time <= 16000.0;
-        if spawn_debug {
-            log::info!(
-                "spawn_notes: render_time={:.0}ms next_idx={}/{} lead={:.0}ms",
-                render_time, self.next_event_idx, self.chart.events.len(), self.spawn_lead_time_ms
-            );
-        }
-
         while self.next_event_idx < self.chart.events.len() {
             let event = &self.chart.events[self.next_event_idx];
             let target_time = match event {
@@ -869,14 +823,6 @@ impl GameState {
 
             if target_time > render_time as f64 + self.spawn_lead_time_ms {
                 break;
-            }
-
-            if spawn_debug {
-                log::info!(
-                    "  SPAWN [{}] note at {:.0}ms (render={:.0}ms, lead={:.0}ms, diff={:.0}ms)",
-                    self.next_event_idx, target_time, render_time, self.spawn_lead_time_ms,
-                    target_time - render_time
-                );
             }
 
             if let TimedEvent::Note(note_event) = event {
@@ -933,14 +879,24 @@ impl GameState {
 
     /// Process audio triggers for the current game time.
     ///
-    /// In autoplay mode, this scans the chart for BGM notes within the lookahead
-    /// window and pushes them to the BGM signal queue via `audio_manager.push_bgm_command()`.
-    /// This ensures sample-accurate timing regardless of frame rate.
+    /// Scans the chart for BGM notes within the lookahead window and pushes them
+    /// to the BGM signal queue via `audio_manager.push_bgm_command()`. This ensures
+    /// sample-accurate timing regardless of frame rate.
     ///
     /// Returns the number of BGM notes scheduled this frame.
+    ///
+    /// **Important:** Only schedules notes while the audio stream is active.
+    /// Commands pushed before `stream.play()` would have stale `delay_samples`
+    /// values that don't account for the gap between push time and stream start.
     pub fn process_audio(&mut self, audio_manager: &mut AudioManager) -> usize {
         use crate::audio::bgm_signal::BgmCommand;
         use crate::parsing::ojn::{NoteType, TimedEvent};
+
+        // Don't push BGM commands until the audio stream is running.
+        // Commands pushed before stream.start() accumulate with stale delay values.
+        if !audio_manager.is_active() {
+            return 0;
+        }
 
         let game_time = self.clock.game_time() as f64;
         let lookahead_end = game_time + self.bgm_lookahead_ms;
