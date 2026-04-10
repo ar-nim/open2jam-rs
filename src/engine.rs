@@ -24,7 +24,6 @@ use crate::render::textured_renderer::{TexturedRenderer, BlendMode};
 use crate::render::hud::{HudLayout, render_hud_with_atlas};
 
 const SCROLL_SPEED: f64 = 1.0;
-const AUTO_PLAY: bool = true;
 
 /// GPU resources that must be dropped before the device.
 /// This wrapper allows explicit drop ordering to prevent segfaults.
@@ -88,10 +87,12 @@ pub struct App {
     hybrid_clock_prev_delta: Option<f64>,
     /// Frame counter for clock validation warmup.
     hybrid_clock_frame_count: u64,
+    /// Whether auto-play mode is enabled (false = manual input mode).
+    auto_play: bool,
 }
 
 impl App {
-    pub fn new(ojn_path: Option<std::path::PathBuf>) -> Result<Self> {
+    pub fn new(ojn_path: Option<std::path::PathBuf>, auto_play: bool) -> Result<Self> {
         Ok(Self {
             ojn_path,
             event_loop: None,
@@ -105,6 +106,7 @@ impl App {
             hybrid_clock_prev: None,
             hybrid_clock_prev_delta: None,
             hybrid_clock_frame_count: 0,
+            auto_play,
         })
     }
 
@@ -269,14 +271,15 @@ impl ApplicationHandler for App {
                 if self.start_load_game_state && self.loading_state.is_none() {
                     self.start_load_game_state = false;
                     if let Some(path) = self.ojn_path.clone() {
+                        let auto_play = self.auto_play;
                         info!("Starting background game state load from: {}", path.display());
                         let skin_res = self.render.as_ref()
                             .and_then(|r| r.gpu.as_ref())
                             .and_then(|g| g.skin.clone());
-                        
+
                         let (tx, rx) = mpsc::channel();
                         let thread_handle = thread::spawn(move || {
-                            let result = GameState::load(&path, SCROLL_SPEED, AUTO_PLAY, skin_res.as_ref());
+                            let result = GameState::load(&path, SCROLL_SPEED, auto_play, skin_res.as_ref());
                             let _ = tx.send(LoadingMessage::GameLoaded(result));
                         });
                         
