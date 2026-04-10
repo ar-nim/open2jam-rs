@@ -845,9 +845,10 @@ pub fn render_hud_with_atlas(
     // Use life_percent_for_display() which handles startup animation vs gameplay
     draw_lifebar(renderer, &get_frame, game_state.life_percent_for_display(), layout, skin_scale, offset);
     
-    // Draw timebar (song progress) - fills left to right based on game time / song duration
-    let time_progress = if game_state.song_duration_ms > 0.0 {
-        (game_state.game_time_ms() / game_state.song_duration_ms) as f32
+    // Draw timebar (song progress) - fills left to right based on game time / song end
+    // Clamped to 1.0 so it doesn't overflow past 100%
+    let time_progress = if game_state.end_time_ms > 0.0 {
+        (game_state.game_time_ms() / game_state.end_time_ms).min(1.0) as f32
     } else {
         0.0
     };
@@ -858,9 +859,18 @@ pub fn render_hud_with_atlas(
 
     // 2. Draw counters
     draw_score(renderer, &get_frame, stats.score, layout, skin_scale, offset);
+    
+    // Duration display: derived directly from the authoritative game clock.
+    // No separate duration counter — this ensures the MM:SS display matches
+    // the actual gameplay time exactly (no offset from startup delay).
+    let game_time_ms = game_state.game_time_ms();
+    let total_seconds = (game_time_ms / 1000.0) as u64;
+    let minutes = (total_seconds / 60) as u32;
+    let seconds = (total_seconds % 60) as u32;
+    
     draw_duration(
         renderer, &get_frame,
-        game_state.duration_minutes, game_state.duration_seconds,
+        minutes, seconds,
         layout, skin_scale, offset,
     );
     draw_combo(

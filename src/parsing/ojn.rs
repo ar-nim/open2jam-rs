@@ -15,7 +15,7 @@ use thiserror::Error;
 
 const OJN_SIGNATURE: u32 = 0x006E_6A6F; // "ojn\0" little-endian
 const HEADER_SIZE: usize = 300;
-const CHART_PADDING_MS: f64 = 1500.0;
+pub const CHART_PADDING_MS: f64 = 0.0;
 const MEASURE_SIZE_FRACTION: f64 = 0.8; // 80% of viewport
 
 // ---------------------------------------------------------------------------
@@ -462,7 +462,6 @@ fn build_timed_events(
                 measure_pointer = 0.0;
                 last_measure_num += 1;
             }
-            // Adjust for the last iteration overshoot
             if measure_num > last_measure_num {
                 last_measure_num = measure_num;
             }
@@ -604,12 +603,6 @@ fn pair_long_notes(events: &mut [TimedEvent]) {
             hold_note.end_time_ms = Some(release_time);
         }
     }
-}
-
-fn measure_duration(frac_measure: f64, bpm: f64) -> f64 {
-    // Java: (BEATS_PER_MESC * frac_measure) / bpm
-    // where BEATS_PER_MESC = 4 * 60 * 1000 = 240000
-    240000.0 * frac_measure / bpm
 }
 
 // ---------------------------------------------------------------------------

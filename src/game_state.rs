@@ -459,18 +459,15 @@ pub struct GameState {
     pub startup_audio_pending: bool,
     /// Life percentage during startup animation (0.0 to 1.0)
     pub startup_life_percent: f32,
-    /// Duration counter: elapsed seconds since gameplay started (wall-clock)
-    pub duration_seconds: u32,
-    /// Duration counter: elapsed minutes since gameplay started
-    pub duration_minutes: u32,
-    /// Accumulator for duration counter update (ms)
-    pub duration_accumulator_ms: f64,
-    /// Last absolute game time (for computing internal delta in update_to)
-    pub last_absolute_ms: u64,
-    /// Song duration in milliseconds (from OJN header)
+    /// Song duration in milliseconds (from OJN header, used for progress bar display)
     pub song_duration_ms: f64,
+    /// Calculated time (ms) when the song ends based on chart content.
+    /// Includes a 1-measure buffer after the last event.
+    pub end_time_ms: f64,
     /// Whether the song/game has ended
     pub is_song_ended: bool,
+    /// Last absolute game time (for computing internal delta in update())
+    pub last_absolute_ms: u64,
     /// Active note click effects (EFFECT_CLICK, triggered on Cool/Good for tap notes)
     pub note_click_effects: Vec<NoteClickEffect>,
     /// Active long note flare effects (EFFECT_LONGFLARE, triggered on Cool/Good for long notes)
@@ -516,7 +513,6 @@ impl GameState {
 
         // Count playable notes
         let total_playable_notes = count_playable_notes(&chart);
-        info!("Total playable notes: {}", total_playable_notes);
 
         // 2. Find and parse the OJM audio file
         let ojm_filename = &chart.header.ojm_filename;
@@ -596,12 +592,12 @@ impl GameState {
 
         let mut clock = Clock::new();
         clock.set_bpm(chart.header.bpm);
-        clock.set_chart_padding(1500);
+        clock.set_chart_padding(0);
 
         // 7. Build the velocity tree (TimingData) from BPM change events
         let mut timing = TimingData::new();
-        // Add initial BPM at chart padding time (matches Java: timing.add(timer, bpm) at start)
-        timing.add(1500.0, chart.header.bpm as f64);
+        // Add initial BPM at time 0 (no padding — the 2s startup animation serves as the buffer)
+        timing.add(0.0, chart.header.bpm as f64);
         // Add each BPM change event
         for event in &chart.events {
             if let TimedEvent::BpmChange(bpm_event) = event {
@@ -619,13 +615,66 @@ impl GameState {
         let max_life = 1000;
         let stats = GameStats::new(total_playable_notes, max_life);
 
-        // 8. Get song duration from OJN header (all difficulties)
-        // OJN stores duration in SECONDS (not milliseconds) - multiply by 1000
-        let song_duration_ms = chart.header.duration_hard as f64 * 1000.0;
+        // 8. Compute song end time using the original O2Jam position-based formula.
+        // end_position = ceil(max(event measure + position)) + 1
+        // end_time = ((end_position - refPosition) / bpm * 240000) + refTime
+        // This matches the original: GetRenderPosition() > m_endPosition check.
+        let end_time_ms = {
+            const TICK_SIGNATURE: f64 = 240000.0; // 60000 * 4 = ms per measure at 60 BPM for 4/4
+            
+            // Find max(measure + position) across ALL events (includes release/tail positions)
+            let max_pos = chart.events.iter()
+                .filter_map(|e| match e {
+                    TimedEvent::Note(n) => Some(n.measure as f64 + n.position),
+                    TimedEvent::BpmChange(b) => Some(b.measure as f64 + b.position),
+                    TimedEvent::Measure(m) => Some(m.measure as f64),
+                })
+                .fold(0.0, f64::max);
+            
+            let end_position = max_pos.ceil() + 1.0; // +1 measure buffer, matching m_endPosition
+            
+            log::info!("Chart position debug: max_pos={:.4}, end_position={:.4}", max_pos, end_position);
+            
+            // Simulate the reference-point tracking the original game does.
+            // We start at measure 1.0 instead of 0.0 to match the original game's timeline.
+            let mut ref_position = 1.0;
+            let mut ref_time_ms = 0.0;
+            let mut current_bpm = chart.header.bpm as f64;
+            
+            // Collect and sort BPM events by position
+            let mut bpm_events: Vec<(f64, f64)> = chart.events.iter()
+                .filter_map(|e| match e {
+                    TimedEvent::BpmChange(b) => Some((b.measure as f64 + b.position, b.bpm)),
+                    _ => None,
+                })
+                .collect();
+            bpm_events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            
+            for (bpm_pos, new_bpm) in &bpm_events {
+                if *bpm_pos > ref_position {
+                    ref_time_ms += (*bpm_pos - ref_position) / current_bpm * TICK_SIGNATURE;
+                }
+                log::info!("BPM event: pos={:.4}, bpm={:.1}, ref_time={:.1}ms", bpm_pos, new_bpm, ref_time_ms);
+                ref_position = *bpm_pos;
+                current_bpm = *new_bpm;
+            }
+            
+            // Add time from last ref_position to end_position
+            if end_position > ref_position {
+                ref_time_ms += (end_position - ref_position) / current_bpm * TICK_SIGNATURE;
+            }
+            
+            log::info!("End calculation: ref_position={:.4}, ref_time={:.1}ms, end_pos={:.4}, final={:.1}ms",
+                ref_position, ref_time_ms, end_position, ref_time_ms);
+            
+            ref_time_ms
+        };
         info!(
-            "Song duration (Hard): {} seconds -> {}ms ({:.1}s)",
-            chart.header.duration_hard, song_duration_ms, song_duration_ms / 1000.0
+            "Song end: {:.1}ms ({:.1}s) based on chart position + 1 measure",
+            end_time_ms, end_time_ms / 1000.0
         );
+
+        let song_duration_ms = chart.header.duration_hard as f64 * 1000.0;
 
         Ok(Self {
             clock,
@@ -650,12 +699,10 @@ impl GameState {
             is_rendering: false,
             startup_audio_pending: false,
             startup_life_percent: 0.0,
-            duration_seconds: 0,
-            duration_minutes: 0,
-            duration_accumulator_ms: 0.0,
-            last_absolute_ms: 0,
             song_duration_ms,
+            end_time_ms,
             is_song_ended: false,
+            last_absolute_ms: 0,
             note_click_effects: Vec::new(),
             long_flare_effects: Vec::new(),
             effect_click_sprite: click_sprite,
@@ -724,32 +771,15 @@ impl GameState {
             }
         }
 
-        // Update duration counter — only after startup delay completes.
-        // This ensures the on-screen timer starts at 0:00 when gameplay begins,
-        // so the end of song matches the OJN header duration metadata.
-        if self.is_rendering {
-            self.duration_accumulator_ms += delta;
-            if self.duration_accumulator_ms >= 1000.0 {
-                self.duration_accumulator_ms -= 1000.0;
-                if self.duration_seconds >= 59 {
-                    self.duration_seconds = 0;
-                    self.duration_minutes += 1;
-                } else {
-                    self.duration_seconds += 1;
-                }
-            }
-        }
-
         // Update combo counter animation
         self.combo_counter.update(delta);
 
-        // Check if song has ended (game time exceeds song duration)
-        if !self.is_song_ended && self.song_duration_ms > 0.0 {
+        // Check if song has ended (game time exceeds calculated chart end time)
+        if !self.is_song_ended && self.end_time_ms > 0.0 {
             let game_time = self.clock.game_time() as f64;
-            if game_time >= self.song_duration_ms {
+            if game_time >= self.end_time_ms {
                 self.is_song_ended = true;
-                info!("Song ended: game time {:.1}ms >= song duration {:.1}ms",
-                    game_time, self.song_duration_ms);
+                info!("Song ended at {:.1}ms", self.end_time_ms);
             }
         }
     }
