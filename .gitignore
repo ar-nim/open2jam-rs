@@ -80,3 +80,5 @@ test_assets/*.zip
 # Added by cargo
 
 /target
+*.json.gz
+*.tracy

@@ -1,9 +1,10 @@
 //! Game state machine: integrates clock, chart, audio, and note lifecycle.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use log::info;
+use log::{info, warn};
 
 use crate::audio::manager::AudioManager;
 use crate::audio::trigger::{AudioTriggerEvent, AudioTriggerSystem};
@@ -12,6 +13,7 @@ use crate::gameplay::judgment::{
     JudgmentType, judge_tap_note, judge_release, is_missed, cool_score_with_jam_bonus, good_score_with_jam_bonus,
 };
 use crate::gameplay::scroll::scroll_travel_time_ms;
+use crate::gameplay::timing_data::TimingData;
 use crate::parsing::ojn::{Chart, NoteType, TimedEvent};
 use crate::resources::clock::Clock;
 use crate::skin::prefab::NotePrefabs;
@@ -431,6 +433,8 @@ pub struct GameState {
     pub next_event_idx: usize,
     /// Scroll speed multiplier
     pub scroll_speed: f64,
+    /// BPM-aware timing data (velocity tree) for scroll calculation.
+    pub timing: TimingData,
     /// Whether we're in auto-play mode
     pub auto_play: bool,
     /// Spawn lead time in milliseconds
@@ -451,6 +455,8 @@ pub struct GameState {
     pub startup_delay_ms: f64,
     /// Whether the game is in rendering mode (false during startup delay)
     pub is_rendering: bool,
+    /// Audio stream needs to be started (set true when startup delay completes)
+    pub startup_audio_pending: bool,
     /// Life percentage during startup animation (0.0 to 1.0)
     pub startup_life_percent: f32,
     /// Duration counter: elapsed seconds since gameplay started (wall-clock)
@@ -459,6 +465,8 @@ pub struct GameState {
     pub duration_minutes: u32,
     /// Accumulator for duration counter update (ms)
     pub duration_accumulator_ms: f64,
+    /// Last absolute game time (for computing internal delta in update_to)
+    pub last_absolute_ms: u64,
     /// Song duration in milliseconds (from OJN header)
     pub song_duration_ms: f64,
     /// Whether the song/game has ended
@@ -477,6 +485,10 @@ pub struct GameState {
     pub effect_longflare_duration_ms: f64,
     /// EFFECT_LONGFLARE Y position from skin XML (default 460)
     pub effect_longflare_y: i32,
+    /// Index of the next BGM note to schedule (into chart.events)
+    pub next_bgm_event_idx: usize,
+    /// Lookahead window in milliseconds (how far ahead to schedule BGM notes)
+    pub bgm_lookahead_ms: f64,
 }
 
 impl GameState {
@@ -565,35 +577,45 @@ impl GameState {
             };
 
         // 5. Calculate spawn lead time based on BPM and viewport
+        // 2x travel time ensures notes appear at the very top even at low BPM / 1x speed.
+        // The +500ms padding gives extra margin for the scroll offset.
         let base_bpm = chart.header.bpm as f64;
         let viewport_height = note_prefabs.skin_height as f64;
         let travel_time = scroll_travel_time_ms(base_bpm, viewport_height, scroll_speed);
-        let spawn_lead_time_ms = travel_time + 500.0;
+        let spawn_lead_time_ms = (travel_time * 2.0) + 500.0;
 
         // 6. Schedule audio triggers for BGM events (auto-play mode)
-        let mut audio_triggers = AudioTriggerSystem::new();
-        if auto_play {
-            for event in &chart.events {
-                if let TimedEvent::Note(note_event) = event {
-                    if note_event.note_type == NoteType::Release {
-                        continue;
-                    }
-                    if let Some(sample_id) = note_event.sample_id {
-                        audio_triggers.schedule(AudioTriggerEvent::new(
-                            sample_id,
-                            note_event.time_ms.round() as u64,
-                        ).with_volume(note_event.volume).with_pan(note_event.pan));
-                    }
-                }
-            }
-            info!("Scheduled {} audio triggers (auto-play mode)", audio_triggers.pending_count());
+        // In autoplay, we use the BGM lookahead scheduler instead of AudioTriggerSystem
+        let audio_triggers = AudioTriggerSystem::new();
+        let next_bgm_event_idx = 0;
+        let bgm_lookahead_ms = 500.0; // 500ms lookahead
+        if !auto_play {
+            // Manual play: schedule BGM via lookahead scheduler (not AudioTriggerSystem)
+            // AudioTriggerSystem is kept empty; BGM is scheduled via push_bgm_command
         }
 
         let mut clock = Clock::new();
         clock.set_bpm(chart.header.bpm);
         clock.set_chart_padding(1500);
 
-        // 7. Initialize game stats
+        // 7. Build the velocity tree (TimingData) from BPM change events
+        let mut timing = TimingData::new();
+        // Add initial BPM at chart padding time (matches Java: timing.add(timer, bpm) at start)
+        timing.add(1500.0, chart.header.bpm as f64);
+        // Add each BPM change event
+        for event in &chart.events {
+            if let TimedEvent::BpmChange(bpm_event) = event {
+                timing.add(bpm_event.time_ms, bpm_event.bpm);
+            }
+        }
+        timing.finish();
+        info!(
+            "TimingData: {} BPM change points (base BPM={:.1})",
+            timing.len(),
+            chart.header.bpm
+        );
+
+        // 8. Initialize game stats
         let max_life = 1000;
         let stats = GameStats::new(total_playable_notes, max_life);
 
@@ -615,6 +637,7 @@ impl GameState {
             active_long_notes: Vec::new(),
             next_event_idx: 0,
             scroll_speed,
+            timing,
             auto_play,
             spawn_lead_time_ms,
             stats,
@@ -625,10 +648,12 @@ impl GameState {
             combo_title_visible_ms: 0.0,
             startup_delay_ms: 2000.0, // 2 second startup delay
             is_rendering: false,
+            startup_audio_pending: false,
             startup_life_percent: 0.0,
             duration_seconds: 0,
             duration_minutes: 0,
             duration_accumulator_ms: 0.0,
+            last_absolute_ms: 0,
             song_duration_ms,
             is_song_ended: false,
             note_click_effects: Vec::new(),
@@ -638,15 +663,25 @@ impl GameState {
             effect_longflare_sprite: longflare_sprite,
             effect_longflare_duration_ms: longflare_duration,
             effect_longflare_y: longflare_y,
+            next_bgm_event_idx,
+            bgm_lookahead_ms,
         })
     }
 
     /// Startup delay duration in milliseconds (2000ms for lifebar fill animation)
     pub const STARTUP_DELAY_MS: f64 = 2000.0;
 
-    /// Advance the game clock and process events.
-    pub fn update(&mut self, delta_ms: u64) {
+    /// Update game state to the given absolute elapsed time.
+    /// No accumulation — the clock is driven directly.
+    /// Computes the internal delta from the previous call for timers and animations.
+    pub fn update(&mut self, absolute_ms: u64) {
+        // Compute internal delta from last absolute time (for timers/animations)
+        let delta_ms = absolute_ms.saturating_sub(self.last_absolute_ms);
+        self.last_absolute_ms = absolute_ms;
         let delta = delta_ms as f64;
+
+        // Set clock directly to the absolute time
+        self.clock.set_raw_time(absolute_ms);
 
         // Handle startup delay phase
         if !self.is_rendering {
@@ -661,12 +696,13 @@ impl GameState {
                 self.startup_life_percent = 1.0;
                 // Start the game clock after startup animation
                 self.clock.start();
+                self.startup_audio_pending = true;
                 info!("Startup delay complete, gameplay begins now");
             }
-        } else {
-            // Normal gameplay: advance the game clock
-            self.clock.advance_game_time(delta_ms);
         }
+        // No else branch — clock is driven directly by set_raw_time(absolute_ms).
+        // The old advance_game_time(delta_ms) call is removed since it would
+        // double-update the clock (already set above).
 
         // Update visibility timers (count down)
         if self.jam_counter_visible_ms > 0.0 {
@@ -688,25 +724,31 @@ impl GameState {
             }
         }
 
-        // Update duration counter (wall-clock seconds, matches Java open2jam pattern)
-        // Runs every 1000ms of accumulated frame time
-        self.duration_accumulator_ms += delta;
-        if self.duration_accumulator_ms >= 1000.0 {
-            self.duration_accumulator_ms -= 1000.0;
-            if self.duration_seconds >= 59 {
-                self.duration_seconds = 0;
-                self.duration_minutes += 1;
-            } else {
-                self.duration_seconds += 1;
+        // Update duration counter — only after startup delay completes.
+        // This ensures the on-screen timer starts at 0:00 when gameplay begins,
+        // so the end of song matches the OJN header duration metadata.
+        if self.is_rendering {
+            self.duration_accumulator_ms += delta;
+            if self.duration_accumulator_ms >= 1000.0 {
+                self.duration_accumulator_ms -= 1000.0;
+                if self.duration_seconds >= 59 {
+                    self.duration_seconds = 0;
+                    self.duration_minutes += 1;
+                } else {
+                    self.duration_seconds += 1;
+                }
             }
         }
+
+        // Update combo counter animation
+        self.combo_counter.update(delta);
 
         // Check if song has ended (game time exceeds song duration)
         if !self.is_song_ended && self.song_duration_ms > 0.0 {
             let game_time = self.clock.game_time() as f64;
             if game_time >= self.song_duration_ms {
                 self.is_song_ended = true;
-                info!("Song ended: game time {:.1}ms >= song duration {:.1}ms", 
+                info!("Song ended: game time {:.1}ms >= song duration {:.1}ms",
                     game_time, self.song_duration_ms);
             }
         }
@@ -839,12 +881,83 @@ impl GameState {
     }
 
     /// Process audio triggers for the current game time.
+    ///
+    /// Scans the chart for BGM notes within the lookahead window and pushes them
+    /// to the BGM signal queue via `audio_manager.push_bgm_command()`. This ensures
+    /// sample-accurate timing regardless of frame rate.
+    ///
+    /// Returns the number of BGM notes scheduled this frame.
+    ///
+    /// **Important:** Only schedules notes while the audio stream is active.
+    /// Commands pushed before `stream.play()` would have stale `delay_samples`
+    /// values that don't account for the gap between push time and stream start.
     pub fn process_audio(&mut self, audio_manager: &mut AudioManager) -> usize {
-        self.audio_triggers.process(
-            &self.clock,
-            &self.sound_cache,
-            audio_manager,
-        )
+        use crate::audio::bgm_signal::BgmCommand;
+        use crate::parsing::ojn::{NoteType, TimedEvent};
+
+        // Don't push BGM commands until the audio stream is running.
+        if !audio_manager.is_active() {
+            return 0;
+        }
+
+        let game_time = self.clock.game_time() as f64;
+        let lookahead_end = game_time + self.bgm_lookahead_ms;
+        let mut scheduled_count = 0;
+
+        // Scan chart for BGM notes within the lookahead window
+        while self.next_bgm_event_idx < self.chart.events.len() {
+            let event = &self.chart.events[self.next_bgm_event_idx];
+
+            match event {
+                TimedEvent::Note(note_event) => {
+                    if note_event.note_type == NoteType::Release {
+                        self.next_bgm_event_idx += 1;
+                        continue;
+                    }
+
+                    if note_event.time_ms < game_time {
+                        self.next_bgm_event_idx += 1;
+                        continue;
+                    }
+
+                    if note_event.time_ms > lookahead_end {
+                        break;
+                    }
+
+                    if let Some(sample_id) = note_event.sample_id {
+                        if let Some(frames) = self.sound_cache.get_sound(sample_id) {
+                            let delay_ms = note_event.time_ms - game_time;
+                            let delay_samples = audio_manager.ms_to_samples(delay_ms.max(0.0));
+
+                            let command = BgmCommand {
+                                frames: Arc::clone(frames),
+                                delay_samples,
+                                volume: note_event.volume,
+                                pan: note_event.pan,
+                            };
+
+                            // Push to BGM queue (ignore if queue is full — rare)
+                            if let Err(_err) = audio_manager.push_bgm_command(command) {
+                                log::warn!(
+                                    "BGM queue full, dropping note: sample_id={} time={:.1}ms",
+                                    sample_id, note_event.time_ms
+                                );
+                            } else {
+                                scheduled_count += 1;
+                            }
+                        }
+                    }
+
+                    self.next_bgm_event_idx += 1;
+                }
+                _ => {
+                    // Skip non-note events
+                    self.next_bgm_event_idx += 1;
+                }
+            }
+        }
+
+        scheduled_count
     }
 
     /// Clear all pending judgments (original O2Jam behavior: instant replace).

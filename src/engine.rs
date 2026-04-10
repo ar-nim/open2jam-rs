@@ -16,7 +16,7 @@ use winit::window::Window;
 
 use crate::audio::AudioManager;
 use crate::game_state::GameState;
-use crate::gameplay::scroll::note_y_position;
+use crate::gameplay::scroll::note_y_position_bpm_aware;
 use crate::parsing::ojn::TimedEvent;
 use crate::parsing::xml::{parse_file as parse_skin_xml, Resources as SkinResources};
 use crate::render::atlas::SkinAtlas;
@@ -76,10 +76,18 @@ pub struct App {
     audio: Option<AudioManager>,
     game_state: Option<GameState>,
     last_frame_time: Option<Instant>,
+    /// When the gameplay started (for absolute time, no delta accumulation).
+    game_start_instant: Option<Instant>,
     /// Whether to start loading the game state on next frame.
     start_load_game_state: bool,
     /// Background loading state (Some while loading is in progress)
     loading_state: Option<LoadingState>,
+    /// Hybrid clock validation state (tracks previous frame time for monotonicity checks).
+    hybrid_clock_prev: Option<f64>,
+    /// Running average of hybrid clock delta (for jitter detection).
+    hybrid_clock_prev_delta: Option<f64>,
+    /// Frame counter for clock validation warmup.
+    hybrid_clock_frame_count: u64,
 }
 
 impl App {
@@ -91,8 +99,12 @@ impl App {
             audio: None,
             game_state: None,
             last_frame_time: None,
+            game_start_instant: None,
             start_load_game_state: false,
             loading_state: None,
+            hybrid_clock_prev: None,
+            hybrid_clock_prev_delta: None,
+            hybrid_clock_frame_count: 0,
         })
     }
 
@@ -656,26 +668,39 @@ impl App {
                 render.gpu.as_ref().map(|g| g.skin.is_some()).unwrap_or(false));
         }
 
-        // 1. Calculate delta time (rounded to prevent cumulative drift — Bug 11 fix)
+        // 1. Absolute time — no delta accumulation drift
         let now = Instant::now();
-        let delta_ms = if let Some(last) = self.last_frame_time {
-            let delta = now.duration_since(last);
-            (delta.as_micros() as f64 / 1000.0).round() as u64
-        } else {
-            16
-        };
         self.last_frame_time = Some(now);
 
-        // 2. Advance game state
+        // 2. Advance game state using absolute elapsed time
         if let Some(gs) = &mut self.game_state {
+            // Record start instant once when game state becomes available
+            if self.game_start_instant.is_none() {
+                self.game_start_instant = Some(now);
+                // Reset clock validation state for a fresh warmup period
+                self.hybrid_clock_prev = None;
+                self.hybrid_clock_prev_delta = None;
+                self.hybrid_clock_frame_count = 0;
+            }
+            let elapsed_ms = self.game_start_instant
+                .map(|t| now.duration_since(t).as_millis() as u64)
+                .unwrap_or(0);
+
             let prev_combo = gs.stats.combo;
             let prev_jam_combo = gs.stats.jam_combo;
             let prev_max_combo = gs.stats.max_combo;
-            gs.update(delta_ms);
-            gs.combo_counter.update(delta_ms as f64);
+            gs.update(elapsed_ms);
 
             // Only run gameplay logic after startup delay (is_rendering = true)
             if gs.is_rendering {
+                // Start audio stream when startup just completed
+                if gs.startup_audio_pending {
+                    gs.startup_audio_pending = false;
+                    if let Some(audio_mgr) = &mut self.audio {
+                        audio_mgr.play();
+                    }
+                }
+
                 gs.spawn_notes();
                 gs.auto_judge_notes(); // Auto-play judgment
                 gs.cleanup_notes();
@@ -706,6 +731,42 @@ impl App {
 
                 if let Some(audio_mgr) = &mut self.audio {
                     gs.process_audio(audio_mgr);
+
+                    // ── Step 1: Hybrid Clock Validation ──
+                    let base = Instant::now();
+                    let (now_ms, delta_ms, monotonic) = audio_mgr.validate_hybrid_clock(
+                        base,
+                        10.0, // max jitter ms (deviation from running average); 10ms is normal tolerance at 60fps
+                        &mut self.hybrid_clock_prev,
+                        &mut self.hybrid_clock_prev_delta,
+                        &mut self.hybrid_clock_frame_count,
+                    );
+
+                    static FRAME_COUNTER: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let fc = FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    if fc % 60 == 0 {
+                        log::info!(
+                            "Hybrid clock: time={:.1}ms delta={:.3}ms monotonic={} samples={}",
+                            now_ms, delta_ms, monotonic,
+                            audio_mgr.state().samples_played.load(std::sync::atomic::Ordering::Relaxed)
+                        );
+                    }
+
+                    // ── Audio CPU Usage Monitor ──
+                    // Log every 600 frames (~10s at 60fps)
+                    static CPU_FRAME_COUNTER: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let cpu_fc = CPU_FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if cpu_fc % 600 == 0 {
+                        let (avg, max, budget, pct) = audio_mgr.callback_cpu_usage();
+                        let bar = "█".repeat((pct / 2.0).max(0.5) as usize);
+                        log::info!(
+                            "Audio CPU: avg={}µs max={}µs budget={}µs [{:5.1}%] {}",
+                            avg, max, budget, pct, bar
+                        );
+                    }
                 }
             }
 
@@ -866,10 +927,10 @@ impl App {
                                     continue;
                                 }
 
-                                let y = note_y_position(
+                                let y = note_y_position_bpm_aware(
                                     render_time,
                                     ev.time_ms,
-                                    bpm,
+                                    &gs.timing,
                                     judgment_line_y,
                                     viewport_height,
                                     gs.scroll_speed,
@@ -886,10 +947,10 @@ impl App {
                     }
 
                     for note in &gs.active_notes {
-                        let y = note_y_position(
+                        let y = note_y_position_bpm_aware(
                             render_time,
                             note.target_time_ms,
-                            bpm,
+                            &gs.timing,
                             judgment_line_y,
                             viewport_height,
                             gs.scroll_speed,
@@ -926,20 +987,20 @@ impl App {
                         let lane_prefab = &gs.note_prefabs.lanes[long_note.lane];
                         let lane_x = offset_x + lane_prefab.x as f32 * skin_scale_x;
 
-                        // Calculate head and tail Y positions
-                        let head_y = note_y_position(
+                        // Calculate head and tail Y positions (BPM-aware)
+                        let head_y = note_y_position_bpm_aware(
                             render_time,
                             long_note.head_time_ms,
-                            bpm,
+                            &gs.timing,
                             judgment_line_y,
                             viewport_height,
                             gs.scroll_speed,
                         );
 
-                        let tail_y = note_y_position(
+                        let tail_y = note_y_position_bpm_aware(
                             render_time,
                             long_note.tail_time_ms,
-                            bpm,
+                            &gs.timing,
                             judgment_line_y,
                             viewport_height,
                             gs.scroll_speed,

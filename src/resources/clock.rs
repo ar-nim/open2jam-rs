@@ -10,7 +10,7 @@ pub const DEFAULT_CHART_PADDING_MS: u64 = 1500;
 #[derive(Debug, Clone)]
 pub struct Clock {
     raw_time_ms: u64,
-    game_start_offset_ms: Option<u64>,
+    pub(crate) game_start_offset_ms: Option<u64>,
     render_interpolation: f32,
     chart_padding_ms: u64,
     current_bpm: f32,
@@ -40,6 +40,16 @@ impl Clock {
 
     pub fn set_raw_time(&mut self, time_ms: u64) {
         self.raw_time_ms = time_ms;
+    }
+
+    pub fn advance_game_time(&mut self, delta_ms: u64) {
+        if !self.is_started() {
+            self.start();
+        }
+        self.raw_time_ms = self.raw_time_ms.saturating_add(delta_ms);
+        self.game_start_offset_ms = self
+            .game_start_offset_ms
+            .map(|offset| offset.saturating_sub(delta_ms));
     }
 
     // Game time
@@ -125,15 +135,5 @@ impl Clock {
             self.game_start_offset_ms =
                 Some(self.raw_time_ms.saturating_sub(game_time_ms));
         }
-    }
-
-    pub fn advance_game_time(&mut self, delta_ms: u64) {
-        if !self.is_started() {
-            self.start();
-        }
-        self.raw_time_ms = self.raw_time_ms.saturating_add(delta_ms);
-        self.game_start_offset_ms = self
-            .game_start_offset_ms
-            .map(|offset| offset.saturating_sub(delta_ms));
     }
 }

@@ -293,7 +293,10 @@ fn parse_omc(data: &[u8], decrypt: bool) -> Result<SampleMap, OjmError> {
 // ---------------------------------------------------------------------------
 
 fn xor_with_mask(data: &mut [u8], mask: &[u8; 4]) {
-    for (i, byte) in data.iter_mut().enumerate() {
+    // Java processes in groups of 4, skipping trailing bytes:
+    // for(int i = 0; i + 3 < array.length; i += 4)
+    let aligned_len = (data.len() / 4) * 4;
+    for (i, byte) in data[..aligned_len].iter_mut().enumerate() {
         *byte ^= mask[i & 3];
     }
 }
@@ -371,5 +374,27 @@ mod tests {
     fn test_parse_unknown_signature() {
         let result = parse_bytes(&[0xEF, 0xBE, 0xAD, 0xDE]);
         assert!(matches!(result, Err(OjmError::UnknownSignature(0xDEADBEEF))));
+    }
+
+    #[test]
+    fn test_xor_mask_skips_trailing_bytes() {
+        // Java: for(int i = 0; i + 3 < array.length; i += 4)
+        // Trailing bytes (when len % 4 != 0) must NOT be XORed.
+        let mask = [0x6E, 0x61, 0x6D, 0x69];
+
+        // Aligned: all bytes XORed
+        let mut data = [0u8; 8];
+        xor_with_mask(&mut data, &mask);
+        assert_eq!(data, [0x6E, 0x61, 0x6D, 0x69, 0x6E, 0x61, 0x6D, 0x69]);
+
+        // Trailing 1 byte: NOT XORed (stays 0)
+        let mut data = [0u8; 5];
+        xor_with_mask(&mut data, &mask);
+        assert_eq!(data, [0x6E, 0x61, 0x6D, 0x69, 0x00]);
+
+        // Trailing 3 bytes: NOT XORed (stay 0)
+        let mut data = [0u8; 7];
+        xor_with_mask(&mut data, &mask);
+        assert_eq!(data, [0x6E, 0x61, 0x6D, 0x69, 0x00, 0x00, 0x00]);
     }
 }
