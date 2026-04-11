@@ -946,6 +946,26 @@ impl App {
                         }
                     }
 
+                    // Draw PRESSED_NOTE lane effects BEFORE notes (behind them).
+                    // These are the lane light-up effects at y < judgment_line_y.
+                    for lane in 0..7 {
+                        if gs.pressed_lanes[lane] {
+                            for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_lane_effects[lane] {
+                                if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
+                                    .or_else(|| atlas.get_frame(sprite_id).copied())
+                                {
+                                    let sprite_w = pressed_frame.width as f32 * skin_scale_x;
+                                    let sprite_h = pressed_frame.height as f32 * skin_scale_y;
+                                    let x = offset_x + *x_pos as f32 * skin_scale_x;
+                                    let y = offset_y + *y_pos as f32 * skin_scale_y;
+                                    gpu.textured_renderer.draw_textured_quad(
+                                        x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     // Draw tap notes (layer 5 in original)
                     for note in &gs.active_notes {
                         let y = note_y_position_bpm_aware(
@@ -1117,7 +1137,7 @@ impl App {
                     // Draw PRESSED_NOTE overlays on top of static_keyboard (layer 8 in original).
                     for lane in 0..7 {
                         if gs.pressed_lanes[lane] {
-                            for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_note_overlays[lane] {
+                            for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_keyboard_overlays[lane] {
                                 if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
                                     .or_else(|| atlas.get_frame(sprite_id).copied())
                                 {
@@ -1139,7 +1159,7 @@ impl App {
                     if let Some(atlas) = &gpu.atlas {
                         for lane in 0..7 {
                             if gs.pressed_lanes[lane] {
-                                for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_note_overlays[lane] {
+                                for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_keyboard_overlays[lane] {
                                     if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
                                         .or_else(|| atlas.get_frame(sprite_id).copied())
                                     {
