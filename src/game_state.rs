@@ -1210,39 +1210,34 @@ impl GameState {
             for lane in &auto_longflare_lanes {
                 self.trigger_longflare_effect(*lane, render_time);
             }
-        } else {
-            // Manual mode: judgment happens immediately in handle_key_press().
-            // This function only handles miss detection and long note tail evaluation.
+        }
 
-            // Handle long note tails: auto-release when tail passes judgment line
-            // Collect lanes to kill flares for (borrow checker: can't call kill_longflare while iterating)
-            let mut flare_lanes_to_kill: Vec<usize> = Vec::new();
+        // Handle long note tails: auto-release when tail passes judgment line.
+        // This runs in BOTH auto-play and manual mode.
+        let mut flare_lanes_to_kill: Vec<usize> = Vec::new();
 
-            for ln in &mut self.active_long_notes {
-                if ln.judged && ln.tail_judgment.is_none() && render_time >= ln.tail_time_ms {
-                    if ln.holding {
-                        ln.holding = false;
-                        let j = judge_release((render_time - ln.tail_time_ms).abs(), bpm);
-                        ln.tail_judgment = Some(j);
-                        self.stats.record_judgment(j, false);
-                        // Flare dies with the release — kill it, don't re-trigger
-                        flare_lanes_to_kill.push(ln.lane);
-                        judgments_to_add.push(PendingJudgment::new(j, ln.lane, render_time));
-                    } else {
-                        ln.tail_judgment = Some(JudgmentType::Miss);
-                        self.stats.record_judgment(JudgmentType::Miss, false);
-                        // Flare dies when the long note is missed
-                        flare_lanes_to_kill.push(ln.lane);
-                        judgments_to_add.push(PendingJudgment::new(JudgmentType::Miss, ln.lane, render_time));
-                    }
-                    ln.dead = true;
+        for ln in &mut self.active_long_notes {
+            if ln.judged && ln.tail_judgment.is_none() && render_time >= ln.tail_time_ms {
+                if ln.holding {
+                    ln.holding = false;
+                    let j = judge_release((render_time - ln.tail_time_ms).abs(), bpm);
+                    ln.tail_judgment = Some(j);
+                    self.stats.record_judgment(j, false);
+                    flare_lanes_to_kill.push(ln.lane);
+                    judgments_to_add.push(PendingJudgment::new(j, ln.lane, render_time));
+                } else {
+                    ln.tail_judgment = Some(JudgmentType::Miss);
+                    self.stats.record_judgment(JudgmentType::Miss, false);
+                    flare_lanes_to_kill.push(ln.lane);
+                    judgments_to_add.push(PendingJudgment::new(JudgmentType::Miss, ln.lane, render_time));
                 }
+                ln.dead = true;
             }
+        }
 
-            // Kill flares after iteration (borrow checker)
-            for lane in &flare_lanes_to_kill {
-                self.kill_longflare(*lane);
-            }
+        // Kill flares after iteration (borrow checker)
+        for lane in &flare_lanes_to_kill {
+            self.kill_longflare(*lane);
         }
 
         // Trigger effects (click effects only — long flares are triggered on head hit)
@@ -1401,12 +1396,9 @@ impl GameState {
     }
 
     /// Trigger EFFECT_LONGFLARE for a lane when a Cool or Good judgment occurs (long note head).
-    ///
-    /// Duration is pre-calculated from the sprite's frame count and frame speed during skin loading.
-    /// If custom_duration_ms is provided, it overrides the sprite-based duration (used for autoplay
-    /// to match the actual hold duration of the long note).
     pub fn trigger_longflare_effect(&mut self, lane: usize, render_time: f64) {
         if self.effect_longflare_sprite.is_some() {
+            log::info!("[LONGFLARE] Triggered for lane {}", lane);
             self.long_flare_effects.push(LongFlareEffect::new(lane, render_time));
         }
     }
@@ -1416,12 +1408,18 @@ impl GameState {
         for flare in &mut self.long_flare_effects {
             if flare.lane == lane && flare.active {
                 flare.active = false;
+                log::info!("[LONGFLARE] Killed for lane {}", lane);
             }
         }
     }
     pub fn cleanup_effects(&mut self) {
+        let before = self.long_flare_effects.len();
         let render_time = self.clock.render_time() as f64;
         self.note_click_effects.retain(|e| e.is_active(render_time));
         self.long_flare_effects.retain(|e| e.is_active(render_time));
+        let removed = before - self.long_flare_effects.len();
+        if removed > 0 {
+            log::info!("[LONGFLARE] cleanup_effects: removed {}, remaining {}", removed, self.long_flare_effects.len());
+        }
     }
 }
