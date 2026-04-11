@@ -185,8 +185,12 @@ impl ApplicationHandler for App {
                         let os_timestamp = std::time::Instant::now();
                         match event.state {
                             ElementState::Pressed => {
-                                if let Some(audio_mgr) = &mut self.audio {
-                                    gs.handle_key_press(lane, os_timestamp, audio_mgr);
+                                // Ignore OS key repeat events — if the lane is already
+                                // pressed, this is a repeated press from holding the key.
+                                if !gs.pressed_lanes[lane] {
+                                    if let Some(audio_mgr) = &mut self.audio {
+                                        gs.handle_key_press(lane, os_timestamp, audio_mgr);
+                                    }
                                 }
                             }
                             ElementState::Released => {
