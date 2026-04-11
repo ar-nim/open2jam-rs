@@ -1155,10 +1155,26 @@ impl App {
                 } // end if gs.is_rendering
 
                 // Draw PRESSED_NOTE overlays during startup (before gameplay begins)
+                // Draw both lane effects (behind) and keyboard overlays (on top)
                 if !gs.is_rendering {
                     if let Some(atlas) = &gpu.atlas {
                         for lane in 0..7 {
                             if gs.pressed_lanes[lane] {
+                                // Lane effects (y < judgment_line)
+                                for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_lane_effects[lane] {
+                                    if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
+                                        .or_else(|| atlas.get_frame(sprite_id).copied())
+                                    {
+                                        let sprite_w = pressed_frame.width as f32 * skin_scale_x;
+                                        let sprite_h = pressed_frame.height as f32 * skin_scale_y;
+                                        let x = offset_x + *x_pos as f32 * skin_scale_x;
+                                        let y = offset_y + *y_pos as f32 * skin_scale_y;
+                                        gpu.textured_renderer.draw_textured_quad(
+                                            x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
+                                        );
+                                    }
+                                }
+                                // Keyboard key overlays
                                 for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_keyboard_overlays[lane] {
                                     if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
                                         .or_else(|| atlas.get_frame(sprite_id).copied())

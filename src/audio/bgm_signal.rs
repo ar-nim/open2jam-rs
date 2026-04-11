@@ -184,6 +184,7 @@ impl BgmSignalQueue {
         if let Some(consumer) = &mut self.consumer {
             while let Ok(cmd) = consumer.pop() {
                 let signal = ScheduledSignal::new(cmd.frames, cmd.delay_samples, cmd.volume, cmd.pan);
+                log::debug!("[BGM] signal created: delay={}, vol={}, pan={}", cmd.delay_samples, cmd.volume, cmd.pan);
                 self.active_signals.push(signal);
             }
         }
