@@ -17,6 +17,7 @@ use crate::gameplay::timing_data::TimingData;
 use crate::parsing::ojn::{Chart, NoteType, TimedEvent};
 use crate::resources::clock::Clock;
 use crate::skin::prefab::NotePrefabs;
+use crate::audio::manager::SharedSyncPoint;
 use crate::parsing::xml::Resources as SkinResources;
 
 /// A note click effect instance (EFFECT_CLICK sprite, shown for Cool/Good).
@@ -476,9 +477,12 @@ pub struct GameState {
     pub is_song_ended: bool,
     /// Last absolute game time (for computing internal delta in update())
     pub last_absolute_ms: u64,
-    /// OS Instant when gameplay started (after startup animation).
-    /// This is the game's "0ms" origin for input timestamp translation.
-    pub game_start_os: Option<std::time::Instant>,
+    /// Thread-safe sync point from the audio thread (cpal).
+    /// Used to translate OS hardware timestamps to the audio timeline.
+    pub shared_sync_point: Option<SharedSyncPoint>,
+    /// User-configurable global offset in ms to compensate for hardware latency
+    /// (Bluetooth, USB DAC, monitor audio routing). Positive = notes appear earlier.
+    pub global_offset_ms: f64,
     /// Active note click effects (EFFECT_CLICK, triggered on Cool/Good for tap notes)
     pub note_click_effects: Vec<NoteClickEffect>,
     /// Active long note flare effects (EFFECT_LONGFLARE, triggered on Cool/Good for long notes)
@@ -506,6 +510,8 @@ impl GameState {
         scroll_speed: f64,
         auto_play: bool,
         skin_resources: Option<&SkinResources>,
+        shared_sync_point: Option<SharedSyncPoint>,
+        global_offset_ms: f64,
     ) -> Result<Self> {
         let ojn_path = ojn_path.as_ref();
         let dir = ojn_path.parent().context("OJN file must have a parent directory")?;
@@ -716,7 +722,8 @@ impl GameState {
             end_time_ms,
             is_song_ended: false,
             last_absolute_ms: 0,
-            game_start_os: None,
+            shared_sync_point,
+            global_offset_ms,
             note_click_effects: Vec::new(),
             long_flare_effects: Vec::new(),
             effect_click_sprite: click_sprite,
@@ -755,9 +762,6 @@ impl GameState {
                 self.startup_delay_ms = 0.0;
                 self.is_rendering = true;
                 self.startup_life_percent = 1.0;
-                // Capture the exact OS Instant when gameplay starts.
-                // This becomes the game's "0ms" origin for input timestamp translation.
-                self.game_start_os = Some(std::time::Instant::now());
                 // Start the game clock after startup animation
                 self.clock.start();
                 self.startup_audio_pending = true;
@@ -1066,7 +1070,7 @@ impl GameState {
     pub fn detect_missed_notes(&mut self, render_time: f64, bpm: f64) {
         // Check for missed tap notes
         let mut missed_lanes: Vec<usize> = Vec::new();
-        
+
         for note in &mut self.active_notes {
             if !note.judged && !note.missed {
                 if is_missed(render_time, note.target_time_ms, bpm) {
@@ -1102,6 +1106,18 @@ impl GameState {
                 ));
             }
         }
+
+        // Garbage collect old key presses using audio time if available
+        let cutoff = if let Some(ref sync_point) = self.shared_sync_point {
+            if let Ok(sync) = sync_point.read() {
+                sync.audio_time_ms - 2000.0
+            } else {
+                render_time - 2000.0
+            }
+        } else {
+            render_time - 2000.0
+        };
+        self.key_press_history.retain(|(_, t)| *t > cutoff);
     }
 
     /// Process note judgments (both auto-play and manual modes).
@@ -1156,10 +1172,6 @@ impl GameState {
             // Manual mode: judge notes based on key press history
             // Use the BAD window from judgment.rs for consistency
             let bad_window_ms = crate::gameplay::judgment::bad_window_ms_tap(bpm);
-
-            // Clean up old key press entries first (older than 2 seconds)
-            let cutoff = render_time - 2000.0;
-            self.key_press_history.retain(|(_, t)| *t > cutoff);
 
             // Track lanes that need keysound playback
             let mut lanes_to_play_sound: Vec<usize> = Vec::new();
@@ -1277,21 +1289,32 @@ impl GameState {
         self.pending_judgments.retain(|j| j.is_active(render_time));
     }
 
-    /// Handle key press for a lane. Records the press time for later judgment.
-    /// Uses OS hardware timestamps from winit events for frame-quantisation-free input.
+    /// Handle key press for a lane. Translates OS hardware timestamp to the
+    /// audio timeline using the shared sync point, then applies the global offset.
     pub fn handle_key_press(&mut self, lane: usize, os_timestamp: std::time::Instant) -> Option<JudgmentType> {
         if lane < 7 {
             self.pressed_lanes[lane] = true;
-            // Translate OS timestamp to chart-relative time (ms)
-            let chart_time_ms = if let Some(game_start) = self.game_start_os {
-                if os_timestamp >= game_start {
-                    (os_timestamp - game_start).as_micros() as f64 / 1000.0
+            
+            // Translate OS timestamp to chart-relative audio time
+            let chart_time_ms = if let Some(ref sync_point) = self.shared_sync_point {
+                if let Ok(sync) = sync_point.read() {
+                    // Extrapolate time elapsed since the last audio buffer update
+                    let os_delta_ms = if os_timestamp >= sync.os_time {
+                        (os_timestamp - sync.os_time).as_micros() as f64 / 1000.0
+                    } else {
+                        -((sync.os_time - os_timestamp).as_micros() as f64 / 1000.0)
+                    };
+                    let raw_audio_time = sync.audio_time_ms + os_delta_ms;
+                    // Apply user's hardware offset
+                    raw_audio_time + self.global_offset_ms
                 } else {
                     0.0
                 }
             } else {
-                0.0 // Audio hasn't started yet
+                // Fallback: no sync point available (shouldn't happen in normal operation)
+                0.0
             };
+            
             self.key_press_history.push((lane, chart_time_ms));
         }
         None
