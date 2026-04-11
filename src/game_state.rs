@@ -1164,63 +1164,10 @@ impl GameState {
                 }
             }
         } else {
-            // Manual mode: Lane-first, symmetric window.
-            // Process key presses in chronological order. For each press,
-            // find the nearest unjudged note in that lane within the bad window.
-            // This matches O2Jam's forgiving behavior where late hits can bleed
-            // into subsequent notes.
-            let base_bad_window_ms = crate::gameplay::judgment::bad_window_ms_tap(bpm);
+            // Manual mode: judgment happens immediately in handle_key_press().
+            // This function only handles miss detection and long note tail evaluation.
 
-            let mut consumed_indices: Vec<usize> = Vec::new();
-            for (history_idx, &(lane, press_time)) in self.key_press_history.iter().enumerate() {
-                let mut best_note_idx: Option<usize> = None;
-                let mut best_diff: f64 = f64::MAX;
-
-                for (ni, note) in self.active_notes.iter().enumerate() {
-                    if note.judged || note.missed || note.lane != lane { continue; }
-                    let diff = (press_time - note.target_time_ms).abs();
-                    if diff < best_diff { best_diff = diff; best_note_idx = Some(ni); }
-                }
-                for (li, ln) in self.active_long_notes.iter().enumerate() {
-                    if ln.judged || ln.missed || ln.lane != lane { continue; }
-                    let diff = (press_time - ln.head_time_ms).abs();
-                    if diff < best_diff { best_diff = diff; best_note_idx = Some(10000 + li); }
-                }
-
-                if let Some(idx) = best_note_idx {
-                    if best_diff <= base_bad_window_ms {
-                        consumed_indices.push(history_idx);
-                        if idx >= 10000 {
-                            let li = idx - 10000;
-                            let td = press_time - self.active_long_notes[li].head_time_ms;
-                            let j = judge_tap_note(td, bpm);
-                            self.active_long_notes[li].judged = true;
-                            self.active_long_notes[li].head_judgment = Some(j);
-                            self.active_long_notes[li].holding = true;
-                            self.stats.record_judgment(j, false);
-                            if matches!(j, JudgmentType::Cool | JudgmentType::Good) { longflare_effect_lanes.push(lane); }
-                            judgments_to_add.push(PendingJudgment::new(j, lane, render_time));
-                        } else {
-                            let td = press_time - self.active_notes[idx].target_time_ms;
-                            let j = judge_tap_note(td, bpm);
-                            self.active_notes[idx].judged = true;
-                            self.active_notes[idx].judgment_type = Some(j);
-                            self.stats.record_judgment(j, false);
-                            if matches!(j, JudgmentType::Cool | JudgmentType::Good) { click_effect_lanes.push(lane); }
-                            judgments_to_add.push(PendingJudgment::new(j, lane, render_time));
-                        }
-                    }
-                }
-            }
-
-            // Remove consumed key presses (reverse order to maintain indices)
-            consumed_indices.sort();
-            consumed_indices.dedup();
-            for &idx in consumed_indices.iter().rev() {
-                self.key_press_history.remove(idx);
-            }
-
-            // Handle long note tails
+            // Handle long note tails: auto-release when tail passes judgment line
             for ln in &mut self.active_long_notes {
                 if ln.judged && ln.tail_judgment.is_none() && render_time >= ln.tail_time_ms {
                     if ln.holding {
@@ -1252,8 +1199,9 @@ impl GameState {
         self.pending_judgments.retain(|j| j.is_active(render_time));
     }
 
-    /// Handle key press for a lane. Uses the game clock (already synced to audio)
-    /// for press time, then stores it for later judgment.
+    /// Handle key press for a lane. Judges the next unjudged note in this lane
+    /// immediately if the press time is within the judgment window.
+    /// This matches the original O2Jam approach: key press → find next note → judge if in range.
     pub fn handle_key_press(
         &mut self,
         lane: usize,
@@ -1263,37 +1211,77 @@ impl GameState {
         if lane < 7 {
             self.pressed_lanes[lane] = true;
 
-            // Use the game clock directly — it's already synced to the audio clock
-            // via the hybrid clock mechanism. This eliminates sync point complexity
-            // and hardware latency issues.
             let press_time_ms = self.clock.game_time() as f64;
+            let bpm = self.clock.bpm() as f64;
+            let base_bad_window_ms = crate::gameplay::judgment::bad_window_ms_tap(bpm);
 
-            // Store for judgment loop
-            self.key_press_history.push_back((lane, press_time_ms));
-
-            // INSTANT KEYSOUND: Find the chronologically first unjudged note in
-            // this lane that the player could reasonably be aiming for.
-            let base_bad_window_ms = crate::gameplay::judgment::bad_window_ms_tap(
-                self.clock.bpm() as f64
-            );
-            let keysound_sample_id = self.active_notes.iter()
-                .filter(|n| n.lane == lane && !n.judged && !n.missed)
-                .find(|n| {
-                    let diff = press_time_ms - n.target_time_ms;
-                    diff >= -base_bad_window_ms
-                })
-                .map(|n| n.sample_id);
-
-            if let Some(Some(sample_id)) = keysound_sample_id {
-                if let Some(frames) = self.sound_cache.get_sound(sample_id) {
-                    let command = crate::audio::bgm_signal::BgmCommand {
-                        frames: std::sync::Arc::clone(frames),
-                        delay_samples: 0,
-                        volume: 1.0,
-                        pan: 0.0,
-                    };
-                    let _ = audio_manager.push_bgm_command(command);
+            // Find the next unjudged tap note in this lane
+            for note in &mut self.active_notes {
+                if note.lane != lane || note.judged || note.missed { continue; }
+                
+                let time_diff = press_time_ms - note.target_time_ms;
+                if time_diff.abs() <= base_bad_window_ms {
+                    let judgment = judge_tap_note(time_diff, bpm);
+                    note.judged = true;
+                    note.judgment_type = Some(judgment);
+                    self.stats.record_judgment(judgment, false);
+                    
+                    // Play keysound immediately
+                    if let Some(sample_id) = note.sample_id {
+                        if let Some(frames) = self.sound_cache.get_sound(sample_id) {
+                            let command = crate::audio::bgm_signal::BgmCommand {
+                                frames: std::sync::Arc::clone(frames),
+                                delay_samples: 0,
+                                volume: 1.0,
+                                pan: 0.0,
+                            };
+                            let _ = audio_manager.push_bgm_command(command);
+                        }
+                    }
+                    
+                    if matches!(judgment, JudgmentType::Cool | JudgmentType::Good) {
+                        self.trigger_note_click_effect(lane, press_time_ms);
+                    }
+                    self.clear_pending_judgments();
+                    self.pending_judgments.push(PendingJudgment::new(judgment, lane, press_time_ms));
+                    return Some(judgment);
                 }
+                // Note is beyond the window — stop searching (notes are in order)
+                if time_diff < -base_bad_window_ms { break; }
+            }
+
+            // Check long notes
+            for ln in &mut self.active_long_notes {
+                if ln.lane != lane || ln.judged || ln.missed { continue; }
+                
+                let time_diff = press_time_ms - ln.head_time_ms;
+                if time_diff.abs() <= base_bad_window_ms {
+                    let judgment = judge_tap_note(time_diff, bpm);
+                    ln.judged = true;
+                    ln.head_judgment = Some(judgment);
+                    ln.holding = true;
+                    self.stats.record_judgment(judgment, false);
+                    
+                    if let Some(sample_id) = ln.sample_id {
+                        if let Some(frames) = self.sound_cache.get_sound(sample_id) {
+                            let command = crate::audio::bgm_signal::BgmCommand {
+                                frames: std::sync::Arc::clone(frames),
+                                delay_samples: 0,
+                                volume: 1.0,
+                                pan: 0.0,
+                            };
+                            let _ = audio_manager.push_bgm_command(command);
+                        }
+                    }
+                    
+                    if matches!(judgment, JudgmentType::Cool | JudgmentType::Good) {
+                        self.trigger_longflare_effect(lane, press_time_ms);
+                    }
+                    self.clear_pending_judgments();
+                    self.pending_judgments.push(PendingJudgment::new(judgment, lane, press_time_ms));
+                    return Some(judgment);
+                }
+                if time_diff < -base_bad_window_ms { break; }
             }
         }
         None
