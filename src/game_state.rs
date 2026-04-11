@@ -198,7 +198,9 @@ impl GameStats {
     ///
     /// If `has_pill` is true and the judgment is Bad, the pill converts it to Cool
     /// and is consumed (pill_count decremented).
-    pub fn record_judgment(&mut self, judgment: JudgmentType, has_pill: bool) {
+    ///
+    /// Returns the effective judgment type after pill conversion.
+    pub fn record_judgment(&mut self, judgment: JudgmentType, has_pill: bool) -> JudgmentType {
         // Check if pill converts BAD to COOL
         let use_pill = has_pill && judgment == JudgmentType::Bad && self.pill_count > 0;
         let effective_judgment = if use_pill {
@@ -281,6 +283,7 @@ impl GameStats {
         self.life += effective_judgment.hp_change_hard();
         self.life = self.life.clamp(0, self.max_life);
 
+        effective_judgment
     }
 
     /// Check if the game is over (life reached 0).
@@ -1261,11 +1264,11 @@ impl GameState {
 
                 if time_diff.abs() <= base_bad_window_ms {
                     let judgment = judge_tap_note(time_diff, bpm);
-                    log::debug!("[INPUT]   *** HIT! Judgment: {:?}, diff={:.2}ms ***", judgment, time_diff);
                     note.judged = true;
-                    note.judgment_type = Some(judgment);
                     let has_pill = self.stats.pill_count > 0;
-                    self.stats.record_judgment(judgment, has_pill);
+                    let effective = self.stats.record_judgment(judgment, has_pill);
+                    note.judgment_type = Some(effective);
+                    log::debug!("[INPUT]   *** HIT! Judgment: {:?} (raw: {:?}), diff={:.2}ms ***", effective, judgment, time_diff);
 
                     // Play keysound only when judgment is accepted (O2Jam behavior)
                     if let Some(sample_id) = note.sample_id {
@@ -1285,12 +1288,12 @@ impl GameState {
                         }
                     }
 
-                    if matches!(judgment, JudgmentType::Cool | JudgmentType::Good) {
+                    if matches!(effective, JudgmentType::Cool | JudgmentType::Good) {
                         self.trigger_note_click_effect(lane, press_time_ms);
                     }
                     self.clear_pending_judgments();
-                    self.pending_judgments.push(PendingJudgment::new(judgment, lane, press_time_ms));
-                    return Some(judgment);
+                    self.pending_judgments.push(PendingJudgment::new(effective, lane, press_time_ms));
+                    return Some(effective);
                 }
                 // Note is beyond the window — stop searching (notes are in order)
                 if time_diff < -base_bad_window_ms {
@@ -1309,12 +1312,12 @@ impl GameState {
 
                 if time_diff.abs() <= base_bad_window_ms {
                     let judgment = judge_tap_note(time_diff, bpm);
-                    log::debug!("[INPUT]   *** HIT LONG! Judgment: {:?}, diff={:.2}ms ***", judgment, time_diff);
                     ln.judged = true;
-                    ln.head_judgment = Some(judgment);
-                    ln.holding = true;
                     let has_pill = self.stats.pill_count > 0;
-                    self.stats.record_judgment(judgment, has_pill);
+                    let effective = self.stats.record_judgment(judgment, has_pill);
+                    ln.head_judgment = Some(effective);
+                    ln.holding = true;
+                    log::debug!("[INPUT]   *** HIT LONG! Judgment: {:?} (raw: {:?}), diff={:.2}ms ***", effective, judgment, time_diff);
 
                     if let Some(sample_id) = ln.sample_id {
                         if let Some(frames) = self.sound_cache.get_sound(sample_id) {
@@ -1330,12 +1333,12 @@ impl GameState {
                         }
                     }
 
-                    if matches!(judgment, JudgmentType::Cool | JudgmentType::Good) {
+                    if matches!(effective, JudgmentType::Cool | JudgmentType::Good) {
                         self.trigger_longflare_effect(lane, press_time_ms);
                     }
                     self.clear_pending_judgments();
-                    self.pending_judgments.push(PendingJudgment::new(judgment, lane, press_time_ms));
-                    return Some(judgment);
+                    self.pending_judgments.push(PendingJudgment::new(effective, lane, press_time_ms));
+                    return Some(effective);
                 }
                 if time_diff < -base_bad_window_ms {
                     log::debug!("[INPUT]   Long note too early (diff={:.2}ms), stopping search", time_diff);
