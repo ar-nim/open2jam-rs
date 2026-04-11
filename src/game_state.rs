@@ -1182,10 +1182,10 @@ impl GameState {
 
         let mut judgments_to_add: Vec<PendingJudgment> = Vec::new();
         let mut click_effect_lanes: Vec<usize> = Vec::new();
-        let mut longflare_effect_lanes: Vec<usize> = Vec::new();
 
         if self.auto_play {
             let auto_play_tolerance_ms = 10.0;
+            let mut auto_longflare_lanes: Vec<usize> = Vec::new();
             for note in &mut self.active_notes {
                 if note.judged || note.missed { continue; }
                 if (render_time - note.target_time_ms).abs() < auto_play_tolerance_ms {
@@ -1203,15 +1203,21 @@ impl GameState {
                     long_note.head_judgment = Some(JudgmentType::Cool);
                     long_note.holding = true;
                     self.stats.record_judgment(JudgmentType::Cool, false);
-                    longflare_effect_lanes.push(long_note.lane);
+                    auto_longflare_lanes.push(long_note.lane);
                     judgments_to_add.push(PendingJudgment::new(JudgmentType::Cool, long_note.lane, render_time));
                 }
+            }
+            for lane in &auto_longflare_lanes {
+                self.trigger_longflare_effect(*lane, render_time);
             }
         } else {
             // Manual mode: judgment happens immediately in handle_key_press().
             // This function only handles miss detection and long note tail evaluation.
 
             // Handle long note tails: auto-release when tail passes judgment line
+            // Collect lanes to kill flares for (borrow checker: can't call kill_longflare while iterating)
+            let mut flare_lanes_to_kill: Vec<usize> = Vec::new();
+
             for ln in &mut self.active_long_notes {
                 if ln.judged && ln.tail_judgment.is_none() && render_time >= ln.tail_time_ms {
                     if ln.holding {
@@ -1219,21 +1225,28 @@ impl GameState {
                         let j = judge_release((render_time - ln.tail_time_ms).abs(), bpm);
                         ln.tail_judgment = Some(j);
                         self.stats.record_judgment(j, false);
-                        if matches!(j, JudgmentType::Cool | JudgmentType::Good) { longflare_effect_lanes.push(ln.lane); }
+                        // Flare dies with the release — kill it, don't re-trigger
+                        flare_lanes_to_kill.push(ln.lane);
                         judgments_to_add.push(PendingJudgment::new(j, ln.lane, render_time));
                     } else {
                         ln.tail_judgment = Some(JudgmentType::Miss);
                         self.stats.record_judgment(JudgmentType::Miss, false);
+                        // Flare dies when the long note is missed
+                        flare_lanes_to_kill.push(ln.lane);
                         judgments_to_add.push(PendingJudgment::new(JudgmentType::Miss, ln.lane, render_time));
                     }
                     ln.dead = true;
                 }
             }
+
+            // Kill flares after iteration (borrow checker)
+            for lane in &flare_lanes_to_kill {
+                self.kill_longflare(*lane);
+            }
         }
 
-        // Trigger effects
+        // Trigger effects (click effects only — long flares are triggered on head hit)
         for lane in click_effect_lanes.drain(..) { self.trigger_note_click_effect(lane, render_time); }
-        for lane in longflare_effect_lanes.drain(..) { self.trigger_longflare_effect(lane, render_time); }
         self.detect_missed_notes(render_time, bpm);
 
         if !judgments_to_add.is_empty() {
