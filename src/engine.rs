@@ -185,7 +185,9 @@ impl ApplicationHandler for App {
                         let os_timestamp = std::time::Instant::now();
                         match event.state {
                             ElementState::Pressed => {
-                                gs.handle_key_press(lane, os_timestamp);
+                                if let Some(audio_mgr) = &mut self.audio {
+                                    gs.handle_key_press(lane, os_timestamp, audio_mgr);
+                                }
                             }
                             ElementState::Released => {
                                 gs.handle_key_release(lane, os_timestamp);
