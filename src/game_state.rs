@@ -923,7 +923,6 @@ impl GameState {
     ///
     /// In manual mode, only BGM/AUTO_PLAY notes (channels 9-15) are auto-scheduled.
     /// Lane key sounds (channels 3-7) only play when the player presses the key
-    /// (handled by `play_keysound_for_lane()`).
     pub fn process_audio(&mut self, audio_manager: &mut AudioManager) -> usize {
         use crate::audio::bgm_signal::BgmCommand;
         use crate::parsing::ojn::{Channel, NoteType, TimedEvent};
@@ -958,8 +957,7 @@ impl GameState {
                     }
 
                     // In manual mode, skip lane key sounds (channels 3-7)
-                    // These are played via play_keysound_for_lane() when keys are pressed
-                    if !self.auto_play {
+                            if !self.auto_play {
                         if let Channel::Note(_) = note_event.channel {
                             self.next_bgm_event_idx += 1;
                             continue;
@@ -1002,41 +1000,6 @@ impl GameState {
         scheduled_count
     }
 
-    /// Play the keysound for a specific lane. Used in manual mode when the player
-    /// successfully hits a note. This plays the keysound immediately rather than
-    /// scheduling it through the lookahead scheduler.
-    pub fn play_keysound_for_lane(&mut self, lane: usize, audio_manager: &mut AudioManager) {
-        use crate::audio::bgm_signal::BgmCommand;
-        use crate::parsing::ojn::{Channel, TimedEvent};
-
-        // Find the first unjudged note in this lane that we can play the sound for
-        let render_time = self.clock.game_time() as f64;
-        
-        for event in &self.chart.events {
-            if let TimedEvent::Note(note_event) = event {
-                if let Channel::Note(n) = note_event.channel {
-                    if n as usize == lane {
-                        // Check if this note is close to the current render time
-                        let diff = (note_event.time_ms - render_time).abs();
-                        if diff < 200.0 {
-                            if let Some(sample_id) = note_event.sample_id {
-                                if let Some(frames) = self.sound_cache.get_sound(sample_id) {
-                                    let command = BgmCommand {
-                                        frames: Arc::clone(frames),
-                                        delay_samples: 0, // Play immediately
-                                        volume: note_event.volume,
-                                        pan: note_event.pan,
-                                    };
-                                    let _ = audio_manager.push_bgm_command(command);
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
     /// When a new judgment spawns, the previous one is immediately killed.
     pub fn clear_pending_judgments(&mut self) {
         self.pending_judgments.clear();
