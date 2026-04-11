@@ -852,6 +852,8 @@ impl App {
             if let (Some(atlas), Some(skin_res)) = (&gpu.atlas, &gpu.skin) {
                 if let Some(skin) = skin_res.get_skin("o2jam") {
                     // Whitelist of static sprite IDs to render in the background pass.
+                    // NOTE: static_keyboard is NOT here — it must be drawn AFTER notes
+                    // so it occludes notes that have passed the judgment line.
                     const STATIC_SPRITES: &[&str] = &[
                         "bga10",
                         "note_bg",
@@ -862,7 +864,6 @@ impl App {
                         // "pill" is drawn by HUD based on pill_count
                         // "jam_bar" is drawn by HUD with fill clipping, not as static sprite
                         // "timebar" is drawn by HUD with progress-based fill clipping
-                        "static_keyboard",
                     ];
 
                     for entity in &skin.entities {
@@ -938,26 +939,7 @@ impl App {
                         }
                     }
 
-                    // Draw PRESSED_NOTE overlays FIRST (behind all notes)
-                    for lane in 0..7 {
-                        if gs.pressed_lanes[lane] {
-                            for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_note_overlays[lane] {
-                                if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
-                                    .or_else(|| atlas.get_frame(sprite_id).copied())
-                                {
-                                    let sprite_w = pressed_frame.width as f32 * skin_scale_x;
-                                    let sprite_h = pressed_frame.height as f32 * skin_scale_y;
-                                    let x = offset_x + *x_pos as f32 * skin_scale_x;
-                                    let y = offset_y + *y_pos as f32 * skin_scale_y;
-                                    gpu.textured_renderer.draw_textured_quad(
-                                        x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    // Draw tap notes on top of pressed overlays
+                    // Draw tap notes (layer 5 in original)
                     for note in &gs.active_notes {
                         let y = note_y_position_bpm_aware(
                             render_time,
@@ -971,7 +953,6 @@ impl App {
                         let lane_prefab = &gs.note_prefabs.lanes[note.lane];
                         let lane_x = offset_x + lane_prefab.x as f32 * skin_scale_x;
 
-                        // Use the sprite ID from the skin XML prefab, fallback to lane-based default
                         let head_frame_name = lane_prefab.sprite_id.as_deref().unwrap_or_else(|| {
                             match note.lane {
                                 0 | 1 | 2 => "head_note_white",
@@ -980,13 +961,12 @@ impl App {
                             }
                         });
 
-                        // Use animated frame if available, fall back to static frame
                         let head_frame = atlas.get_frame_at_time(head_frame_name, render_time as f64)
                             .or_else(|| atlas.get_frame(head_frame_name).copied());
                         if let Some(head_frame) = head_frame {
                             let note_w = head_frame.width as f32 * skin_scale_x;
                             let note_h = head_frame.height as f32 * skin_scale_y;
-                            let x = lane_x; // Left edge aligned with receptor (entity.x is left edge in skin XML)
+                            let x = lane_x;
                             let y = offset_y + y as f32 * skin_scale_y - note_h / 2.0;
                             gpu.textured_renderer.draw_textured_quad(
                                 x, y, note_w, note_h, head_frame.uv, [1.0, 1.0, 1.0, 1.0],
@@ -994,7 +974,7 @@ impl App {
                         }
                     }
 
-                    // Draw long notes dynamically from game state
+                    // Draw long notes (layer 5 in original, same as tap notes)
                     for long_note in &gs.active_long_notes {
                         let lane_prefab = &gs.note_prefabs.lanes[long_note.lane];
                         let lane_x = offset_x + lane_prefab.x as f32 * skin_scale_x;
@@ -1103,10 +1083,51 @@ impl App {
                             }
                         }
                     }
+
+                    // Draw static_keyboard AFTER notes so it occludes notes below the judgment line.
+                    // Matches original layer order: notes (5) → static_keyboard (6) → pressed keys (8).
+                    if let Some(skin_res) = &gpu.skin {
+                        if let Some(skin) = skin_res.get_skin("o2jam") {
+                            for entity in &skin.entities {
+                                let sprite_id = match &entity.sprite {
+                                    Some(s) => s, None => continue,
+                                };
+                                let first = sprite_id.split(',').next().unwrap_or(sprite_id).trim();
+                                if first != "static_keyboard" { continue; }
+                                if let Some(frame) = atlas.get_frame(first) {
+                                    let fw = frame.width as f32 * skin_scale_x;
+                                    let fh = frame.height as f32 * skin_scale_y;
+                                    let fx = offset_x + entity.x as f32 * skin_scale_x;
+                                    let fy = offset_y + entity.y as f32 * skin_scale_y;
+                                    gpu.textured_renderer.draw_textured_quad(
+                                        fx, fy, fw, fh, frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    // Draw PRESSED_NOTE overlays on top of static_keyboard (layer 8 in original).
+                    for lane in 0..7 {
+                        if gs.pressed_lanes[lane] {
+                            for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_note_overlays[lane] {
+                                if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
+                                    .or_else(|| atlas.get_frame(sprite_id).copied())
+                                {
+                                    let sprite_w = pressed_frame.width as f32 * skin_scale_x;
+                                    let sprite_h = pressed_frame.height as f32 * skin_scale_y;
+                                    let x = offset_x + *x_pos as f32 * skin_scale_x;
+                                    let y = offset_y + *y_pos as f32 * skin_scale_y;
+                                    gpu.textured_renderer.draw_textured_quad(
+                                        x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
+                                    );
+                                }
+                            }
+                        }
+                    }
                 } // end if gs.is_rendering
 
                 // Draw PRESSED_NOTE overlays during startup (before gameplay begins)
-                // During gameplay, these are drawn inside the block above (before long notes)
                 if !gs.is_rendering {
                     if let Some(atlas) = &gpu.atlas {
                         for lane in 0..7 {
