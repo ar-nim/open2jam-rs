@@ -353,4 +353,43 @@ mod tests {
         // Both signals should be mixed (both channels active)
         assert!(out.iter().all(|f| f[0] == 0.5 && f[1] == 0.5));
     }
+
+    #[test]
+    fn test_bgm_signal_queue_dedup_same_source() {
+        use rtrb::RingBuffer;
+
+        let (mut prod, cons) = RingBuffer::new(1024);
+
+        // Push two signals with the SAME source_id
+        let frames1 = Frames::from_slice(44100, &[[1.0f32, 1.0f32]; 100]);
+        let frames2 = Frames::from_slice(44100, &[[0.5f32, 0.5f32]; 100]);
+
+        prod.push(BgmCommand {
+            frames: frames1,
+            delay_samples: 0,
+            volume: 1.0,
+            pan: 0.0,
+            source_id: 42,
+        })
+        .unwrap();
+
+        prod.push(BgmCommand {
+            frames: frames2,
+            delay_samples: 0,
+            volume: 1.0,
+            pan: 0.0,
+            source_id: 42, // Same source_id — should replace the first
+        })
+        .unwrap();
+
+        let mut queue = BgmSignalQueue::new();
+        queue.set_consumer(cons);
+
+        let mut out = vec![[0.0f32; 2]; 10];
+        queue.sample(1.0 / 44100.0, &mut out);
+
+        // Only the second signal should be active (voice steal)
+        assert!(out.iter().all(|f| f[0] == 0.5 && f[1] == 0.5),
+            "Only the newer signal with same source_id should play, got {:?}", &out[..3]);
+    }
 }
