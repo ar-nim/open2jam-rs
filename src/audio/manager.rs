@@ -11,6 +11,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
+use std::sync::RwLock;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{info, warn};
@@ -20,6 +21,28 @@ use rtrb::RingBuffer;
 use super::bgm_signal::BgmSignalQueue;
 
 pub type StereoFrame = [f32; 2];
+
+/// A synchronization point mapping audio timeline to OS monotonic time.
+/// Broadcasted by the audio thread every buffer fill, read by the input handler.
+#[derive(Clone, Copy)]
+pub struct AudioSyncPoint {
+    /// The authoritative audio timeline position (derived from samples processed)
+    pub audio_time_ms: f64,
+    /// The precise OS timestamp captured the moment the audio buffer was filled
+    pub os_time: Instant,
+}
+
+impl Default for AudioSyncPoint {
+    fn default() -> Self {
+        Self {
+            audio_time_ms: 0.0,
+            os_time: Instant::now(),
+        }
+    }
+}
+
+/// Thread-safe shared sync point, updated by cpal thread, read by main thread.
+pub type SharedSyncPoint = Arc<RwLock<AudioSyncPoint>>;
 
 /// Shared state between the main thread and the cpal audio callback.
 /// All fields are lock-free atomics so they can be safely read/written
@@ -49,6 +72,9 @@ pub struct AudioManager {
     active: bool,
     /// BGM signal queue producer (main thread pushes commands here)
     bgm_producer: Option<rtrb::Producer<super::bgm_signal::BgmCommand>>,
+    /// Shared sync point — updated by cpal thread, read by input handler.
+    /// Maps audio sample count to OS monotonic timestamps.
+    shared_sync_point: SharedSyncPoint,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -60,7 +86,7 @@ pub enum AudioPlayError {
 impl AudioManager {
     pub fn new() -> Self {
         match Self::init() {
-            Ok((mixer, stream, state, bgm_producer)) => {
+            Ok((mixer, stream, state, bgm_producer, shared_sync_point)) => {
                 info!("AudioManager initialised (oddio + cpal). Stream paused — call play() to start.");
                 Self {
                     mixer: Some(mixer),
@@ -68,6 +94,7 @@ impl AudioManager {
                     state,
                     active: false,  // Stream created but not started
                     bgm_producer: Some(bgm_producer),
+                    shared_sync_point,
                 }
             }
             Err(e) => {
@@ -86,6 +113,7 @@ impl AudioManager {
                     }),
                     active: false,
                     bgm_producer: None,
+                    shared_sync_point: Arc::new(RwLock::new(AudioSyncPoint::default())),
                 }
             }
         }
@@ -96,6 +124,7 @@ impl AudioManager {
         cpal::Stream,
         Arc<AudioState>,
         rtrb::Producer<super::bgm_signal::BgmCommand>,
+        SharedSyncPoint,
     )> {
         let host = cpal::default_host();
         let device = host
@@ -116,6 +145,9 @@ impl AudioManager {
         let (producer, consumer) = RingBuffer::new(1024);
         let mut bgm_queue = BgmSignalQueue::new();
         bgm_queue.set_consumer(consumer);
+
+        // Create the shared sync point — updated by cpal thread, read by input handler
+        let shared_sync_point: SharedSyncPoint = Arc::new(RwLock::new(AudioSyncPoint::default()));
 
         // Capture a stable reference instant before stream creation.
         // All callback timestamps will be relative to this via `.elapsed().as_nanos()`.
@@ -167,6 +199,9 @@ impl AudioManager {
         let state_for_f32 = Arc::clone(&state);
         let state_for_i16 = Arc::clone(&state);
         let state_for_u16 = Arc::clone(&state);
+        let sync_for_f32 = Arc::clone(&shared_sync_point);
+        let sync_for_i16 = Arc::clone(&shared_sync_point);
+        let sync_for_u16 = Arc::clone(&shared_sync_point);
 
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => device.build_output_stream(
@@ -177,6 +212,15 @@ impl AudioManager {
                     oddio::run(&mut mixer, sample_rate, frames);
                     let elapsed_us = start.elapsed().as_micros() as u32;
                     record_callback(frames.len(), elapsed_us, &state_for_f32);
+                    
+                    // Broadcast sync point to main thread
+                    if let Ok(mut sync) = sync_for_f32.write() {
+                        *sync = AudioSyncPoint {
+                            audio_time_ms: state_for_f32.samples_played.load(Ordering::Relaxed) as f64
+                                / state_for_f32.sample_rate.load(Ordering::Relaxed) as f64 * 1000.0,
+                            os_time: Instant::now(),
+                        };
+                    }
                 },
                 |err| warn!("Audio error: {}", err),
                 None,
@@ -195,6 +239,15 @@ impl AudioManager {
                     }
                     let elapsed_us = start.elapsed().as_micros() as u32;
                     record_callback(frame_count, elapsed_us, &state_for_i16);
+                    
+                    // Broadcast sync point to main thread
+                    if let Ok(mut sync) = sync_for_i16.write() {
+                        *sync = AudioSyncPoint {
+                            audio_time_ms: state_for_i16.samples_played.load(Ordering::Relaxed) as f64
+                                / state_for_i16.sample_rate.load(Ordering::Relaxed) as f64 * 1000.0,
+                            os_time: Instant::now(),
+                        };
+                    }
                 },
                 |err| warn!("Audio error: {}", err),
                 None,
@@ -213,6 +266,15 @@ impl AudioManager {
                     }
                     let elapsed_us = start.elapsed().as_micros() as u32;
                     record_callback(frame_count, elapsed_us, &state_for_u16);
+                    
+                    // Broadcast sync point to main thread
+                    if let Ok(mut sync) = sync_for_u16.write() {
+                        *sync = AudioSyncPoint {
+                            audio_time_ms: state_for_u16.samples_played.load(Ordering::Relaxed) as f64
+                                / state_for_u16.sample_rate.load(Ordering::Relaxed) as f64 * 1000.0,
+                            os_time: Instant::now(),
+                        };
+                    }
                 },
                 |err| warn!("Audio error: {}", err),
                 None,
@@ -225,7 +287,7 @@ impl AudioManager {
         mixer_control.play(bgm_queue);
 
         // Stream is created but NOT started. Call audio_mgr.play() to begin playback.
-        Ok((mixer_control, stream, state, producer))
+        Ok((mixer_control, stream, state, producer, shared_sync_point))
     }
 
     pub fn mixer(&mut self) -> Option<&mut MixerControl<StereoFrame>> {
@@ -259,6 +321,11 @@ impl AudioManager {
 
     pub fn state(&self) -> &Arc<AudioState> {
         &self.state
+    }
+
+    /// Get a clone of the shared sync point for reading from the main thread.
+    pub fn sync_point(&self) -> SharedSyncPoint {
+        Arc::clone(&self.shared_sync_point)
     }
 
     // ── CPU Usage Monitoring ───────────────────────────────────────
