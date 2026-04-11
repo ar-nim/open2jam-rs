@@ -634,17 +634,71 @@ impl GameState {
         let max_life = 1000;
         let stats = GameStats::new(total_playable_notes, max_life);
 
-        let song_duration_ms = chart.header.duration_hard as f64 * 1000.0;
+        // 8. Compute song end time using the original O2Jam position-based formula.
+        // end_position = ceil(max(measure + position)) + 1
+        // end_time = ((end_position - refPosition) / bpm * 240000) + refTime
+        //
+        // IMPORTANT: OJN measures are 0-based in the file, but the C++ loader
+        // converts them to 1-based (block.Measure + 1). We add +1 here to match.
+        let end_time_ms = {
+            const TICK_SIGNATURE: f64 = 240000.0; // 60000 * 4 = ms per measure at 60 BPM for 4/4
 
-        // Use the OJN header's duration as the song end time.
-        // The original O2Jam uses duration_hard (in seconds) from the OJN header
-        // as the definitive song length. This is more reliable than computing
-        // from measure positions, which can vary based on chart authoring.
-        let end_time_ms = song_duration_ms;
+            // Find max(measure + position) across ALL events (includes release/tail positions)
+            // Add +1 to convert from 0-based OJN measures to 1-based game measures.
+            // This matches C++: block.Measure + 1
+            let max_pos = chart.events.iter()
+                .filter_map(|e| match e {
+                    TimedEvent::Note(n) => Some(n.measure as f64 + n.position + 1.0),
+                    TimedEvent::BpmChange(b) => Some(b.measure as f64 + b.position + 1.0),
+                    TimedEvent::Measure(m) => Some(m.measure as f64 + 1.0),
+                })
+                .fold(0.0, f64::max);
+
+            let end_position = max_pos.ceil() + 1.0; // +1 measure buffer, matching m_endPosition
+
+            log::info!("Chart end position: max_pos={:.4} (0-based → {:.4} 1-based, ceil={:.0}), end_position={:.4}",
+                max_pos - 1.0, max_pos, max_pos.ceil(), end_position);
+
+            // Simulate the reference-point tracking the original game does.
+            // refPosition starts at 1.0 (measure 1 = game clock 0:00)
+            let mut ref_position = 1.0;
+            let mut ref_time_ms = 0.0;
+            let mut current_bpm = chart.header.bpm as f64;
+
+            // Collect and sort BPM events by position (1-based)
+            let mut bpm_events: Vec<(f64, f64)> = chart.events.iter()
+                .filter_map(|e| match e {
+                    TimedEvent::BpmChange(b) => Some((b.measure as f64 + b.position + 1.0, b.bpm)),
+                    _ => None,
+                })
+                .collect();
+            bpm_events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+            for (bpm_pos, new_bpm) in &bpm_events {
+                if *bpm_pos > ref_position {
+                    ref_time_ms += (*bpm_pos - ref_position) / current_bpm * TICK_SIGNATURE;
+                }
+                log::info!("BPM event: pos={:.4}, bpm={:.1}, ref_time={:.1}ms", bpm_pos, new_bpm, ref_time_ms);
+                ref_position = *bpm_pos;
+                current_bpm = *new_bpm;
+            }
+
+            // Add time from last ref_position to end_position
+            if end_position > ref_position {
+                ref_time_ms += (end_position - ref_position) / current_bpm * TICK_SIGNATURE;
+            }
+
+            log::info!("End calculation: ref_position={:.4}, ref_time={:.1}ms, end_pos={:.4}, final={:.1}ms",
+                ref_position, ref_time_ms, end_position, ref_time_ms);
+
+            ref_time_ms
+        };
         info!(
-            "Song end: {:.1}ms ({:.1}s) from OJN header duration",
+            "Song end: {:.1}ms ({:.1}s) based on chart position + 1 measure",
             end_time_ms, end_time_ms / 1000.0
         );
+
+        let song_duration_ms = chart.header.duration_hard as f64 * 1000.0;
 
         Ok(Self {
             clock,
@@ -822,7 +876,8 @@ impl GameState {
             let game_time = self.clock.game_time() as f64;
             if game_time >= self.end_time_ms {
                 self.is_song_ended = true;
-                info!("Song ended at {:.1}ms", self.end_time_ms);
+                log::info!("Song ended: game_time={:.1}ms >= end_time={:.1}ms (buffer={:.1}ms)",
+                    game_time, self.end_time_ms, game_time - self.end_time_ms);
             }
         }
     }
