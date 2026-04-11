@@ -195,9 +195,14 @@ impl GameStats {
     /// Record a judgment result and update all counters.
     /// Uses the new scoring system with jam combo bonuses.
     /// Score is calculated BEFORE jam_counter increments (matches C++ behavior).
+    ///
+    /// If `has_pill` is true and the judgment is Bad, the pill converts it to Cool
+    /// and is consumed (pill_count decremented).
     pub fn record_judgment(&mut self, judgment: JudgmentType, has_pill: bool) {
         // Check if pill converts BAD to COOL
-        let effective_judgment = if has_pill && judgment == JudgmentType::Bad {
+        let use_pill = has_pill && judgment == JudgmentType::Bad && self.pill_count > 0;
+        let effective_judgment = if use_pill {
+            self.pill_count -= 1;
             JudgmentType::Cool
         } else {
             judgment
@@ -1259,7 +1264,8 @@ impl GameState {
                     log::debug!("[INPUT]   *** HIT! Judgment: {:?}, diff={:.2}ms ***", judgment, time_diff);
                     note.judged = true;
                     note.judgment_type = Some(judgment);
-                    self.stats.record_judgment(judgment, false);
+                    let has_pill = self.stats.pill_count > 0;
+                    self.stats.record_judgment(judgment, has_pill);
 
                     // Play keysound only when judgment is accepted (O2Jam behavior)
                     if let Some(sample_id) = note.sample_id {
@@ -1307,7 +1313,8 @@ impl GameState {
                     ln.judged = true;
                     ln.head_judgment = Some(judgment);
                     ln.holding = true;
-                    self.stats.record_judgment(judgment, false);
+                    let has_pill = self.stats.pill_count > 0;
+                    self.stats.record_judgment(judgment, has_pill);
 
                     if let Some(sample_id) = ln.sample_id {
                         if let Some(frames) = self.sound_cache.get_sound(sample_id) {
