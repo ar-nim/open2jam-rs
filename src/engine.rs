@@ -23,7 +23,7 @@ use crate::render::atlas::SkinAtlas;
 use crate::render::textured_renderer::{TexturedRenderer, BlendMode};
 use crate::render::hud::{HudLayout, render_hud_with_atlas};
 
-const SCROLL_SPEED: f64 = 1.0;
+const SCROLL_SPEED: f64 = 4.0;
 
 /// GPU resources that must be dropped before the device.
 /// This wrapper allows explicit drop ordering to prevent segfaults.

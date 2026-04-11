@@ -1174,6 +1174,10 @@ impl GameState {
             // Manual mode: judge notes based on key press history
             // Use the BAD window from judgment.rs for consistency
             let base_bad_window_ms = crate::gameplay::judgment::bad_window_ms_tap(bpm);
+            // CULLING FLOOR: Never shrink the late window below the COOL threshold.
+            // Without this, stacked notes (0ms apart) or dense streams at high BPM
+            // create dead zones where late hits are impossible to register.
+            let minimum_late_window = crate::gameplay::judgment::cool_window_ms_floor(bpm);
 
             // Collect lanes that need keysound playback (already handled in handle_key_press)
             let mut lanes_to_play_sound: Vec<usize> = Vec::new();
@@ -1194,18 +1198,18 @@ impl GameState {
                     .find(|n| n.lane == lane)
                     .map(|n| n.target_time_ms);
 
-                // Dynamically shrink the LATE window to prevent overlapping the next note
+                // Dynamically shrink the LATE window, but never below the COOL floor
                 let mut effective_late_window = base_bad_window_ms;
                 if let Some(next_time) = next_note_time {
                     let midpoint_distance = (next_time - target_time) / 2.0;
                     if midpoint_distance < effective_late_window {
-                        effective_late_window = midpoint_distance;
+                        effective_late_window = midpoint_distance.max(minimum_late_window);
                     }
                 }
 
                 // Find the earliest keypress within the asymmetric window:
                 // Early: -base_bad_window to 0
-                // Late: 0 to effective_late_window
+                // Late: 0 to effective_late_window (culling floor applied)
                 let hit_idx = self.key_press_history.iter().position(|(l, press_time)| {
                     if *l != lane { return false; }
                     let diff = press_time - target_time;
@@ -1240,11 +1244,12 @@ impl GameState {
                     .find(|n| n.lane == lane)
                     .map(|n| n.head_time_ms);
 
+                // Dynamically shrink the LATE window, but never below the COOL floor
                 let mut effective_late_window = base_bad_window_ms;
                 if let Some(next_time) = next_note_time {
                     let midpoint_distance = (next_time - target_time) / 2.0;
                     if midpoint_distance < effective_late_window {
-                        effective_late_window = midpoint_distance;
+                        effective_late_window = midpoint_distance.max(minimum_late_window);
                     }
                 }
 
@@ -1366,18 +1371,25 @@ impl GameState {
             // Store for judgment loop
             self.key_press_history.push((lane, adjusted_press_time));
 
-            // INSTANT KEYSOUND: Find the nearest note to the actual press time
-            // and push its sample to the rtrb queue immediately.
-            let nearest_sample_id = self.active_notes.iter()
+            // INSTANT KEYSOUND: Find the chronologically first unjudged note in
+            // this lane that the player could reasonably be aiming for.
+            // Uses .find() which short-circuits on the first match — always gets
+            // the oldest chronologically active note, not the nearest by distance.
+            // This eliminates the "Late Hit Bias" where hitting Note A late would
+            // accidentally trigger Note B's sample.
+            let base_bad_window_ms = crate::gameplay::judgment::bad_window_ms_tap(
+                self.clock.bpm() as f64
+            );
+            let keysound_sample_id = self.active_notes.iter()
                 .filter(|n| n.lane == lane && !n.judged && !n.missed)
-                .min_by(|a, b| {
-                    let diff_a = (a.target_time_ms - adjusted_press_time).abs();
-                    let diff_b = (b.target_time_ms - adjusted_press_time).abs();
-                    diff_a.partial_cmp(&diff_b).unwrap_or(std::cmp::Ordering::Equal)
+                .find(|n| {
+                    // Player isn't hitting insanely early for this note
+                    let diff = adjusted_press_time - n.target_time_ms;
+                    diff >= -base_bad_window_ms
                 })
                 .map(|n| n.sample_id);
 
-            if let Some(Some(sample_id)) = nearest_sample_id {
+            if let Some(Some(sample_id)) = keysound_sample_id {
                 if let Some(frames) = self.sound_cache.get_sound(sample_id) {
                     let command = crate::audio::bgm_signal::BgmCommand {
                         frames: std::sync::Arc::clone(frames),
