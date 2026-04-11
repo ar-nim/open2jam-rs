@@ -1231,7 +1231,8 @@ impl GameState {
 
     /// Handle key press for a lane. Judges the next unjudged note in this lane
     /// immediately if the press time is within the judgment window.
-    /// This matches the original O2Jam approach: key press → find next note → judge if in range.
+    /// Keysound is played ONLY when judgment is accepted (matches O2Jam behavior:
+    /// pressing too early/late produces no sound).
     pub fn handle_key_press(
         &mut self,
         lane: usize,
@@ -1245,20 +1246,12 @@ impl GameState {
             let bpm = self.clock.bpm() as f64;
             let base_bad_window_ms = crate::gameplay::judgment::bad_window_ms_tap(bpm);
 
-            log::debug!("[INPUT] Key press on lane {} at press_time={:.2}ms, bpm={:.1}, bad_window={:.2}ms",
-                lane, press_time_ms, bpm, base_bad_window_ms);
-
-            // Play keysound on EVERY key press — find the next unjudged note in this lane
-            // and play its sample, regardless of whether it's in judgment range.
-            // This gives immediate audio feedback for every press (matching O2Jam behavior).
-            self.play_keysound_for_lane(lane, audio_manager);
-
             // Find the next unjudged tap note in this lane and judge if in range
             for note in &mut self.active_notes {
                 if note.lane != lane || note.judged || note.missed { continue; }
 
                 let time_diff = press_time_ms - note.target_time_ms;
-                log::debug!("[INPUT]   Checking tap note at target={:.2}ms, diff={:.2}ms (abs={:.2}ms)",
+                log::debug!("[INPUT] Checking tap note at target={:.2}ms, diff={:.2}ms (abs={:.2}ms)",
                     note.target_time_ms, time_diff, time_diff.abs());
 
                 if time_diff.abs() <= base_bad_window_ms {
@@ -1267,6 +1260,24 @@ impl GameState {
                     note.judged = true;
                     note.judgment_type = Some(judgment);
                     self.stats.record_judgment(judgment, false);
+
+                    // Play keysound only when judgment is accepted (O2Jam behavior)
+                    if let Some(sample_id) = note.sample_id {
+                        if let Some(frames) = self.sound_cache.get_sound(sample_id) {
+                            // Unique source_id per note event — no voice-steal
+                            let source_id = ((sample_id as u64) << 32) | (note.target_time_ms as u64 & 0xFFFF_FFFF);
+                            let command = crate::audio::bgm_signal::BgmCommand {
+                                frames: std::sync::Arc::clone(frames),
+                                delay_samples: 0,
+                                volume: 1.0,
+                                pan: 0.0,
+                                source_id,
+                            };
+                            if let Err(_) = audio_manager.push_bgm_command(command) {
+                                log::warn!("[AUDIO] keysound queue full, dropping sample_id={}", sample_id);
+                            }
+                        }
+                    }
 
                     if matches!(judgment, JudgmentType::Cool | JudgmentType::Good) {
                         self.trigger_note_click_effect(lane, press_time_ms);
@@ -1298,6 +1309,20 @@ impl GameState {
                     ln.holding = true;
                     self.stats.record_judgment(judgment, false);
 
+                    if let Some(sample_id) = ln.sample_id {
+                        if let Some(frames) = self.sound_cache.get_sound(sample_id) {
+                            let source_id = ((sample_id as u64) << 32) | (ln.head_time_ms as u64 & 0xFFFF_FFFF);
+                            let command = crate::audio::bgm_signal::BgmCommand {
+                                frames: std::sync::Arc::clone(frames),
+                                delay_samples: 0,
+                                volume: 1.0,
+                                pan: 0.0,
+                                source_id,
+                            };
+                            let _ = audio_manager.push_bgm_command(command);
+                        }
+                    }
+
                     if matches!(judgment, JudgmentType::Cool | JudgmentType::Good) {
                         self.trigger_longflare_effect(lane, press_time_ms);
                     }
@@ -1314,70 +1339,6 @@ impl GameState {
             log::debug!("[INPUT]   No note in judgment window for lane {}", lane);
         }
         None
-    }
-
-    /// Play the keysound for the next unjudged note in the given lane.
-    /// Called on EVERY key press — finds the first unjudged note and plays its sample,
-    /// but only if the note is within a reasonable time window (bad window + 500ms grace).
-    /// This prevents wrong samples from being triggered when notes are far away.
-    fn play_keysound_for_lane(
-        &self,
-        lane: usize,
-        audio_manager: &mut crate::audio::manager::AudioManager,
-    ) {
-        let press_time_ms = self.clock.game_time() as f64;
-        let bpm = self.clock.bpm() as f64;
-        let bad_window = crate::gameplay::judgment::bad_window_ms_tap(bpm);
-        let max_ahead_ms = bad_window + 500.0;
-
-        // Check tap notes first
-        for note in &self.active_notes {
-            if note.lane != lane || note.judged || note.missed { continue; }
-            let diff = press_time_ms - note.target_time_ms;
-            if diff < -max_ahead_ms { break; }
-            if let Some(sample_id) = note.sample_id {
-                if let Some(frames) = self.sound_cache.get_sound(sample_id) {
-                    // Unique source_id per keysound press — prevents voice steal
-                    // so each press plays the full sample even if overlapping.
-                    let source_id = ((sample_id as u64) << 32) | (press_time_ms as u64 & 0xFFFF_FFFF);
-                    let command = crate::audio::bgm_signal::BgmCommand {
-                        frames: std::sync::Arc::clone(frames),
-                        delay_samples: 0,
-                        volume: 1.0,
-                        pan: 0.0,
-                        source_id,
-                    };
-                    if let Err(_) = audio_manager.push_bgm_command(command) {
-                        log::warn!("[AUDIO] keysound queue full, dropping sample_id={}", sample_id);
-                    } else {
-                        log::debug!("[AUDIO] keysound pushed: lane={}, sample={}, diff={:.1}ms, source_id={}", lane, sample_id, diff, source_id);
-                    }
-                }
-            }
-            return;
-        }
-        // Also check long notes
-        for ln in &self.active_long_notes {
-            if ln.lane != lane || ln.judged || ln.missed { continue; }
-            let diff = press_time_ms - ln.head_time_ms;
-            if diff < -max_ahead_ms { break; }
-            if let Some(sample_id) = ln.sample_id {
-                if let Some(frames) = self.sound_cache.get_sound(sample_id) {
-                    let source_id = ((sample_id as u64) << 32) | (press_time_ms as u64 & 0xFFFF_FFFF);
-                    let command = crate::audio::bgm_signal::BgmCommand {
-                        frames: std::sync::Arc::clone(frames),
-                        delay_samples: 0,
-                        volume: 1.0,
-                        pan: 0.0,
-                        source_id,
-                    };
-                    if let Err(_) = audio_manager.push_bgm_command(command) {
-                        log::warn!("[AUDIO] long keysound queue full, dropping sample_id={}", sample_id);
-                    }
-                }
-            }
-            return;
-        }
     }
 
     /// Handle key release for a lane. Only tracks the released state.
