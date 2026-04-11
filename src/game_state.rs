@@ -1326,16 +1326,13 @@ impl GameState {
         let press_time_ms = self.clock.game_time() as f64;
         let bpm = self.clock.bpm() as f64;
         let bad_window = crate::gameplay::judgment::bad_window_ms_tap(bpm);
-        // Allow keysound to play for notes within bad_window + 500ms grace period.
-        // This ensures the right sample fires even on slightly early/late presses,
-        // but prevents distant notes from stealing the sound.
         let max_ahead_ms = bad_window + 500.0;
 
         // Check tap notes first
         for note in &self.active_notes {
             if note.lane != lane || note.judged || note.missed { continue; }
             let diff = press_time_ms - note.target_time_ms;
-            if diff < -max_ahead_ms { break; } // too far in the future
+            if diff < -max_ahead_ms { break; }
             if let Some(sample_id) = note.sample_id {
                 if let Some(frames) = self.sound_cache.get_sound(sample_id) {
                     let command = crate::audio::bgm_signal::BgmCommand {
@@ -1344,16 +1341,20 @@ impl GameState {
                         volume: 1.0,
                         pan: 0.0,
                     };
-                    let _ = audio_manager.push_bgm_command(command);
+                    if let Err(_) = audio_manager.push_bgm_command(command) {
+                        log::warn!("[AUDIO] keysound queue full, dropping sample_id={}", sample_id);
+                    } else {
+                        log::debug!("[AUDIO] keysound pushed: lane={}, sample={}, diff={:.1}ms", lane, sample_id, diff);
+                    }
                 }
             }
-            return; // Only play the first unjudged note in range
+            return;
         }
         // Also check long notes
         for ln in &self.active_long_notes {
             if ln.lane != lane || ln.judged || ln.missed { continue; }
             let diff = press_time_ms - ln.head_time_ms;
-            if diff < -max_ahead_ms { break; } // too far in the future
+            if diff < -max_ahead_ms { break; }
             if let Some(sample_id) = ln.sample_id {
                 if let Some(frames) = self.sound_cache.get_sound(sample_id) {
                     let command = crate::audio::bgm_signal::BgmCommand {
@@ -1362,7 +1363,9 @@ impl GameState {
                         volume: 1.0,
                         pan: 0.0,
                     };
-                    let _ = audio_manager.push_bgm_command(command);
+                    if let Err(_) = audio_manager.push_bgm_command(command) {
+                        log::warn!("[AUDIO] long keysound queue full, dropping sample_id={}", sample_id);
+                    }
                 }
             }
             return;
