@@ -689,13 +689,10 @@ impl App {
                 }
 
                 gs.spawn_notes();
-                gs.auto_judge_notes(); // Auto-play judgment (returns early in manual mode)
-                
-                // Detect missed notes in both auto and manual modes
-                let render_time = gs.clock.render_time() as f64;
-                let bpm = gs.clock.bpm() as f64;
-                gs.detect_missed_notes(render_time, bpm);
-                
+                if let Some(audio_mgr) = &mut self.audio {
+                    gs.process_audio(audio_mgr);
+                    gs.process_judgments(audio_mgr);
+                }
                 gs.cleanup_notes();
                 gs.cleanup_effects(); // Remove expired effects
 
@@ -723,8 +720,6 @@ impl App {
                 }
 
                 if let Some(audio_mgr) = &mut self.audio {
-                    gs.process_audio(audio_mgr);
-
                     // ── Step 1: Hybrid Clock Validation ──
                     let base = Instant::now();
                     let (now_ms, delta_ms, monotonic) = audio_mgr.validate_hybrid_clock(
@@ -939,25 +934,6 @@ impl App {
                         }
                     }
 
-                    // Draw PRESSED_NOTE overlays (key press feedback at bottom keyboard)
-                    for lane in 0..7 {
-                        if gs.pressed_lanes[lane] {
-                            for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_note_overlays[lane] {
-                                if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
-                                    .or_else(|| atlas.get_frame(sprite_id).copied())
-                                {
-                                    let sprite_w = pressed_frame.width as f32 * skin_scale_x;
-                                    let sprite_h = pressed_frame.height as f32 * skin_scale_y;
-                                    let x = offset_x + *x_pos as f32 * skin_scale_x;
-                                    let y = offset_y + *y_pos as f32 * skin_scale_y;
-                                    gpu.textured_renderer.draw_textured_quad(
-                                        x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
-                                    );
-                                }
-                            }
-                        }
-                    }
-
                     for note in &gs.active_notes {
                         let y = note_y_position_bpm_aware(
                             render_time,
@@ -991,6 +967,25 @@ impl App {
                             gpu.textured_renderer.draw_textured_quad(
                                 x, y, note_w, note_h, head_frame.uv, [1.0, 1.0, 1.0, 1.0],
                             );
+                        }
+                    }
+
+                    // Draw PRESSED_NOTE overlays (behind long notes, matching original layer order)
+                    for lane in 0..7 {
+                        if gs.pressed_lanes[lane] {
+                            for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_note_overlays[lane] {
+                                if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
+                                    .or_else(|| atlas.get_frame(sprite_id).copied())
+                                {
+                                    let sprite_w = pressed_frame.width as f32 * skin_scale_x;
+                                    let sprite_h = pressed_frame.height as f32 * skin_scale_y;
+                                    let x = offset_x + *x_pos as f32 * skin_scale_x;
+                                    let y = offset_y + *y_pos as f32 * skin_scale_y;
+                                    gpu.textured_renderer.draw_textured_quad(
+                                        x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
+                                    );
+                                }
+                            }
                         }
                     }
 
@@ -1104,11 +1099,34 @@ impl App {
                         }
                     }
                 } // end if gs.is_rendering
+
+                // Draw PRESSED_NOTE overlays during startup (before gameplay begins)
+                // During gameplay, these are drawn inside the block above (before long notes)
+                if !gs.is_rendering {
+                    if let Some(atlas) = &gpu.atlas {
+                        for lane in 0..7 {
+                            if gs.pressed_lanes[lane] {
+                                for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_note_overlays[lane] {
+                                    if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
+                                        .or_else(|| atlas.get_frame(sprite_id).copied())
+                                    {
+                                        let sprite_w = pressed_frame.width as f32 * skin_scale_x;
+                                        let sprite_h = pressed_frame.height as f32 * skin_scale_y;
+                                        let x = offset_x + *x_pos as f32 * skin_scale_x;
+                                        let y = offset_y + *y_pos as f32 * skin_scale_y;
+                                        gpu.textured_renderer.draw_textured_quad(
+                                            x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        // 8. Draw note click effects (EFFECT_CLICK for Cool/Good on tap notes)
-        // These are drawn centered on each lane at the judgment line position
+        // 8. Draw note click effects
         if let (Some(ref mut gpu), Some(gs)) = (&mut render.gpu, &self.game_state) {
             if gs.is_rendering {
                 if let Some(atlas) = &gpu.atlas {

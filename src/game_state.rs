@@ -439,6 +439,9 @@ pub struct GameState {
     pub auto_play: bool,
     /// Which lanes currently have keys held down (for pressed note visual)
     pub pressed_lanes: [bool; 7],
+    /// Key press history for manual mode judgment: (lane, press_time_ms)
+    /// Used to detect key presses within the judgment window, not just on the current frame.
+    pub key_press_history: Vec<(usize, f64)>,
     /// Spawn lead time in milliseconds
     pub spawn_lead_time_ms: f64,
     /// Game statistics
@@ -691,6 +694,7 @@ impl GameState {
             timing,
             auto_play,
             pressed_lanes: [false; 7],
+            key_press_history: Vec::new(),
             spawn_lead_time_ms,
             stats,
             pending_judgments: Vec::new(),
@@ -915,18 +919,15 @@ impl GameState {
 
     /// Process audio triggers for the current game time.
     ///
-    /// Scans the chart for BGM notes within the lookahead window and pushes them
-    /// to the BGM signal queue via `audio_manager.push_bgm_command()`. This ensures
-    /// sample-accurate timing regardless of frame rate.
+    /// In auto-play mode, scans chart for ALL notes within the lookahead window
+    /// and pushes them to the BGM signal queue.
     ///
-    /// Returns the number of BGM notes scheduled this frame.
-    ///
-    /// **Important:** Only schedules notes while the audio stream is active.
-    /// Commands pushed before `stream.play()` would have stale `delay_samples`
-    /// values that don't account for the gap between push time and stream start.
+    /// In manual mode, only BGM/AUTO_PLAY notes (channels 9-15) are auto-scheduled.
+    /// Lane key sounds (channels 3-7) only play when the player presses the key
+    /// (handled by `play_keysound_for_lane()`).
     pub fn process_audio(&mut self, audio_manager: &mut AudioManager) -> usize {
         use crate::audio::bgm_signal::BgmCommand;
-        use crate::parsing::ojn::{NoteType, TimedEvent};
+        use crate::parsing::ojn::{Channel, NoteType, TimedEvent};
 
         // Don't push BGM commands until the audio stream is running.
         if !audio_manager.is_active() {
@@ -937,7 +938,7 @@ impl GameState {
         let lookahead_end = game_time + self.bgm_lookahead_ms;
         let mut scheduled_count = 0;
 
-        // Scan chart for BGM notes within the lookahead window
+        // Scan chart for notes within the lookahead window
         while self.next_bgm_event_idx < self.chart.events.len() {
             let event = &self.chart.events[self.next_bgm_event_idx];
 
@@ -955,6 +956,15 @@ impl GameState {
 
                     if note_event.time_ms > lookahead_end {
                         break;
+                    }
+
+                    // In manual mode, skip lane key sounds (channels 3-7)
+                    // These are played via play_keysound_for_lane() when keys are pressed
+                    if !self.auto_play {
+                        if let Channel::Note(_) = note_event.channel {
+                            self.next_bgm_event_idx += 1;
+                            continue;
+                        }
                     }
 
                     if let Some(sample_id) = note_event.sample_id {
@@ -993,7 +1003,41 @@ impl GameState {
         scheduled_count
     }
 
-    /// Clear all pending judgments (original O2Jam behavior: instant replace).
+    /// Play the keysound for a specific lane. Used in manual mode when the player
+    /// successfully hits a note. This plays the keysound immediately rather than
+    /// scheduling it through the lookahead scheduler.
+    pub fn play_keysound_for_lane(&mut self, lane: usize, audio_manager: &mut AudioManager) {
+        use crate::audio::bgm_signal::BgmCommand;
+        use crate::parsing::ojn::{Channel, TimedEvent};
+
+        // Find the first unjudged note in this lane that we can play the sound for
+        let render_time = self.clock.game_time() as f64;
+        
+        for event in &self.chart.events {
+            if let TimedEvent::Note(note_event) = event {
+                if let Channel::Note(n) = note_event.channel {
+                    if n as usize == lane {
+                        // Check if this note is close to the current render time
+                        let diff = (note_event.time_ms - render_time).abs();
+                        if diff < 200.0 {
+                            if let Some(sample_id) = note_event.sample_id {
+                                if let Some(frames) = self.sound_cache.get_sound(sample_id) {
+                                    let command = BgmCommand {
+                                        frames: Arc::clone(frames),
+                                        delay_samples: 0, // Play immediately
+                                        volume: note_event.volume,
+                                        pan: note_event.pan,
+                                    };
+                                    let _ = audio_manager.push_bgm_command(command);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
     /// When a new judgment spawns, the previous one is immediately killed.
     pub fn clear_pending_judgments(&mut self) {
         self.pending_judgments.clear();
@@ -1050,13 +1094,10 @@ impl GameState {
         }
     }
 
-    /// Auto-play judgment: automatically judge all notes that have reached the judgment line.
+    /// Process note judgments (both auto-play and manual modes).
     /// In auto-play mode, all notes are judged as COOL.
-    pub fn auto_judge_notes(&mut self) {
-        if !self.auto_play {
-            return;
-        }
-
+    /// In manual mode, notes are judged based on key press history.
+    pub fn process_judgments(&mut self, audio_manager: &mut AudioManager) {
         let render_time = self.clock.render_time() as f64;
         let bpm = self.clock.bpm() as f64;
 
@@ -1066,104 +1107,144 @@ impl GameState {
         let mut click_effect_lanes: Vec<usize> = Vec::new();
         let mut longflare_effect_lanes: Vec<(usize, f64)> = Vec::new(); // (lane, hold_duration)
 
-        // Judge tap notes that have reached the judgment line
-        // Use a wider tolerance for auto-play to ensure all notes are hit
-        let auto_play_tolerance_ms = 10.0; // 10ms tolerance for auto-play
+        if self.auto_play {
+            // Auto-play: judge everything as COOL
+            let auto_play_tolerance_ms = 10.0;
 
-        for note in &mut self.active_notes {
-            if !note.judged && !note.missed {
-                let time_diff = (render_time - note.target_time_ms).abs();
-                if time_diff < auto_play_tolerance_ms {
-                    note.judged = true;
-                    note.judgment_type = Some(JudgmentType::Cool);
+            for note in &mut self.active_notes {
+                if !note.judged && !note.missed {
+                    let time_diff = (render_time - note.target_time_ms).abs();
+                    if time_diff < auto_play_tolerance_ms {
+                        note.judged = true;
+                        note.judgment_type = Some(JudgmentType::Cool);
+                        self.stats.record_judgment(JudgmentType::Cool, false);
+                        click_effect_lanes.push(note.lane);
+                        judgments_to_add.push(PendingJudgment::new(
+                            JudgmentType::Cool, note.lane, render_time,
+                        ));
+                    }
+                }
+            }
 
-                    self.stats.record_judgment(JudgmentType::Cool, false);
+            for long_note in &mut self.active_long_notes {
+                if !long_note.judged && !long_note.missed {
+                    let head_diff = (render_time - long_note.head_time_ms).abs();
+                    if head_diff < auto_play_tolerance_ms {
+                        long_note.judged = true;
+                        long_note.head_judgment = Some(JudgmentType::Cool);
+                        long_note.holding = true;
+                        self.stats.record_judgment(JudgmentType::Cool, false);
+                        let hold_duration = (long_note.tail_time_ms - long_note.head_time_ms).max(0.0);
+                        longflare_effect_lanes.push((long_note.lane, hold_duration));
+                        judgments_to_add.push(PendingJudgment::new(
+                            JudgmentType::Cool, long_note.lane, render_time,
+                        ));
+                    }
+                }
+            }
+        } else {
+            // Manual mode: judge notes based on key press history
+            let manual_window_ms = 60000.0 / bpm * 0.13021;
 
-                    click_effect_lanes.push(note.lane);
+            // Clean up old key press entries first (older than 2 seconds)
+            let cutoff = render_time - 2000.0;
+            self.key_press_history.retain(|(_, t)| *t > cutoff);
 
-                    // Instant replace: clear previous judgments, add new one
-                    judgments_to_add.push(PendingJudgment::new(
-                        JudgmentType::Cool,
-                        note.lane,
-                        render_time,
-                    ));
+            // Check if there was a key press in this lane within the judgment window
+            let mut lanes_to_play_keysound: Vec<usize> = Vec::new();
+            
+            for note in &mut self.active_notes {
+                if !note.judged && !note.missed {
+                    let window_start = note.target_time_ms - manual_window_ms;
+                    let window_end = note.target_time_ms + manual_window_ms;
+                    let pressed = self.key_press_history.iter()
+                        .any(|(l, t)| *l == note.lane && *t >= window_start && *t <= window_end);
+                    if pressed {
+                        let time_diff = (render_time - note.target_time_ms).abs();
+                        let judgment = judge_tap_note(time_diff, bpm);
+                        note.judged = true;
+                        note.judgment_type = Some(judgment);
+                        self.stats.record_judgment(judgment, false);
+                        lanes_to_play_keysound.push(note.lane);
+                        if matches!(judgment, JudgmentType::Cool | JudgmentType::Good) {
+                            click_effect_lanes.push(note.lane);
+                        }
+                        judgments_to_add.push(PendingJudgment::new(judgment, note.lane, render_time));
+                    }
+                }
+            }
+
+            for long_note in &mut self.active_long_notes {
+                if !long_note.judged && !long_note.missed {
+                    let window_start = long_note.head_time_ms - manual_window_ms;
+                    let window_end = long_note.head_time_ms + manual_window_ms;
+                    let pressed = self.key_press_history.iter()
+                        .any(|(l, t)| *l == long_note.lane && *t >= window_start && *t <= window_end);
+                    if pressed {
+                        let head_diff = (render_time - long_note.head_time_ms).abs();
+                        let judgment = judge_tap_note(head_diff, bpm);
+                        long_note.judged = true;
+                        long_note.head_judgment = Some(judgment);
+                        long_note.holding = true;
+                        self.stats.record_judgment(judgment, false);
+                        lanes_to_play_keysound.push(long_note.lane);
+                        if matches!(judgment, JudgmentType::Cool | JudgmentType::Good) {
+                            let hold_duration = (long_note.tail_time_ms - long_note.head_time_ms).max(0.0);
+                            longflare_effect_lanes.push((long_note.lane, hold_duration));
+                        }
+                        judgments_to_add.push(PendingJudgment::new(judgment, long_note.lane, render_time));
+                    }
+                }
+            }
+            
+            // Play keysounds after mutable borrows are done
+            for lane in lanes_to_play_keysound {
+                self.play_keysound_for_lane(lane, audio_manager);
+            }
+
+            // Handle long note tails in manual mode
+            for long_note in &mut self.active_long_notes {
+                if long_note.judged && long_note.tail_judgment.is_none() {
+                    if render_time >= long_note.tail_time_ms {
+                        if long_note.holding {
+                            long_note.holding = false;
+                            let time_diff = (render_time - long_note.tail_time_ms).abs();
+                            let release_judgment = judge_release(time_diff, bpm);
+                            long_note.tail_judgment = Some(release_judgment);
+                            self.stats.record_judgment(release_judgment, false);
+                            if matches!(release_judgment, JudgmentType::Cool | JudgmentType::Good) {
+                                let hold_duration = (long_note.tail_time_ms - long_note.head_time_ms).max(0.0);
+                                longflare_effect_lanes.push((long_note.lane, hold_duration));
+                            }
+                            judgments_to_add.push(PendingJudgment::new(
+                                release_judgment, long_note.lane, render_time,
+                            ));
+                        } else {
+                            long_note.tail_judgment = Some(JudgmentType::Miss);
+                            self.stats.record_judgment(JudgmentType::Miss, false);
+                            judgments_to_add.push(PendingJudgment::new(
+                                JudgmentType::Miss, long_note.lane, render_time,
+                            ));
+                        }
+                        long_note.dead = true;
+                    }
                 }
             }
         }
 
-        // Trigger effects after iteration (avoid borrow conflicts)
+        // Trigger effects after iteration
         for lane in click_effect_lanes.drain(..) {
             self.trigger_note_click_effect(lane, render_time);
+        }
+        for (lane, hold_duration) in longflare_effect_lanes.drain(..) {
+            self.trigger_longflare_effect(lane, render_time, Some(hold_duration));
         }
 
         // Check for missed tap notes
         self.detect_missed_notes(render_time, bpm);
 
-        // Judge long note heads
-        for long_note in &mut self.active_long_notes {
-            if !long_note.judged && !long_note.missed {
-                let head_diff = (render_time - long_note.head_time_ms).abs();
-                if head_diff < auto_play_tolerance_ms {
-                    long_note.judged = true;
-                    long_note.head_judgment = Some(JudgmentType::Cool);
-                    long_note.holding = true;
-                    self.stats.record_judgment(JudgmentType::Cool, false);
-
-                    // Calculate hold duration for this long note
-                    let hold_duration = (long_note.tail_time_ms - long_note.head_time_ms).max(0.0);
-                    longflare_effect_lanes.push((long_note.lane, hold_duration));
-
-                    // Instant replace: clear previous judgments, add new one
-                    judgments_to_add.push(PendingJudgment::new(
-                        JudgmentType::Cool,
-                        long_note.lane,
-                        render_time,
-                    ));
-                }
-            }
-        }
-
-        // Trigger longflare effects after iteration (avoid borrow conflicts)
-        for (lane, hold_duration) in longflare_effect_lanes.drain(..) {
-            self.trigger_longflare_effect(lane, render_time, Some(hold_duration));
-        }
-
-        // Judge long note tails (auto-release when tail passes judgment line)
-        for long_note in &mut self.active_long_notes {
-            if long_note.judged && long_note.tail_judgment.is_none() {
-                if render_time >= long_note.tail_time_ms {
-                    // If player is still holding, judge the release timing
-                    if long_note.holding {
-                        long_note.holding = false;
-                        let time_diff = (render_time - long_note.tail_time_ms).abs();
-                        let release_judgment = judge_release(time_diff, bpm);
-                        long_note.tail_judgment = Some(release_judgment);
-                        self.stats.record_judgment(release_judgment, false);
-                        // Instant replace: clear previous judgments, add new one
-                        judgments_to_add.push(PendingJudgment::new(
-                            release_judgment,
-                            long_note.lane,
-                            render_time,
-                        ));
-                    } else {
-                        // Player released early or never held - auto-miss
-                        long_note.tail_judgment = Some(JudgmentType::Miss);
-                        self.stats.record_judgment(JudgmentType::Miss, false);
-                        // Instant replace: clear previous judgments, add new one
-                        judgments_to_add.push(PendingJudgment::new(
-                            JudgmentType::Miss,
-                            long_note.lane,
-                            render_time,
-                        ));
-                    }
-                    long_note.dead = true;
-                }
-            }
-        }
-
         // Add all judgments (instant replace: only the last one survives)
         if !judgments_to_add.is_empty() {
-            // Clear all previous, add only the last judgment
             self.clear_pending_judgments();
             if let Some(last) = judgments_to_add.pop() {
                 self.pending_judgments.push(last);
@@ -1174,119 +1255,23 @@ impl GameState {
         self.pending_judgments.retain(|j| j.is_active(render_time));
     }
 
-    /// Handle key press for a lane.
-    /// Uses instant-replace behavior: new judgment kills previous one immediately.
+    /// Handle key press for a lane. Only tracks the pressed state and records the press time.
+    /// Actual judgment happens in process_judgments() when notes reach the line.
     pub fn handle_key_press(&mut self, lane: usize, _judgment_window_ms: f64) -> Option<JudgmentType> {
-        // Track pressed state for visual feedback
+        let render_time = self.clock.render_time() as f64;
         if lane < 7 {
             self.pressed_lanes[lane] = true;
+            self.key_press_history.push((lane, render_time));
         }
-
-        let render_time = self.clock.render_time() as f64;
-        let bpm = self.clock.bpm() as f64;
-        
-        // Collect judgment data during iteration, add after to avoid borrow conflicts
-        let mut judgment_result: Option<(JudgmentType, bool)> = None; // (judgment, is_long_note)
-        
-        // Try to judge long note first
-        for long_note in &mut self.active_long_notes {
-            if long_note.lane == lane && !long_note.judged && !long_note.missed {
-                let time_diff = (render_time - long_note.head_time_ms).abs();
-                let bad_window = 60000.0 / bpm * 0.13021;
-                if time_diff <= bad_window {
-                    let judgment = judge_tap_note(time_diff, bpm);
-                    long_note.judged = true;
-                    long_note.holding = true;
-                    long_note.head_judgment = Some(judgment);
-                    judgment_result = Some((judgment, true));
-                    break;
-                }
-            }
-        }
-        
-        // Try to judge tap note if no long note was judged
-        if judgment_result.is_none() {
-            for note in &mut self.active_notes {
-                if note.lane == lane && !note.judged && !note.missed {
-                    let time_diff = (render_time - note.target_time_ms).abs();
-                    let bad_window = 60000.0 / bpm * 0.13021;
-                    if time_diff <= bad_window {
-                        let judgment = judge_tap_note(time_diff, bpm);
-                        note.judged = true;
-                        note.judgment_type = Some(judgment);
-                        judgment_result = Some((judgment, false));
-                        break;
-                    }
-                }
-            }
-        }
-        
-        // Apply judgment after iteration (avoid borrow conflicts)
-        if let Some((judgment, is_long)) = judgment_result {
-            self.stats.record_judgment(judgment, false);
-            self.add_pending_judgment(PendingJudgment::new(judgment, lane, render_time));
-            
-            // Trigger effects only for Cool and Good
-            if matches!(judgment, JudgmentType::Cool | JudgmentType::Good) {
-                if is_long {
-                    self.trigger_longflare_effect(lane, render_time, None);
-                } else {
-                    self.trigger_note_click_effect(lane, render_time);
-                }
-            }
-            
-            return Some(judgment);
-        }
-        
         None
     }
 
-    /// Handle key release for a lane.
-    /// Uses instant-replace behavior: new judgment kills previous one immediately.
-    /// Evaluates the release timing against the long note's tail time.
-    /// Returns the release judgment type, or None if no long note was released.
+    /// Handle key release for a lane. Only tracks the released state.
+    /// Release judgment for long note tails happens in process_judgments().
     pub fn handle_key_release(&mut self, lane: usize) -> Option<JudgmentType> {
-        // Clear pressed state for visual feedback
         if lane < 7 {
             self.pressed_lanes[lane] = false;
         }
-
-        let render_time = self.clock.render_time() as f64;
-        let bpm = self.clock.bpm() as f64;
-
-        // Collect release data during iteration, add after to avoid borrow conflicts
-        let mut release_result: Option<(JudgmentType, bool)> = None; // (judgment, was_miss)
-
-        for long_note in &mut self.active_long_notes {
-            if long_note.lane == lane && long_note.holding {
-                long_note.holding = false;
-
-                // If head was Bad or Miss, auto-miss the release
-                if let Some(head_judgment) = long_note.head_judgment {
-                    if head_judgment.breaks_combo() {
-                        long_note.tail_judgment = Some(JudgmentType::Miss);
-                        release_result = Some((JudgmentType::Miss, true));
-                        return Some(JudgmentType::Miss);
-                    }
-                }
-
-                // Evaluate release timing against tail time
-                let time_diff = (render_time - long_note.tail_time_ms).abs();
-                let release_judgment = judge_release(time_diff, bpm);
-
-                long_note.tail_judgment = Some(release_judgment);
-                release_result = Some((release_judgment, false));
-                break;
-            }
-        }
-
-        // Apply release judgment after iteration (avoid borrow conflicts)
-        if let Some((judgment, was_miss)) = release_result {
-            self.stats.record_judgment(judgment, false);
-            self.add_pending_judgment(PendingJudgment::new(judgment, lane, render_time));
-            return Some(judgment);
-        }
-
         None
     }
 
