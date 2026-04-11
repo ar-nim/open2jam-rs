@@ -635,31 +635,30 @@ impl GameState {
         let stats = GameStats::new(total_playable_notes, max_life);
 
         // 8. Compute song end time using the original O2Jam position-based formula.
-        // end_position = ceil(max(event measure + position)) + 1
+        // end_position = max(measure) + 1  (game starts at measure 1, ends at max+1)
         // end_time = ((end_position - refPosition) / bpm * 240000) + refTime
-        // This matches the original: GetRenderPosition() > m_endPosition check.
         let end_time_ms = {
             const TICK_SIGNATURE: f64 = 240000.0; // 60000 * 4 = ms per measure at 60 BPM for 4/4
-            
-            // Find max(measure + position) across ALL events (includes release/tail positions)
-            let max_pos = chart.events.iter()
+
+            // Find max(measure) across ALL events (just the measure number, not +position)
+            let max_measure = chart.events.iter()
                 .filter_map(|e| match e {
-                    TimedEvent::Note(n) => Some(n.measure as f64 + n.position),
-                    TimedEvent::BpmChange(b) => Some(b.measure as f64 + b.position),
+                    TimedEvent::Note(n) => Some(n.measure as f64),
+                    TimedEvent::BpmChange(b) => Some(b.measure as f64),
                     TimedEvent::Measure(m) => Some(m.measure as f64),
                 })
                 .fold(0.0, f64::max);
-            
-            let end_position = max_pos.ceil() + 1.0; // +1 measure buffer, matching m_endPosition
-            
-            log::info!("Chart position debug: max_pos={:.4}, end_position={:.4}", max_pos, end_position);
-            
+
+            let end_position = max_measure + 1.0; // +1 measure buffer
+
+            log::info!("Chart position debug: max_measure={:.4}, end_position={:.4}", max_measure, end_position);
+
             // Simulate the reference-point tracking the original game does.
             // We start at measure 1.0 instead of 0.0 to match the original game's timeline.
             let mut ref_position = 1.0;
             let mut ref_time_ms = 0.0;
             let mut current_bpm = chart.header.bpm as f64;
-            
+
             // Collect and sort BPM events by position
             let mut bpm_events: Vec<(f64, f64)> = chart.events.iter()
                 .filter_map(|e| match e {
@@ -668,7 +667,7 @@ impl GameState {
                 })
                 .collect();
             bpm_events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            
+
             for (bpm_pos, new_bpm) in &bpm_events {
                 if *bpm_pos > ref_position {
                     ref_time_ms += (*bpm_pos - ref_position) / current_bpm * TICK_SIGNATURE;
@@ -677,15 +676,15 @@ impl GameState {
                 ref_position = *bpm_pos;
                 current_bpm = *new_bpm;
             }
-            
+
             // Add time from last ref_position to end_position
             if end_position > ref_position {
                 ref_time_ms += (end_position - ref_position) / current_bpm * TICK_SIGNATURE;
             }
-            
+
             log::info!("End calculation: ref_position={:.4}, ref_time={:.1}ms, end_pos={:.4}, final={:.1}ms",
                 ref_position, ref_time_ms, end_position, ref_time_ms);
-            
+
             ref_time_ms
         };
         info!(
