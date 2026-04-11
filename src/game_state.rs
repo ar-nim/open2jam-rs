@@ -1069,6 +1069,8 @@ impl GameState {
                                 delay_samples,
                                 volume: note_event.volume,
                                 pan: note_event.pan,
+                                // source_id: unique per BGM note event (time + sample), no dedup
+                                source_id: ((note_event.time_ms as u64) << 16) | (sample_id as u64),
                             };
 
                             // Push to BGM queue (ignore if queue is full — rare)
@@ -1340,6 +1342,7 @@ impl GameState {
                         delay_samples: 0,
                         volume: 1.0,
                         pan: 0.0,
+                        source_id: lane as u64 + 1, // 1-7 for keysound lanes
                     };
                     if let Err(_) = audio_manager.push_bgm_command(command) {
                         log::warn!("[AUDIO] keysound queue full, dropping sample_id={}", sample_id);
@@ -1362,6 +1365,7 @@ impl GameState {
                         delay_samples: 0,
                         volume: 1.0,
                         pan: 0.0,
+                        source_id: lane as u64 + 1,
                     };
                     if let Err(_) = audio_manager.push_bgm_command(command) {
                         log::warn!("[AUDIO] long keysound queue full, dropping sample_id={}", sample_id);
