@@ -1337,17 +1337,20 @@ impl GameState {
             if diff < -max_ahead_ms { break; }
             if let Some(sample_id) = note.sample_id {
                 if let Some(frames) = self.sound_cache.get_sound(sample_id) {
+                    // Unique source_id per keysound press — prevents voice steal
+                    // so each press plays the full sample even if overlapping.
+                    let source_id = ((sample_id as u64) << 32) | (press_time_ms as u64 & 0xFFFF_FFFF);
                     let command = crate::audio::bgm_signal::BgmCommand {
                         frames: std::sync::Arc::clone(frames),
                         delay_samples: 0,
                         volume: 1.0,
                         pan: 0.0,
-                        source_id: lane as u64 + 1, // 1-7 for keysound lanes
+                        source_id,
                     };
                     if let Err(_) = audio_manager.push_bgm_command(command) {
                         log::warn!("[AUDIO] keysound queue full, dropping sample_id={}", sample_id);
                     } else {
-                        log::debug!("[AUDIO] keysound pushed: lane={}, sample={}, diff={:.1}ms", lane, sample_id, diff);
+                        log::debug!("[AUDIO] keysound pushed: lane={}, sample={}, diff={:.1}ms, source_id={}", lane, sample_id, diff, source_id);
                     }
                 }
             }
@@ -1360,12 +1363,13 @@ impl GameState {
             if diff < -max_ahead_ms { break; }
             if let Some(sample_id) = ln.sample_id {
                 if let Some(frames) = self.sound_cache.get_sound(sample_id) {
+                    let source_id = ((sample_id as u64) << 32) | (press_time_ms as u64 & 0xFFFF_FFFF);
                     let command = crate::audio::bgm_signal::BgmCommand {
                         frames: std::sync::Arc::clone(frames),
                         delay_samples: 0,
                         volume: 1.0,
                         pan: 0.0,
-                        source_id: lane as u64 + 1,
+                        source_id,
                     };
                     if let Err(_) = audio_manager.push_bgm_command(command) {
                         log::warn!("[AUDIO] long keysound queue full, dropping sample_id={}", sample_id);
