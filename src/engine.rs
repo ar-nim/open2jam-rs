@@ -671,7 +671,7 @@ impl App {
                 .map(|t| now.duration_since(t).as_millis() as u64)
                 .unwrap_or(0);
 
-            let prev_combo = gs.stats.combo;
+            let _prev_combo = gs.stats.combo;
             let prev_jam_combo = gs.stats.jam_combo;
             let prev_max_combo = gs.stats.max_combo;
             gs.update(elapsed_ms);
@@ -895,8 +895,11 @@ impl App {
         if let (Some(ref mut gpu), Some(gs)) = (&mut render.gpu, &self.game_state) {
             let render_time = gs.clock.render_time();
             let bpm = gs.clock.bpm() as f64;
-            let viewport_height = skin_h as f64;
             let judgment_line_y = skin_judgment_line_y as f64;
+            // measure_basis is the value that measure_size = 0.8 × this.
+            // In the original Java HiSpeed, this is hardcoded as 385 for a judgment_line of 480,
+            // which is approximately 0.8 × 480 = 384. We use judgment_line_y directly for accuracy.
+            let measure_basis = judgment_line_y;
 
             if let (Some(atlas), Some(_skin_res)) = (&gpu.atlas, &gpu.skin) {
                 // Only draw chart elements (measure marks, notes, long notes) after startup delay
@@ -925,7 +928,7 @@ impl App {
                                     ev.time_ms,
                                     &gs.timing,
                                     judgment_line_y,
-                                    viewport_height,
+                                    measure_basis,
                                     gs.scroll_speed,
                                 );
                                 // Only draw if within viewport (above top, below bottom skip)
@@ -946,7 +949,7 @@ impl App {
                             note.target_time_ms,
                             &gs.timing,
                             judgment_line_y,
-                            viewport_height,
+                            measure_basis,
                             gs.scroll_speed,
                         );
 
@@ -985,7 +988,7 @@ impl App {
                             long_note.head_time_ms,
                             &gs.timing,
                             judgment_line_y,
-                            viewport_height,
+                            measure_basis,
                             gs.scroll_speed,
                         );
 
@@ -994,7 +997,7 @@ impl App {
                             long_note.tail_time_ms,
                             &gs.timing,
                             judgment_line_y,
-                            viewport_height,
+                            measure_basis,
                             gs.scroll_speed,
                         );
 

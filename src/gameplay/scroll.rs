@@ -1,12 +1,14 @@
 //! Scroll system: converts beat-based timing to pixel positions.
 //!
 //! Notes scroll at a rate determined by the current BPM.
-//! The scroll formula is the single most important calculation in the engine:
+//! The scroll formula matches Java HiSpeed exactly:
 //!
 //! ```text
 //! distance_px = speed × beats_remaining × measure_size / 4
-//! measure_size = 0.8 × viewport_height
+//! measure_size = 0.8 × judgment_line_y
 //! ```
+//!
+//! In the default skin (judgment_line = 480), measure_size = 384.
 //!
 //! For charts with BPM changes, use `scroll_distance_bpm_aware()` and
 //! `note_y_position_bpm_aware()` which use `TimingData::getBeat()` to
@@ -26,7 +28,8 @@ pub const DEFAULT_SCROLL_SPEED: f64 = 1.0;
 /// * `render_time_ms` — The current interpolated render time (ms).
 /// * `target_time_ms` — The note's target time (ms) when it should hit the judgment line.
 /// * `bpm` — The current beats per minute.
-/// * `viewport_height` — The viewport height in pixels.
+/// * `measure_basis` — The basis for measure_size (= judgment_line_y, typically 480).
+///   `measure_size = 0.8 × measure_basis` (matching Java HiSpeed).
 /// * `speed` — Scroll speed multiplier (default 1.0).
 ///
 /// # Returns
@@ -37,7 +40,7 @@ pub fn scroll_distance(
     render_time_ms: f64,
     target_time_ms: f64,
     bpm: f64,
-    viewport_height: f64,
+    measure_basis: f64,
     speed: f64,
 ) -> f64 {
     if bpm <= 0.0 {
@@ -45,7 +48,7 @@ pub fn scroll_distance(
     }
 
     let beats_remaining = (target_time_ms - render_time_ms) / (60000.0 / bpm);
-    let measure_size = viewport_height * MEASURE_SIZE_FRACTION;
+    let measure_size = measure_basis * MEASURE_SIZE_FRACTION;
     speed * beats_remaining * measure_size / 4.0
 }
 
@@ -56,7 +59,7 @@ pub fn scroll_distance(
 /// * `target_time_ms` — The note's target time (ms).
 /// * `bpm` — The current BPM.
 /// * `judgment_line_y` — Y position of the judgment line in skin coordinates.
-/// * `viewport_height` — Viewport height in pixels.
+/// * `measure_basis` — The basis for measure_size (= judgment_line_y, typically 480).
 /// * `speed` — Scroll speed multiplier.
 ///
 /// # Returns
@@ -66,10 +69,10 @@ pub fn note_y_position(
     target_time_ms: f64,
     bpm: f64,
     judgment_line_y: f64,
-    viewport_height: f64,
+    measure_basis: f64,
     speed: f64,
 ) -> f64 {
-    let distance = scroll_distance(render_time_ms, target_time_ms, bpm, viewport_height, speed);
+    let distance = scroll_distance(render_time_ms, target_time_ms, bpm, measure_basis, speed);
     judgment_line_y - distance
 }
 
@@ -86,14 +89,14 @@ pub fn scroll_distance_bpm_aware(
     render_time_ms: f64,
     target_time_ms: f64,
     timing: &TimingData,
-    viewport_height: f64,
+    measure_basis: f64,
     speed: f64,
 ) -> f64 {
     if timing.is_empty() {
         return 0.0;
     }
     let beats_remaining = timing.get_beat(target_time_ms) - timing.get_beat(render_time_ms);
-    let measure_size = viewport_height * MEASURE_SIZE_FRACTION;
+    let measure_size = measure_basis * MEASURE_SIZE_FRACTION;
     speed * beats_remaining * measure_size / 4.0
 }
 
@@ -103,10 +106,10 @@ pub fn note_y_position_bpm_aware(
     target_time_ms: f64,
     timing: &TimingData,
     judgment_line_y: f64,
-    viewport_height: f64,
+    measure_basis: f64,
     speed: f64,
 ) -> f64 {
-    let distance = scroll_distance_bpm_aware(render_time_ms, target_time_ms, timing, viewport_height, speed);
+    let distance = scroll_distance_bpm_aware(render_time_ms, target_time_ms, timing, measure_basis, speed);
     judgment_line_y - distance
 }
 
@@ -115,18 +118,20 @@ pub fn note_y_position_bpm_aware(
 /// This determines how far ahead of time notes need to be spawned.
 pub fn scroll_travel_time_ms(
     bpm: f64,
-    viewport_height: f64,
+    measure_basis: f64,
     speed: f64,
 ) -> f64 {
     if bpm <= 0.0 || speed <= 0.0 {
         return 0.0;
     }
-    let measure_size = viewport_height * MEASURE_SIZE_FRACTION;
-    // Time for a note to travel the full viewport height
+    let measure_size = measure_basis * MEASURE_SIZE_FRACTION;
+    // Time for a note to travel from y=0 to the judgment line.
+    // distance = measure_basis pixels (same as judgment_line_y)
     // distance = speed × beats × measure_size / 4
-    // beats = 4 × distance / (speed × measure_size)
+    // beats = 4 × measure_basis / (speed × measure_size)
+    //        = 4 × measure_basis / (speed × 0.8 × measure_basis) = 5.0 / speed
     // time_ms = beats × 60000 / bpm
-    let beats_needed = 4.0 * viewport_height / (speed * measure_size);
+    let beats_needed = 4.0 * measure_basis / (speed * measure_size);
     beats_needed * 60000.0 / bpm
 }
 
@@ -172,14 +177,14 @@ pub fn should_kill_note(
 mod tests {
     use super::*;
 
-    const VIEWPORT_HEIGHT: f64 = 600.0;
+    const MEASURE_BASIS: f64 = 480.0;  // judgment_line_y (skin height is 600, but scroll uses judgment_line)
     const JUDGMENT_LINE_Y: f64 = 480.0;
     const DEFAULT_BPM: f64 = 130.0;
 
     #[test]
     fn test_scroll_distance_at_target_time() {
         // When render_time equals target_time, distance should be 0 (at judgment line)
-        let distance = scroll_distance(1000.0, 1000.0, DEFAULT_BPM, VIEWPORT_HEIGHT, DEFAULT_SCROLL_SPEED);
+        let distance = scroll_distance(1000.0, 1000.0, DEFAULT_BPM, MEASURE_BASIS, DEFAULT_SCROLL_SPEED);
         assert!(distance.abs() < 0.01, "Distance at target time should be ~0, got {}", distance);
     }
 
@@ -190,8 +195,8 @@ mod tests {
         let render_time = 1000.0;
         let target_time = render_time + beat_duration_ms;
 
-        let distance = scroll_distance(render_time, target_time, DEFAULT_BPM, VIEWPORT_HEIGHT, DEFAULT_SCROLL_SPEED);
-        let expected = 1.0 * VIEWPORT_HEIGHT * MEASURE_SIZE_FRACTION / 4.0; // 1 beat = 1/4 measure
+        let distance = scroll_distance(render_time, target_time, DEFAULT_BPM, MEASURE_BASIS, DEFAULT_SCROLL_SPEED);
+        let expected = 1.0 * MEASURE_BASIS * MEASURE_SIZE_FRACTION / 4.0; // 1 beat = 1/4 measure
 
         assert!(
             (distance - expected).abs() < 1.0,
@@ -208,8 +213,8 @@ mod tests {
         let render_time = 1000.0 + beat_duration_ms;
         let target_time = 1000.0;
 
-        let distance = scroll_distance(render_time, target_time, DEFAULT_BPM, VIEWPORT_HEIGHT, DEFAULT_SCROLL_SPEED);
-        let expected = -1.0 * VIEWPORT_HEIGHT * MEASURE_SIZE_FRACTION / 4.0;
+        let distance = scroll_distance(render_time, target_time, DEFAULT_BPM, MEASURE_BASIS, DEFAULT_SCROLL_SPEED);
+        let expected = -1.0 * MEASURE_BASIS * MEASURE_SIZE_FRACTION / 4.0;
 
         assert!(
             (distance - expected).abs() < 1.0,
@@ -221,7 +226,7 @@ mod tests {
 
     #[test]
     fn test_scroll_distance_zero_bpm() {
-        let distance = scroll_distance(1000.0, 2000.0, 0.0, VIEWPORT_HEIGHT, DEFAULT_SCROLL_SPEED);
+        let distance = scroll_distance(1000.0, 2000.0, 0.0, MEASURE_BASIS, DEFAULT_SCROLL_SPEED);
         assert!(distance.abs() < 0.01, "Distance with 0 BPM should be 0");
     }
 
@@ -229,8 +234,8 @@ mod tests {
     fn test_scroll_distance_with_speed_multiplier() {
         let render_time = 1000.0;
         let target_time = 2000.0;
-        let distance_slow = scroll_distance(render_time, target_time, DEFAULT_BPM, VIEWPORT_HEIGHT, 0.5);
-        let distance_fast = scroll_distance(render_time, target_time, DEFAULT_BPM, VIEWPORT_HEIGHT, 2.0);
+        let distance_slow = scroll_distance(render_time, target_time, DEFAULT_BPM, MEASURE_BASIS, 0.5);
+        let distance_fast = scroll_distance(render_time, target_time, DEFAULT_BPM, MEASURE_BASIS, 2.0);
 
         assert!(distance_fast > distance_slow, "Faster speed should produce greater distance");
         assert!(
@@ -242,7 +247,7 @@ mod tests {
     #[test]
     fn test_note_y_at_judgment_line() {
         // When at target time, note should be at judgment line
-        let y = note_y_position(1000.0, 1000.0, DEFAULT_BPM, JUDGMENT_LINE_Y, VIEWPORT_HEIGHT, DEFAULT_SCROLL_SPEED);
+        let y = note_y_position(1000.0, 1000.0, DEFAULT_BPM, JUDGMENT_LINE_Y, MEASURE_BASIS, DEFAULT_SCROLL_SPEED);
         assert!(
             (y - JUDGMENT_LINE_Y).abs() < 0.01,
             "Note Y at target time should be at judgment line ({:.1}), got {:.1}",
@@ -254,13 +259,13 @@ mod tests {
     #[test]
     fn test_note_y_above_judgment_line() {
         // Before target, note should be above the judgment line
-        let y = note_y_position(1000.0, 1500.0, DEFAULT_BPM, JUDGMENT_LINE_Y, VIEWPORT_HEIGHT, DEFAULT_SCROLL_SPEED);
+        let y = note_y_position(1000.0, 1500.0, DEFAULT_BPM, JUDGMENT_LINE_Y, MEASURE_BASIS, DEFAULT_SCROLL_SPEED);
         assert!(y < JUDGMENT_LINE_Y, "Note should be above judgment line (y={}, judgment={})", y, JUDGMENT_LINE_Y);
     }
 
     #[test]
     fn test_scroll_travel_time() {
-        let travel_time = scroll_travel_time_ms(DEFAULT_BPM, VIEWPORT_HEIGHT, DEFAULT_SCROLL_SPEED);
+        let travel_time = scroll_travel_time_ms(DEFAULT_BPM, MEASURE_BASIS, DEFAULT_SCROLL_SPEED);
         assert!(travel_time > 0.0, "Travel time should be positive");
         // At 130 BPM with 0.8 measure size and speed 1.0,
         // it takes ~4 beats to travel full viewport

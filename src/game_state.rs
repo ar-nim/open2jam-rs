@@ -587,8 +587,8 @@ impl GameState {
         // 2x travel time ensures notes appear at the very top even at low BPM / 1x speed.
         // The +500ms padding gives extra margin for the scroll offset.
         let base_bpm = chart.header.bpm as f64;
-        let viewport_height = note_prefabs.skin_height as f64;
-        let travel_time = scroll_travel_time_ms(base_bpm, viewport_height, scroll_speed);
+        let measure_basis = note_prefabs.judgment_line_y as f64;
+        let travel_time = scroll_travel_time_ms(base_bpm, measure_basis, scroll_speed);
         let spawn_lead_time_ms = (travel_time * 2.0) + 500.0;
 
         // 6. Schedule audio triggers for BGM events (auto-play mode)
