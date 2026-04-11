@@ -237,18 +237,11 @@ impl AudioManager {
     }
 
     /// Start the audio stream. Call this after the startup animation completes.
-    ///
-    /// This begins actual audio output through cpal. Before this call,
-    /// the stream exists but is paused — the BGM queue and mixer are ready,
-    /// but no audio reaches the speakers.
     pub fn play(&mut self) {
         if let Some(ref stream) = self._stream {
             // Reset the samples_played counter so audio_time starts at 0.
-            // Some audio backends (ALSA/PulseAudio) start the callback on stream
-            // creation, not on play(), accumulating frames during the startup delay.
             self.state.samples_played.store(0, Ordering::Relaxed);
             self.state.last_callback_instant.store(0, Ordering::Relaxed);
-            // Reset CPU tracking too
             self.state.max_callback_us.store(0, Ordering::Relaxed);
             self.state.avg_callback_us.store(0, Ordering::Relaxed);
 

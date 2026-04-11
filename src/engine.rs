@@ -179,20 +179,16 @@ impl ApplicationHandler for App {
                 use crate::resources::key_bindings::key_to_lane;
 
                 // Process lane key input during rendering and startup
+                // Use OS hardware timestamps for frame-quantisation-free input
                 if let Some(lane) = key_to_lane(&event.logical_key) {
                     if let Some(gs) = &mut self.game_state {
+                        let os_timestamp = std::time::Instant::now();
                         match event.state {
                             ElementState::Pressed => {
-                                let judged = gs.handle_key_press(lane, 200.0);
-                                if judged.is_some() {
-                                    info!("Note judged in lane {}", lane);
-                                }
+                                gs.handle_key_press(lane, os_timestamp);
                             }
                             ElementState::Released => {
-                                let release_judgment = gs.handle_key_release(lane);
-                                if let Some(j) = release_judgment {
-                                    info!("Long note released in lane {}, judgment: {:?}", lane, j);
-                                }
+                                gs.handle_key_release(lane, os_timestamp);
                             }
                         }
                     }
