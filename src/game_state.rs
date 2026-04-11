@@ -1194,12 +1194,6 @@ impl GameState {
                             let li = idx - 10000;
                             let td = press_time - self.active_long_notes[li].head_time_ms;
                             let j = judge_tap_note(td, bpm);
-                            // DEBUG: log timing for long notes
-                            static LN_DEBUG: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-                            if LN_DEBUG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 10 {
-                                log::info!("LN judgment: press={:.1} target={:.1} diff={:.1}ms judgment={:?} window={:.1}",
-                                    press_time, self.active_long_notes[li].head_time_ms, td, j, base_bad_window_ms);
-                            }
                             self.active_long_notes[li].judged = true;
                             self.active_long_notes[li].head_judgment = Some(j);
                             self.active_long_notes[li].holding = true;
@@ -1209,12 +1203,6 @@ impl GameState {
                         } else {
                             let td = press_time - self.active_notes[idx].target_time_ms;
                             let j = judge_tap_note(td, bpm);
-                            // DEBUG: log timing for first 20 notes
-                            static NOTE_DEBUG: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-                            if NOTE_DEBUG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
-                                log::info!("Note judgment: press={:.1} target={:.1} diff={:.1}ms judgment={:?} window={:.1}",
-                                    press_time, self.active_notes[idx].target_time_ms, td, j, base_bad_window_ms);
-                            }
                             self.active_notes[idx].judged = true;
                             self.active_notes[idx].judgment_type = Some(j);
                             self.stats.record_judgment(j, false);
