@@ -166,7 +166,7 @@ impl AudioManager {
         let stream_config = cpal::StreamConfig {
             sample_rate,
             channels,
-            buffer_size: cpal::BufferSize::Fixed(256),
+            buffer_size: cpal::BufferSize::Fixed(128),
         };
 
         // Helper: record frames played, timestamp, and CPU usage into the shared state.

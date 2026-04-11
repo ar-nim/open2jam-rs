@@ -100,12 +100,6 @@ pub fn bad_window_ms_release(bpm: f64) -> f64 {
     measures_to_ms(BAD_MEASURES_RELEASE, bpm)
 }
 
-/// Get the COOL judgment window in milliseconds for the given BPM.
-/// Used as the minimum late window floor for midpoint culling.
-pub fn cool_window_ms_floor(bpm: f64) -> f64 {
-    measures_to_ms(COOL_MEASURES, bpm)
-}
-
 /// Judge a tap note based on the time difference.
 pub fn judge_tap_note(time_diff_ms: f64, bpm: f64) -> JudgmentType {
     let abs_diff = time_diff_ms.abs();
