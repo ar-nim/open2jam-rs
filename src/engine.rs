@@ -694,15 +694,18 @@ impl App {
                 gs.cleanup_notes();
                 gs.cleanup_effects(); // Remove expired effects
 
-                // Trigger combo counter animation when combo increases
-                if gs.stats.combo > prev_combo {
+                // Trigger combo counter animation when combo increases.
+                // Uses gs.prev_frame_combo (persisted across frames) instead of
+                // a local variable, because handle_key_press increments combo in
+                // the winit event handler BEFORE the render frame starts.
+                if gs.stats.combo > gs.prev_frame_combo {
                     gs.combo_counter.increment();
                     // Only show combo title/max combo when starting a new combo streak (combo was 0)
-                    if prev_combo == 0 {
+                    if gs.prev_frame_combo == 0 {
                         gs.show_combo_title();
                         gs.show_max_combo_counter();
                     }
-                } else if gs.stats.combo == 0 && prev_combo > 0 {
+                } else if gs.stats.combo == 0 && gs.prev_frame_combo > 0 {
                     gs.combo_counter.reset();
                 }
 
@@ -716,6 +719,9 @@ impl App {
                     gs.show_max_combo_counter();
                     gs.show_combo_title();
                 }
+
+                // Update prev_frame_combo for the next frame's comparison
+                gs.prev_frame_combo = gs.stats.combo;
 
                 if let Some(audio_mgr) = &mut self.audio {
                     // ── Step 1: Hybrid Clock Validation ──
@@ -932,6 +938,26 @@ impl App {
                         }
                     }
 
+                    // Draw PRESSED_NOTE overlays FIRST (behind all notes)
+                    for lane in 0..7 {
+                        if gs.pressed_lanes[lane] {
+                            for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_note_overlays[lane] {
+                                if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
+                                    .or_else(|| atlas.get_frame(sprite_id).copied())
+                                {
+                                    let sprite_w = pressed_frame.width as f32 * skin_scale_x;
+                                    let sprite_h = pressed_frame.height as f32 * skin_scale_y;
+                                    let x = offset_x + *x_pos as f32 * skin_scale_x;
+                                    let y = offset_y + *y_pos as f32 * skin_scale_y;
+                                    gpu.textured_renderer.draw_textured_quad(
+                                        x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    // Draw tap notes on top of pressed overlays
                     for note in &gs.active_notes {
                         let y = note_y_position_bpm_aware(
                             render_time,
@@ -965,25 +991,6 @@ impl App {
                             gpu.textured_renderer.draw_textured_quad(
                                 x, y, note_w, note_h, head_frame.uv, [1.0, 1.0, 1.0, 1.0],
                             );
-                        }
-                    }
-
-                    // Draw PRESSED_NOTE overlays (behind long notes, matching original layer order)
-                    for lane in 0..7 {
-                        if gs.pressed_lanes[lane] {
-                            for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_note_overlays[lane] {
-                                if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
-                                    .or_else(|| atlas.get_frame(sprite_id).copied())
-                                {
-                                    let sprite_w = pressed_frame.width as f32 * skin_scale_x;
-                                    let sprite_h = pressed_frame.height as f32 * skin_scale_y;
-                                    let x = offset_x + *x_pos as f32 * skin_scale_x;
-                                    let y = offset_y + *y_pos as f32 * skin_scale_y;
-                                    gpu.textured_renderer.draw_textured_quad(
-                                        x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
-                                    );
-                                }
-                            }
                         }
                     }
 
