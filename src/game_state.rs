@@ -1,6 +1,5 @@
 //! Game state machine: integrates clock, chart, audio, and note lifecycle.
 
-use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -18,7 +17,6 @@ use crate::gameplay::timing_data::TimingData;
 use crate::parsing::ojn::{Chart, NoteType, TimedEvent};
 use crate::resources::clock::Clock;
 use crate::skin::prefab::NotePrefabs;
-use crate::audio::manager::SharedSyncPoint;
 use crate::parsing::xml::Resources as SkinResources;
 
 /// A note click effect instance (EFFECT_CLICK sprite, shown for Cool/Good).
@@ -444,9 +442,6 @@ pub struct GameState {
     pub auto_play: bool,
     /// Which lanes currently have keys held down (for pressed note visual)
     pub pressed_lanes: [bool; 7],
-    /// Key press history for manual mode judgment: (lane, press_time_ms)
-    /// Uses VecDeque for O(1) pop_front() during dense streams.
-    pub key_press_history: VecDeque<(usize, f64)>,
     /// Spawn lead time in milliseconds
     pub spawn_lead_time_ms: f64,
     /// Game statistics
@@ -478,12 +473,6 @@ pub struct GameState {
     pub is_song_ended: bool,
     /// Last absolute game time (for computing internal delta in update())
     pub last_absolute_ms: u64,
-    /// Thread-safe sync point from the audio thread (cpal).
-    /// Used to translate OS hardware timestamps to the audio timeline.
-    pub shared_sync_point: Option<SharedSyncPoint>,
-    /// User-configurable global offset in ms to compensate for hardware latency
-    /// (Bluetooth, USB DAC, monitor audio routing). Positive = notes appear earlier.
-    pub global_offset_ms: f64,
     /// Active note click effects (EFFECT_CLICK, triggered on Cool/Good for tap notes)
     pub note_click_effects: Vec<NoteClickEffect>,
     /// Active long note flare effects (EFFECT_LONGFLARE, triggered on Cool/Good for long notes)
@@ -511,8 +500,6 @@ impl GameState {
         scroll_speed: f64,
         auto_play: bool,
         skin_resources: Option<&SkinResources>,
-        shared_sync_point: Option<SharedSyncPoint>,
-        global_offset_ms: f64,
     ) -> Result<Self> {
         let ojn_path = ojn_path.as_ref();
         let dir = ojn_path.parent().context("OJN file must have a parent directory")?;
@@ -707,7 +694,6 @@ impl GameState {
             timing,
             auto_play,
             pressed_lanes: [false; 7],
-            key_press_history: VecDeque::new(),
             spawn_lead_time_ms,
             stats,
             pending_judgments: Vec::new(),
@@ -723,8 +709,6 @@ impl GameState {
             end_time_ms,
             is_song_ended: false,
             last_absolute_ms: 0,
-            shared_sync_point,
-            global_offset_ms,
             note_click_effects: Vec::new(),
             long_flare_effects: Vec::new(),
             effect_click_sprite: click_sprite,
@@ -1066,19 +1050,9 @@ impl GameState {
     }
 
     /// Detect missed notes that have passed the judgment window.
-    /// Uses the audio clock from the shared sync point, NOT render_time.
-    /// This prevents miss detection drift caused by VSync/monitor fluctuations.
+    /// Uses the game clock which is synced to the audio clock.
     pub fn detect_missed_notes(&mut self, _render_time: f64, bpm: f64) {
-        // Read the authoritative audio clock
-        let current_audio_time = if let Some(ref sync_point) = self.shared_sync_point {
-            if let Ok(sync) = sync_point.read() {
-                sync.audio_time_ms
-            } else {
-                0.0
-            }
-        } else {
-            0.0
-        };
+        let current_audio_time = self.clock.game_time() as f64;
 
         let base_bad_window = crate::gameplay::judgment::bad_window_ms_tap(bpm);
         let mut missed_lanes: Vec<usize> = Vec::new();
@@ -1118,14 +1092,7 @@ impl GameState {
             }
         }
 
-        // Garbage collect old key presses using audio time
-        let cutoff = current_audio_time - 2000.0;
-        self.key_press_history.retain(|(_, t)| *t > cutoff);
 
-        // Trim VecDeque from front if too many entries accumulated
-        while self.key_press_history.len() > 4096 {
-            self.key_press_history.pop_front();
-        }
     }
     /// Process note judgments (both auto-play and manual modes).
     /// In auto-play mode, all notes are judged as COOL.

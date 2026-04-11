@@ -254,8 +254,6 @@ impl ApplicationHandler for App {
                     self.start_load_game_state = false;
                     if let Some(path) = self.ojn_path.clone() {
                         let auto_play = self.auto_play;
-                        let sync_point = self.audio.as_ref().map(|a| a.sync_point());
-                        let global_offset_ms = 0.0;
                         info!("Starting background game state load from: {}", path.display());
                         let skin_res = self.render.as_ref()
                             .and_then(|r| r.gpu.as_ref())
@@ -263,7 +261,7 @@ impl ApplicationHandler for App {
 
                         let (tx, rx) = mpsc::channel();
                         let thread_handle = thread::spawn(move || {
-                            let result = GameState::load(&path, SCROLL_SPEED, auto_play, skin_res.as_ref(), sync_point, global_offset_ms);
+                            let result = GameState::load(&path, SCROLL_SPEED, auto_play, skin_res.as_ref());
                             let _ = tx.send(LoadingMessage::GameLoaded(result));
                         });
 
