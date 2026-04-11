@@ -1194,6 +1194,12 @@ impl GameState {
                             let li = idx - 10000;
                             let td = press_time - self.active_long_notes[li].head_time_ms;
                             let j = judge_tap_note(td, bpm);
+                            // DEBUG: log timing for long notes
+                            static LN_DEBUG: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                            if LN_DEBUG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 10 {
+                                log::info!("LN judgment: press={:.1} target={:.1} diff={:.1}ms judgment={:?} window={:.1}",
+                                    press_time, self.active_long_notes[li].head_time_ms, td, j, base_bad_window_ms);
+                            }
                             self.active_long_notes[li].judged = true;
                             self.active_long_notes[li].head_judgment = Some(j);
                             self.active_long_notes[li].holding = true;
@@ -1203,6 +1209,12 @@ impl GameState {
                         } else {
                             let td = press_time - self.active_notes[idx].target_time_ms;
                             let j = judge_tap_note(td, bpm);
+                            // DEBUG: log timing for first 20 notes
+                            static NOTE_DEBUG: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                            if NOTE_DEBUG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
+                                log::info!("Note judgment: press={:.1} target={:.1} diff={:.1}ms judgment={:?} window={:.1}",
+                                    press_time, self.active_notes[idx].target_time_ms, td, j, base_bad_window_ms);
+                            }
                             self.active_notes[idx].judged = true;
                             self.active_notes[idx].judgment_type = Some(j);
                             self.stats.record_judgment(j, false);
@@ -1252,48 +1264,34 @@ impl GameState {
         self.pending_judgments.retain(|j| j.is_active(render_time));
     }
 
+    /// Handle key press for a lane. Uses the game clock (already synced to audio)
+    /// for press time, then stores it for later judgment.
     pub fn handle_key_press(
         &mut self,
         lane: usize,
-        os_timestamp: std::time::Instant,
+        _os_timestamp: std::time::Instant,
         audio_manager: &mut crate::audio::manager::AudioManager,
     ) -> Option<JudgmentType> {
         if lane < 7 {
             self.pressed_lanes[lane] = true;
 
-            // Translate OS timestamp to chart-relative audio time
-            let adjusted_press_time = if let Some(ref sync_point) = self.shared_sync_point {
-                if let Ok(sync) = sync_point.read() {
-                    let os_delta_ms = if os_timestamp >= sync.os_time {
-                        (os_timestamp - sync.os_time).as_micros() as f64 / 1000.0
-                    } else {
-                        -((sync.os_time - os_timestamp).as_micros() as f64 / 1000.0)
-                    };
-                    sync.audio_time_ms + os_delta_ms + self.global_offset_ms
-                } else {
-                    0.0
-                }
-            } else {
-                0.0
-            };
+            // Use the game clock directly — it's already synced to the audio clock
+            // via the hybrid clock mechanism. This eliminates sync point complexity
+            // and hardware latency issues.
+            let press_time_ms = self.clock.game_time() as f64;
 
             // Store for judgment loop
-            self.key_press_history.push_back((lane, adjusted_press_time));
+            self.key_press_history.push_back((lane, press_time_ms));
 
             // INSTANT KEYSOUND: Find the chronologically first unjudged note in
             // this lane that the player could reasonably be aiming for.
-            // Uses .find() which short-circuits on the first match — always gets
-            // the oldest chronologically active note, not the nearest by distance.
-            // This eliminates the "Late Hit Bias" where hitting Note A late would
-            // accidentally trigger Note B's sample.
             let base_bad_window_ms = crate::gameplay::judgment::bad_window_ms_tap(
                 self.clock.bpm() as f64
             );
             let keysound_sample_id = self.active_notes.iter()
                 .filter(|n| n.lane == lane && !n.judged && !n.missed)
                 .find(|n| {
-                    // Player isn't hitting insanely early for this note
-                    let diff = adjusted_press_time - n.target_time_ms;
+                    let diff = press_time_ms - n.target_time_ms;
                     diff >= -base_bad_window_ms
                 })
                 .map(|n| n.sample_id);

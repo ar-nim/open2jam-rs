@@ -255,7 +255,7 @@ impl ApplicationHandler for App {
                     if let Some(path) = self.ojn_path.clone() {
                         let auto_play = self.auto_play;
                         let sync_point = self.audio.as_ref().map(|a| a.sync_point());
-                        let global_offset_ms = 0.0; // TODO: load from config
+                        let global_offset_ms = 0.0;
                         info!("Starting background game state load from: {}", path.display());
                         let skin_res = self.render.as_ref()
                             .and_then(|r| r.gpu.as_ref())
