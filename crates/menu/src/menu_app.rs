@@ -131,9 +131,6 @@ impl eframe::App for MenuApp {
 
         egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                let can_play = self.active_tab == MenuTab::MusicSelect && self.selected_song.is_some();
-                let play_btn = ui.add_enabled(can_play, egui::Button::new("▶ PLAY !!!"));
-                if play_btn.clicked() { self.play_selected_song(); }
                 ui.separator();
                 ui.checkbox(&mut self.config.game_options.autoplay, "Autoplay");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -238,8 +235,9 @@ impl MenuApp {
                             });});
                             ui.vertical(|ui| {
                                 ui.heading(&song.title);
-                                ui.label(format!("🎵 {}", song.artist));
-                                ui.label(format!("BPM: {:.1}  |  Keys: {}", song.bpm, song.keys));
+                                ui.label(format!("Artist: {}", song.artist));
+                                ui.label(format!("Notecharter: "));
+                                ui.label(format!("BPM: {:.1}", song.bpm));
                                 let dur = song.duration_sec;
                                 ui.label(format!("⏱ {}:{:02}", dur as u32 / 60, dur as u32 % 60));
                                 if !song.genre.is_empty() && song.genre != "0" {
@@ -248,10 +246,23 @@ impl MenuApp {
                             });
                         });
                     } else {
-                        ui.label("No song selected");
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| { ui.group(|ui| {
+                                ui.label("[No cover]");
+                                ui.allocate_space(egui::vec2(100.0, 100.0));
+                            });});
+                            ui.vertical(|ui| {
+                                ui.heading("No song selected");
+                                ui.label("Artist: ");
+                                ui.label("Notecharter: ");
+                                ui.label("BPM: -");
+                                ui.label("⏱ -:--");
+                                ui.label("");
+                            });
+                        });
                     }
                      ui.add_space(10.0);  
-                    // ── Difficulty ──                  
+                    // ── Difficulty ──
                     ui.label(egui::RichText::new("Difficulty").strong().heading());
                     ui.separator();
                     if let Some(song) = &selected_song_data {
@@ -259,7 +270,7 @@ impl MenuApp {
                             if chart.note_counts[i] == 0 && chart.levels[i] == 0 { continue; }
                             let dn = ["Easy", "Normal", "Hard"][i.min(2)];
                             let is_selected = self.selected_difficulty == i;
-                            let lb = format!("{} [{}]", dn, chart.levels[i]);
+                            let lb = format!("{} [{}] | Total Notes: [{}]", dn, chart.levels[i], chart.note_counts[i]);
                             if ui.selectable_label(is_selected, lb).clicked() {
                                 self.selected_difficulty = i;
                                 self.config.game_options.difficulty = match i {
@@ -271,9 +282,9 @@ impl MenuApp {
                             }
                         }
                     } else {
-                        ui.selectable_label(false, "Easy [-]");
-                        ui.selectable_label(false, "Normal [-]");
-                        ui.selectable_label(false, "Hard [-]");
+                        ui.selectable_label(false, "Easy [-] | Total Notes: [-]");
+                        ui.selectable_label(false, "Normal [-] | Total Notes: [-]");
+                        ui.selectable_label(false, "Hard [-] | Total Notes: [-]");
                     }
 
                     // ── Game Options ──
@@ -332,6 +343,29 @@ impl MenuApp {
                         }
                         if clicked { self.mark_dirty(); }
                     });
+                    ui.add_space(10.0);
+                    // Play Button — fills full width, larger text, centered
+                    let can_play = self.active_tab == MenuTab::MusicSelect && self.selected_song.is_some();
+                    let mut btn_rect = ui.available_rect_before_wrap();
+                    btn_rect.max.y = btn_rect.min.y + 40.0;
+                    let btn_id = ui.make_persistent_id("start_btn");
+                    let btn_response = ui.interact(btn_rect, btn_id, egui::Sense::click());
+                    let is_hovered = btn_response.hovered() && can_play;
+                    let fill_color = if can_play {
+                        if is_hovered { egui::Color32::from_rgb(100, 150, 255) } else { egui::Color32::BLUE }
+                    } else {
+                        ui.style().visuals.widgets.inactive.bg_fill
+                    };
+                    let text_color = if can_play { egui::Color32::WHITE } else { ui.style().visuals.text_color() };
+                    ui.painter().rect_filled(btn_rect, 4.0, fill_color);
+                    ui.painter().text(
+                        btn_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "▶ START GAME",
+                        egui::TextStyle::Button.resolve(ui.style()),
+                        text_color,
+                    );
+                    if btn_response.clicked() && can_play { self.play_selected_song(); }
                 });
             });
         });
