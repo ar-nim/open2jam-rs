@@ -1249,10 +1249,6 @@ impl App {
                         if let Some(anim) = atlas.animations.get(flare_sprite) {
                             // frame_speed_ms already converted from FPS in XML parser
                             let frame_speed_ms = anim.frame_speed_ms;
-                            let flare_count = gs.long_flare_effects.len();
-                            if flare_count > 0 {
-                                log::info!("[LONGFLARE] Drawing {} flare effects", flare_count);
-                            }
                             for effect in &gs.long_flare_effects {
                                 let frame_idx = effect.frame_index(render_time, frame_speed_ms, anim.frame_count);
                                 let atlas_id = format!("{}_{}", flare_sprite, frame_idx);

@@ -1198,7 +1198,8 @@ impl GameState {
             }
             for long_note in &mut self.active_long_notes {
                 if long_note.judged || long_note.missed { continue; }
-                if (render_time - long_note.head_time_ms).abs() < auto_play_tolerance_ms {
+                // Check if the long note head has passed the judgment line
+                if render_time >= long_note.head_time_ms {
                     long_note.judged = true;
                     long_note.head_judgment = Some(JudgmentType::Cool);
                     long_note.holding = true;
@@ -1398,7 +1399,6 @@ impl GameState {
     /// Trigger EFFECT_LONGFLARE for a lane when a Cool or Good judgment occurs (long note head).
     pub fn trigger_longflare_effect(&mut self, lane: usize, render_time: f64) {
         if self.effect_longflare_sprite.is_some() {
-            log::info!("[LONGFLARE] Triggered for lane {}", lane);
             self.long_flare_effects.push(LongFlareEffect::new(lane, render_time));
         }
     }
@@ -1408,18 +1408,12 @@ impl GameState {
         for flare in &mut self.long_flare_effects {
             if flare.lane == lane && flare.active {
                 flare.active = false;
-                log::info!("[LONGFLARE] Killed for lane {}", lane);
             }
         }
     }
     pub fn cleanup_effects(&mut self) {
-        let before = self.long_flare_effects.len();
         let render_time = self.clock.render_time() as f64;
         self.note_click_effects.retain(|e| e.is_active(render_time));
         self.long_flare_effects.retain(|e| e.is_active(render_time));
-        let removed = before - self.long_flare_effects.len();
-        if removed > 0 {
-            log::info!("[LONGFLARE] cleanup_effects: removed {}, remaining {}", removed, self.long_flare_effects.len());
-        }
     }
 }
