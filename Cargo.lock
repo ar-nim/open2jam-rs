@@ -2109,6 +2109,7 @@ dependencies = [
  "pollster",
  "serde",
  "serde_json",
+ "walkdir",
  "wgpu 29.0.1",
  "winit",
 ]

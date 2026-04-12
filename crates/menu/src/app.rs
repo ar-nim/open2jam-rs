@@ -4,12 +4,13 @@ use anyhow::Result;
 use winit::event_loop::EventLoop;
 use winit::window::Window;
 
+use open2jam_rs_core::Config;
+use crate::ojn_scanner::{OjnScanner, SongEntry};
+
 /// The main menu application.
 pub struct MenuApp {
     config: Config,
 }
-
-use open2jam_rs_core::Config;
 
 impl MenuApp {
     pub fn new() -> Result<Self> {
@@ -23,25 +24,41 @@ impl MenuApp {
         Ok(Self { config })
     }
 
-    /// Run the menu event loop.
     pub fn run(mut self, event_loop: EventLoop<()>) -> Result<()> {
         let mut app = MenuRunner {
             config: self.config,
             egui_ctx: egui::Context::default(),
             window: None,
             integration: None,
+            songs: Vec::new(),
+            selected_song: None,
+            selected_difficulty: 0,
+            search_query: String::new(),
+            scan_dirs: Vec::new(),
+            scanning: false,
         };
         event_loop.run_app(&mut app)?;
         Ok(())
     }
 }
 
-/// Event loop handler.
 struct MenuRunner {
     config: Config,
     egui_ctx: egui::Context,
     window: Option<Window>,
     integration: Option<egui_winit::State>,
+    /// All scanned songs
+    songs: Vec<SongEntry>,
+    /// Currently selected song index
+    selected_song: Option<usize>,
+    /// Selected difficulty index within the song (0-based into charts vec)
+    selected_difficulty: usize,
+    /// Search filter text
+    search_query: String,
+    /// Scanned library directories
+    scan_dirs: Vec<String>,
+    /// Whether a scan is in progress
+    scanning: bool,
 }
 
 impl winit::application::ApplicationHandler for MenuRunner {
@@ -77,7 +94,6 @@ impl winit::application::ApplicationHandler for MenuRunner {
     ) {
         use winit::event::WindowEvent;
 
-        // Feed events to egui-winit
         let Some(integration) = &mut self.integration else { return };
         let Some(window) = &self.window else { return };
 
@@ -108,7 +124,9 @@ impl MenuRunner {
             integration.take_egui_input(window)
         };
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            ui_panel(ctx, &mut self.config);
+            ui_menu(ctx, &mut self.config, &mut self.songs, &mut self.selected_song,
+                &mut self.selected_difficulty, &mut self.search_query,
+                &mut self.scan_dirs, &mut self.scanning);
         });
         {
             let window = self.window.as_ref().unwrap();
@@ -118,20 +136,154 @@ impl MenuRunner {
     }
 }
 
-fn ui_panel(ctx: &egui::Context, config: &mut Config) {
-    egui::TopBottomPanel::top("menu_tabs").show(ctx, |ui| {
+fn ui_menu(
+    ctx: &egui::Context,
+    config: &mut Config,
+    songs: &mut Vec<SongEntry>,
+    selected_song: &mut Option<usize>,
+    selected_difficulty: &mut usize,
+    search_query: &mut String,
+    scan_dirs: &mut Vec<String>,
+    scanning: &mut bool,
+) {
+    egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut config.game_options.autoplay, false, "Music Select");
-            ui.selectable_value(&mut config.game_options.autoplay, true, "Configuration");
-            ui.button("Advanced");
-        })
+            let can_play = selected_song.is_some();
+            let play_btn = ui.add_enabled(can_play, egui::Button::new("▶ PLAY !!!"));
+            if play_btn.clicked() {
+                if let Some(idx) = *selected_song {
+                    if let Some(song) = songs.get(idx) {
+                        if let Some(chart) = song.charts.get(*selected_difficulty) {
+                            log::info!("PLAY: {}", chart.path.display());
+                            // Phase 1: spawn game binary
+                            let _ = std::process::Command::new("open2jam-rs")
+                                .arg(&chart.path)
+                                .arg(if config.game_options.autoplay { "--autoplay" } else { "" })
+                                .spawn();
+                        }
+                    }
+                }
+            }
+            ui.checkbox(&mut config.game_options.autoplay, "Autoplay");
+        });
+    });
+
+    egui::SidePanel::left("song_list").resizable(true).default_width(300.0).show(ctx, |ui| {
+        ui.vertical(|ui| {
+            // Library management bar
+            ui.horizontal(|ui| {
+                if ui.button("Choose dir").clicked() {
+                    // TODO: native file dialog
+                    *scanning = true;
+                }
+                if ui.button("Scan").clicked() && !scan_dirs.is_empty() {
+                    scan_directories(songs, scan_dirs);
+                }
+            });
+
+            ui.separator();
+            ui.label(&format!("{} songs", songs.len()));
+
+            // Search
+            ui.text_edit_singleline(search_query);
+
+            ui.separator();
+
+            // Song list table
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let filtered: Vec<(usize, &SongEntry)> = songs.iter().enumerate()
+                    .filter(|(_, s)| {
+                        search_query.is_empty()
+                            || s.title.to_lowercase().contains(&search_query.to_lowercase())
+                            || s.artist.to_lowercase().contains(&search_query.to_lowercase())
+                    })
+                    .collect();
+
+                for (orig_idx, song) in filtered {
+                    let level_str = if song.max_level > 0 {
+                        song.max_level.to_string()
+                    } else {
+                        "-".into()
+                    };
+                    let label = format!("{}  Lv{}  {}", song.title, level_str, song.genre);
+                    let selected = *selected_song == Some(orig_idx);
+                    if ui.selectable_label(selected, &label).clicked() {
+                        *selected_song = Some(orig_idx);
+                        *selected_difficulty = 0;
+                    }
+                }
+            });
+        });
     });
 
     egui::CentralPanel::default().show(ctx, |ui| {
-        ui.heading("open2jam-rs Menu");
-        ui.label("Select a chart directory to begin.");
-        ui.separator();
-        ui.label(&format!("Difficulty: {:?}", config.game_options.difficulty));
-        ui.label(&format!("Speed: {:.1} ({:?})", config.game_options.speed_multiplier, config.game_options.speed_type));
+        if let Some(idx) = *selected_song {
+            if let Some(song) = songs.get(idx) {
+                ui_song_info(ui, config, song, selected_difficulty);
+            }
+        } else {
+            ui.heading("Select a song");
+            ui.label("Choose a directory and scan for OJN charts.");
+        }
     });
+}
+
+fn ui_song_info(
+    ui: &mut egui::Ui,
+    config: &mut Config,
+    song: &SongEntry,
+    selected_difficulty: &mut usize,
+) {
+    ui.horizontal(|ui| {
+        // Cover art placeholder
+        ui.vertical(|ui| {
+            if song.cover.is_some() {
+                ui.label("[Cover art]");
+            } else {
+                ui.label("[No cover]");
+            }
+        });
+
+        // Song metadata
+        ui.vertical(|ui| {
+            ui.heading(&song.title);
+            ui.label(format!("Artist: {}", song.artist));
+            ui.label(format!("BPM: {:.1}", song.bpm));
+            ui.label(format!("Keys: {}", song.keys));
+            let dur = song.duration_sec;
+            ui.label(format!("Duration: {}:{:02}", dur as u32 / 60, dur as u32 % 60));
+        });
+    });
+
+    ui.separator();
+
+    // Difficulty selection
+    ui.label("Difficulty:");
+    for (i, chart) in song.charts.iter().enumerate() {
+        let label = format!(
+            "{}  (Notes: {}, Level: {})",
+            ["Easy", "Normal", "Hard"][i.min(2)],
+            chart.note_counts[i],
+            chart.levels[i],
+        );
+        if ui.selectable_value(selected_difficulty, i, &label).clicked() {
+            // update game_options difficulty
+            config.game_options.difficulty = match i {
+                0 => open2jam_rs_core::Difficulty::Easy,
+                1 => open2jam_rs_core::Difficulty::Normal,
+                _ => open2jam_rs_core::Difficulty::Hard,
+            };
+        }
+    }
+}
+
+fn scan_directories(songs: &mut Vec<SongEntry>, dirs: &[String]) {
+    let mut scanner = OjnScanner::new();
+    for dir in dirs {
+        if let Err(e) = scanner.add_directory(std::path::Path::new(dir)) {
+            log::warn!("Failed to scan {}: {}", dir, e);
+        }
+    }
+    *songs = scanner.scan();
+    log::info!("Scanned {} songs from {} directories", songs.len(), dirs.len());
 }
