@@ -155,11 +155,46 @@ fn ui_menu(
                     if let Some(song) = songs.get(idx) {
                         if let Some(chart) = song.charts.get(*selected_difficulty) {
                             log::info!("PLAY: {}", chart.path.display());
-                            // Phase 1: spawn game binary
-                            let _ = std::process::Command::new("open2jam-rs")
-                                .arg(&chart.path)
-                                .arg(if config.game_options.autoplay { "--autoplay" } else { "" })
-                                .spawn();
+                            // Find sibling game binary in the same target directory
+                            if let Ok(exe) = std::env::current_exe() {
+                                let game_bin = exe.with_file_name("open2jam-rs");
+                                // The game looks for resources/ relative to CWD.
+                                // Set CWD to project root (parent of target/debug).
+                                let project_root = exe.parent()
+                                    .and_then(|p| p.parent())
+                                    .map(|p| p.to_path_buf());
+
+                                log::info!("=== PLAY DEBUG ===");
+                                log::info!("Game binary: {} (exists: {})", game_bin.display(), game_bin.exists());
+                                log::info!("Chart path: {}", chart.path.display());
+                                log::info!("Project root: {:?}", project_root);
+
+                                let mut cmd = std::process::Command::new(&game_bin);
+                                cmd.arg(&chart.path);
+                                if config.game_options.autoplay {
+                                    cmd.arg("--autoplay");
+                                }
+                                // Detach from parent's stdin/stdout/stderr so the game
+                                // runs as an independent process with its own display connection.
+                                cmd.stdin(std::process::Stdio::null());
+                                cmd.stdout(std::process::Stdio::inherit());
+                                cmd.stderr(std::process::Stdio::inherit());
+                                if let Some(ref dir) = project_root {
+                                    cmd.current_dir(dir);
+                                }
+                                // Create new process group (Linux) so the game gets its own
+                                // session and isn't affected by the menu's event loop.
+                                #[cfg(unix)]
+                                {
+                                    use std::os::unix::process::CommandExt;
+                                    cmd.process_group(0);
+                                }
+
+                                match cmd.spawn() {
+                                    Ok(child) => log::info!("Game spawned: PID={}", child.id()),
+                                    Err(e) => log::error!("Failed to spawn game: {} (binary: {})", e, game_bin.display()),
+                                }
+                            }
                         }
                     }
                 }
