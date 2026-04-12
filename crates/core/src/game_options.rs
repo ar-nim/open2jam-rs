@@ -191,6 +191,10 @@ pub struct GameOptions {
     #[serde(default = "default_true")]
     pub autosound: bool,
 
+    /// Use timed judgment like Bemani games (timing-based rather than position-based).
+    #[serde(default)]
+    pub timed_judgment: bool,
+
     /// Selected difficulty (Easy/Normal/Hard).
     #[serde(default)]
     pub difficulty: Difficulty,
@@ -234,6 +238,14 @@ pub struct GameOptions {
     /// Menu window fullscreen state (independent of game fullscreen).
     #[serde(default)]
     pub menu_fullscreen: bool,
+
+    /// Haste Mode: advanced timing mode.
+    #[serde(default)]
+    pub haste_mode: bool,
+
+    /// Normalize Speed: sub-option of Haste Mode.
+    #[serde(default = "default_true")]
+    pub haste_mode_normalize_speed: bool,
 }
 
 fn default_speed() -> f32 { 1.0 }
@@ -255,6 +267,7 @@ impl Default for GameOptions {
             master_volume: 1.0,
             autoplay: false,
             autosound: true,
+            timed_judgment: false,
             difficulty: Difficulty::Normal,
             display_fullscreen: false,
             display_vsync: true,
@@ -266,6 +279,8 @@ impl Default for GameOptions {
             audio_latency: 0.0,
             ui_theme: UiTheme::Automatic,
             menu_fullscreen: false,
+            haste_mode: false,
+            haste_mode_normalize_speed: true,
         }
     }
 }
