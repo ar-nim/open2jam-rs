@@ -19,76 +19,42 @@
 
 A Rust port of [open2jam-modern](../open2jam-modern) — a community reimplementation of the **O2Jam** rhythm game (2002 Korean arcade-style music game).
 
-The project is in **preview mode**: no song selection UI, no menus. You launch it with a path to an `.ojn` chart file. By default it runs in **manual input mode** (keyboard-based). Pass `--autoplay` for auto-play.
+The project has two binaries:
+- **`open2jam-rs`** — the game itself. Launch with a chart path to play (manual input by default, `--autoplay` for auto-play).
+- **`open2jam-rs-menu`** — the menu GUI (egui-based). Browse songs, configure options, and launch the game.
 
 ## File Structure
 
 ```
 open2jam-rs/
-├── Cargo.toml                 # Project manifest, dependencies
+├── Cargo.toml                 # [workspace] — crates/core, crates/game, crates/menu
 ├── assets/                    # Game assets directory
 ├── test_assets/               # Test fixtures
 │   └── README.md
-├── src/
-│   ├── main.rs                # Entry point — CLI args → App::run()
-│   ├── engine.rs              # Frame orchestrator — winit loop, wgpu init, render pipeline
-│   ├── game_state.rs          # Game state — clock, chart, note spawning, judgment, effects
-│   ├── test_harness.rs        # Test utilities
+├── crates/
+│   ├── core/                  # open2jam-rs-core (shared library)
+│   │   ├── config.rs          # Config JSON (mirrors Java config.json)
+│   │   ├── key_bindings.rs    # Key map for K4-K8 + misc
+│   │   └── game_options.rs    # SpeedType, VisibilityMod, ChannelMod, etc.
 │   │
-│   ├── audio/                 # Audio subsystem
-│   │   ├── mod.rs             # Exports AudioManager, bgm_signal
-│   │   ├── manager.rs         # oddio + cpal host, mixer control, BGM queue producer,
-│   │   │                      # hybrid phase-locked clock, CPU usage monitor
-│   │   │                      # stream created paused → play() starts after startup delay
-│   │   ├── bgm_signal.rs      # BgmSignalQueue + ScheduledSignal — custom oddio::Signal
-│   │   │                      # that mixes multiple concurrent BGM notes by accumulation
-│   │   │                      # with source_id deduplication (voice-steal for same-lane keysounds)
-│   │   ├── cache.rs           # Decoded sample cache (SoundCache)
-│   │   ├── chart_audio.rs     # Chart-to-audio linkage
-│   │   └── trigger.rs         # Time-driven audio trigger system (legacy, kept for reference)
+│   ├── game/                  # open2jam-rs (game binary)
+│   │   └── src/               # Existing game source (audio, gameplay, parsing, render, etc.)
 │   │
-│   ├── gameplay/              # Gameplay mechanics
-│   │   ├── mod.rs             # Module exports
-│   │   ├── scroll.rs          # Beat-to-pixel scroll math (static BPM + BPM-aware variants)
-│   │   ├── timing_data.rs     # Velocity tree (TimingData) — BPM-aware beat calculation
-│   │   │                      # matches Java's TimingData/VelocityChange with getBeat()
-│   │   ├── judgment.rs        # Hit detection (COOL/GOOD/BAD/MISS, tap + release)
-│   │   │                      # 192 TPB system — judgment windows scale with BPM
-│   │   └── modifiers.rs       # Game modifiers (Hi-Speed, etc.)
-│   │
-│   ├── parsing/               # File format parsers
-│   │   ├── mod.rs             # Module exports
-│   │   ├── ojn.rs             # OJN binary chart parser (.ojn) — notes, BPM changes,
-│   │   │                      # measure markers, time signature (channel 0), sample IDs
-│   │   │                      # HOLD/RELEASE pairing for long note end_time_ms
-│   │   ├── ojm.rs             # OJM binary audio parser (.ojm) — sample extraction
-│   │   ├── chart.rs           # Chart data model (TimedEvent, NoteEvent, BpmChangeEvent)
-│   │   └── xml.rs             # Skin XML parser (resources.xml) — sprites, entities, effects
-│   │
-│   ├── render/                # Rendering subsystem (wgpu)
-│   │   ├── mod.rs             # Module exports
-│   │   ├── atlas.rs           # Texture atlas builder — packs sprite frames into GPU texture
-│   │   ├── textured_renderer.rs  # Batch textured quad renderer with dual blend modes
-│   │   ├── pipeline.rs        # wgpu render pipeline (solid color quads)
-│   │   ├── states.rs          # Render pipeline state management
-│   │   └── hud.rs             # HUD rendering (score, combo, lifebar, timer, judgment popups)
-│   │
-│   ├── resources/             # Shared resource types
-│   │   ├── mod.rs             # Module exports
-│   │   ├── clock.rs           # Game clock — game_time vs render_time, BPM tracking, interpolation
-│   │   ├── key_bindings.rs    # Keyboard configuration (S D F Space J K L)
-│   │   ├── skin_assets.rs     # Skin asset loading
-│   │   ├── chart_model.rs     # Chart data types
-│   │   ├── state.rs           # State management utilities
-│   │   └── async_loading.rs   # Async asset loading helpers
-│   │
-│   └── skin/                  # Skin system
-│       ├── mod.rs             # Module exports
-│       └── prefab.rs          # Note prefab definitions per lane (x, sprite IDs, long note support)
-│                              # PRESSED_NOTE parsing (lane effects + keyboard overlays)
+│   └── menu/                  # open2jam-rs-menu (menu GUI binary)
+│       ├── main.rs            # eframe entry point
+│       ├── menu_app.rs        # eframe::App (all UI logic)
+│       ├── ojn_scanner.rs     # OJN header scanner + song grouping
+│       └── panels/            # Reusable UI panels
+│           ├── modifiers.rs   # Volume, speed, visibility, channel
+│           ├── key_bind_editor.rs
+│           └── display_config.rs
+│
+└── resources/                 # skin XML, assets (shared)
 ```
 
 ## Architecture
+
+### Game Binary (`open2jam-rs`)
 
 ```
 main() → App::new() → App::run()
@@ -133,6 +99,26 @@ main() → App::new() → App::run()
                         ├─ handle_key_press() → immediate judgment + keysound
                         ├─ handle_key_release() → kill flare, stop holding
                         └─ process_judgments() → miss detection + long note tail release
+```
+
+### Menu Binary (`open2jam-rs-menu`)
+
+```
+main() → eframe::run_native() → MenuApp::update()
+                              │
+                              ├─ TopBottomPanel::top("tab_bar")
+                              │     └─ Tabs: Music Select | Configuration | Advanced
+                              │
+                              ├─ TopBottomPanel::bottom("bottom_bar")
+                              │     ├─ Autoplay checkbox
+                              │     └─ 💾 Save Config button
+                              │
+                              └─ CentralPanel
+                                    ├─ Music Select → ui.columns(2):
+                                    │     Left:  "Select Music" heading + sortable song grid
+                                    │     Right: "Song Info" heading + difficulty + game options
+                                    ├─ Configuration → key bindings + display config + theme
+                                    └─ Advanced → Haste Mode + Buffer Size
 ```
 
 ## Core Game Loop
@@ -354,29 +340,39 @@ Main Thread (rendering):
 - [x] **CPU usage monitor** — callback timing (avg/max/budget logged every 10s)
 - [x] **1-based measure conversion** — OJN 0-based measures converted to game's 1-based system
 - [x] **Correct scroll measure_size** — 0.8 × judgment_line_y (384) matches Java HiSpeed (385)
-- [x] **Correct z-order** — notes → static_keyboard → pressed overlays (original layer order)
-- [ ] Song selection menu
+- [x] Correct z-order — notes → static_keyboard → pressed overlays (original layer order)
+- [x] **Song selection menu** — egui-based GUI with OJN scanner, sortable song list, game options
+- [x] **Configuration screen** — key bindings, display settings, theme selection
+- [x] **Advanced options** — Haste Mode, Normalize Speed, Buffer Size
+- [x] **Config persistence** — auto-save to `~/.config/open2jam-rs/config.json`
+- [x] **Game launch from menu** — spawns game binary with chart path and options
 - [ ] Skin selection UI
 - [ ] Audio latency compensation (manual offset adjustment)
 - [ ] Stop channels (chart events that pause audio)
 - [ ] Hi-Speed modifier (UI + scroll adjustment)
 - [ ] Note judgment text popups (COOL/GOOD/BAD/MISS text from skin — sprites only, no text yet)
 - [ ] Max combo counter display
-- [ ] Difficulty selection (Easy/Normal/Hard)
 
 ## How to Run
 
+### Menu (recommended)
 ```bash
-# Manual input mode (default) — play with keyboard
-cargo run -- /path/to/song.ojn
+# Launch the GUI to browse songs, configure options, and start the game
+cargo run -p open2jam-rs-menu
+```
+
+### Game (direct)
+```bash
+# Manual input mode (default) — play with keyboard (S D F Space J K L)
+cargo run -p open2jam-rs -- /path/to/song.ojn
 
 # Auto-play mode — watch the game play itself
-cargo run -- /path/to/song.ojn --autoplay
+cargo run -p open2jam-rs -- /path/to/song.ojn --autoplay
 
 # Requirements:
 #   - .ojn file (chart)
 #   - .ojm file (audio) with matching name in same directory
-#   - Skin XML at ../open2jam-modern/src/resources/resources.xml
+#   - Skin XML at resources/ (project root)
 ```
 
 ## Dependencies Explained
