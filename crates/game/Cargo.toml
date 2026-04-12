@@ -6,6 +6,7 @@ description = "O2Jam rhythm game port in Rust with wgpu + oddio"
 
 [dependencies]
 open2jam-rs-core = { path = "../core" }
+open2jam-rs-ojn = { path = "../ojn" }
 wgpu = "29.0.1"
 winit = { version = "0.30.13", features = ["rwh_06"] }
 raw-window-handle = "0.6"

@@ -14,7 +14,7 @@ use crate::gameplay::judgment::{
 };
 use crate::gameplay::scroll::scroll_travel_time_ms;
 use crate::gameplay::timing_data::TimingData;
-use crate::parsing::ojn::{Chart, NoteType, TimedEvent};
+use crate::parsing::{Chart, NoteType, TimedEvent};
 use crate::resources::clock::Clock;
 use crate::skin::prefab::NotePrefabs;
 use crate::parsing::xml::Resources as SkinResources;
@@ -520,7 +520,7 @@ impl GameState {
 
         // 1. Parse the OJN chart
         info!("Parsing chart: {}", ojn_path.display());
-        let chart = crate::parsing::ojn::parse_file(ojn_path)
+        let chart = crate::parsing::parse_file(ojn_path)
             .with_context(|| format!("Failed to parse OJN: {}", ojn_path.display()))?;
         info!(
             "Chart loaded: {} - {} ({} events, {} measures)",
@@ -1034,7 +1034,7 @@ impl GameState {
     /// Lane key sounds (channels 3-7) only play when the player presses the key
     pub fn process_audio(&mut self, audio_manager: &mut AudioManager) -> usize {
         use crate::audio::bgm_signal::BgmCommand;
-        use crate::parsing::ojn::{Channel, NoteType, TimedEvent};
+        use crate::parsing::{Channel, NoteType, TimedEvent};
 
         // Don't push BGM commands until the audio stream is running.
         if !audio_manager.is_active() {

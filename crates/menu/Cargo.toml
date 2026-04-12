@@ -6,6 +6,7 @@ description = "Menu GUI for open2jam-rs (egui + winit + wgpu)"
 
 [dependencies]
 open2jam-rs-core = { path = "../core" }
+open2jam-rs-ojn = { path = "../ojn" }
 eframe = "0.30"
 egui = "0.30"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

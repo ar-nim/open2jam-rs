@@ -2,7 +2,6 @@
 //!
 //! Run with: `cargo run -p open2jam-rs-menu`
 
-mod ojn_scanner;
 mod menu_app;
 mod panels;
 

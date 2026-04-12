@@ -268,7 +268,35 @@ fn decode_note_type_byte(type_byte: u8, value: u16) -> (u16, NoteType) {
 }
 
 // ---------------------------------------------------------------------------
-// Public API
+// Public API — metadata only (fast scan)
+// ---------------------------------------------------------------------------
+
+/// Parse only the OJN header (metadata) without reading note events.
+///
+/// This is for song list scanning — much faster than full parsing
+/// since it skips all measure blocks.
+pub fn parse_metadata(path: impl AsRef<Path>) -> Result<OjnHeader, OjnError> {
+    let data = std::fs::read(path)?;
+    parse_metadata_bytes(&data)
+}
+
+/// Parse only the OJN header from raw bytes.
+pub fn parse_metadata_bytes(data: &[u8]) -> Result<OjnHeader, OjnError> {
+    if data.len() < HEADER_SIZE {
+        return Err(OjnError::Truncated {
+            expected: HEADER_SIZE,
+            actual: data.len(),
+        });
+    }
+    let signature = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+    if signature != OJN_SIGNATURE {
+        return Err(OjnError::InvalidSignature(signature));
+    }
+    parse_header(data)
+}
+
+// ---------------------------------------------------------------------------
+// Public API — full chart parsing
 // ---------------------------------------------------------------------------
 
 /// Parse an OJN file from disk.
@@ -578,7 +606,7 @@ fn pair_long_notes(events: &mut [TimedEvent]) {
 
     // First pass: collect all pairs (hold_idx, release_time)
     let mut pairs_to_update: Vec<(usize, f64)> = Vec::new();
-    
+
     for (idx, event) in events.iter().enumerate() {
         if let TimedEvent::Note(note) = event {
             if let Some(lane) = note.channel.lane_index() {
@@ -596,7 +624,7 @@ fn pair_long_notes(events: &mut [TimedEvent]) {
             }
         }
     }
-    
+
     // Second pass: apply updates (separate borrow)
     for (hold_idx, release_time) in pairs_to_update {
         if let TimedEvent::Note(ref mut hold_note) = events[hold_idx] {
@@ -681,13 +709,13 @@ mod tests {
         let chart = parse_file("test_assets/o2ma100.ojn").expect("Failed to parse OJN");
         let note_count = chart.events.iter().filter(|e| matches!(e, TimedEvent::Note(_))).count();
         assert!(note_count > 0, "Chart should have note events, got {}", note_count);
-        
+
         // Print first 30 events to check ordering
         println!("First 30 events (sorted by time):");
         for (i, event) in chart.events.iter().enumerate().take(30) {
             match event {
                 TimedEvent::Note(n) => {
-                    println!("  [{}] Note at {:.1}ms, lane {:?}, type: {:?}, end_time: {:?}", 
+                    println!("  [{}] Note at {:.1}ms, lane {:?}, type: {:?}, end_time: {:?}",
                         i, n.time_ms, n.channel, n.note_type, n.end_time_ms);
                 }
                 TimedEvent::BpmChange(b) => {
@@ -698,7 +726,7 @@ mod tests {
                 }
             }
         }
-        
+
         // Check unique measure numbers
         let measure_nums: Vec<u32> = chart.events.iter()
             .filter_map(|e| match e {
@@ -707,7 +735,7 @@ mod tests {
             })
             .collect();
         println!("\nMeasure numbers in events: {:?}", measure_nums);
-        
+
         // Check long notes
         let long_note_heads: Vec<_> = chart.events.iter()
             .filter_map(|e| match e {
@@ -715,10 +743,10 @@ mod tests {
                 _ => None,
             })
             .collect();
-        
+
         println!("\nLong note heads: {}", long_note_heads.len());
         for ln in &long_note_heads {
-            println!("  HOLD at {:.1}ms, lane {:?}, end_time_ms: {:?}", 
+            println!("  HOLD at {:.1}ms, lane {:?}, end_time_ms: {:?}",
                 ln.time_ms, ln.channel, ln.end_time_ms);
         }
     }

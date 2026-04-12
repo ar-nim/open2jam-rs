@@ -2687,6 +2687,7 @@ dependencies = [
  "mint",
  "oddio",
  "open2jam-rs-core",
+ "open2jam-rs-ojn",
  "pollster",
  "quick-xml 0.38.4",
  "raw-window-handle",
@@ -2718,9 +2719,19 @@ dependencies = [
  "image",
  "log",
  "open2jam-rs-core",
+ "open2jam-rs-ojn",
  "serde",
  "serde_json",
  "walkdir",
+]
+
+[[package]]
+name = "open2jam-rs-ojn"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
+ "log",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

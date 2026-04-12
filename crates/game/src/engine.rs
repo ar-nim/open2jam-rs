@@ -17,7 +17,7 @@ use winit::window::Window;
 use crate::audio::AudioManager;
 use crate::game_state::GameState;
 use crate::gameplay::scroll::note_y_position_bpm_aware;
-use crate::parsing::ojn::TimedEvent;
+use crate::parsing::TimedEvent;
 use crate::parsing::xml::{parse_file as parse_skin_xml, Resources as SkinResources};
 use crate::render::atlas::SkinAtlas;
 use crate::render::textured_renderer::{TexturedRenderer, BlendMode};
@@ -487,7 +487,7 @@ impl App {
             }
         };
 
-        let jpeg_bytes = match crate::parsing::ojn::extract_cover_image(&data) {
+        let jpeg_bytes = match crate::parsing::extract_cover_image(&data) {
             Ok(b) => b,
             Err(e) => {
                 warn!("No cover image in OJN: {e}");

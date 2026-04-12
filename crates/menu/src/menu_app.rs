@@ -1,12 +1,45 @@
 //! Menu application using eframe (handles wgpu+winit automatically).
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
 use anyhow::Result;
 use open2jam_rs_core::Config;
 use open2jam_rs_core::game_options::{ChannelMod, VisibilityMod};
-use crate::ojn_scanner::{OjnScanner, SongEntry};
+use open2jam_rs_ojn::{OjnHeader, parse_metadata_bytes, extract_cover_image};
 use crate::panels::modifiers::ui_modifiers;
 use crate::panels::display_config::ui_display_config;
 use crate::panels::key_bind_editor::ui_key_bind_editor;
+
+/// Metadata for a single chart (one difficulty of one song).
+#[derive(Debug, Clone)]
+pub struct ChartEntry {
+    pub path: PathBuf,
+    pub title: String,
+    pub artist: String,
+    pub noter: String,
+    pub genre: String,
+    pub bpm: f32,
+    pub duration_sec: f32,
+    pub note_counts: [u32; 3],
+    pub levels: [u16; 3],
+    pub keys: u8,
+}
+
+/// A song group: one logical song with multiple difficulties.
+#[derive(Debug, Clone)]
+pub struct SongEntry {
+    pub title: String,
+    pub artist: String,
+    pub noter: String,
+    pub genre: String,
+    pub bpm: f32,
+    pub duration_sec: f32,
+    pub keys: u8,
+    pub charts: Vec<ChartEntry>,
+    pub cover: Option<Vec<u8>>,
+    pub max_level: u16,
+}
 
 /// Tab index for the menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -236,7 +269,7 @@ impl MenuApp {
                             ui.vertical(|ui| {
                                 ui.heading(&song.title);
                                 ui.label(format!("Artist: {}", song.artist));
-                                ui.label(format!("Notecharter: "));
+                                ui.label(format!("Noter: {}", song.noter));
                                 ui.label(format!("BPM: {:.1}", song.bpm));
                                 let dur = song.duration_sec;
                                 ui.label(format!("⏱ {}:{:02}", dur as u32 / 60, dur as u32 % 60));
@@ -254,7 +287,7 @@ impl MenuApp {
                             ui.vertical(|ui| {
                                 ui.heading("No song selected");
                                 ui.label("Artist: ");
-                                ui.label("Notecharter: ");
+                                ui.label("Noter: ");
                                 ui.label("BPM: -");
                                 ui.label("⏱ -:--");
                                 ui.label("");
@@ -417,13 +450,110 @@ impl MenuApp {
 }
 
 fn scan_directories(songs: &mut Vec<SongEntry>, dirs: &[String]) {
-    let mut scanner = OjnScanner::new();
+    let mut charts: Vec<(PathBuf, OjnHeader)> = Vec::new();
+
     for dir in dirs {
-        if let Err(e) = scanner.add_directory(std::path::Path::new(dir)) {
-            log::warn!("Failed to scan {}: {}", dir, e);
+        let dir_path = Path::new(dir);
+        if !dir_path.exists() {
+            log::warn!("Scan directory does not exist: {}", dir);
+            continue;
+        }
+        for entry in walkdir::WalkDir::new(dir_path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if let Some(ext) = entry.path().extension() {
+                if ext.eq_ignore_ascii_case("ojn") {
+                    match std::fs::read(entry.path()) {
+                        Ok(data) => match parse_metadata_bytes(&data) {
+                            Ok(header) => {
+                                charts.push((entry.path().to_path_buf(), header));
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to parse OJN header: {}: {}", entry.path().display(), e);
+                            }
+                        },
+                        Err(e) => {
+                            log::warn!("Failed to read OJN file: {}: {}", entry.path().display(), e);
+                        }
+                    }
+                }
+            }
         }
     }
-    *songs = scanner.scan();
+
+    // Group by title + artist + keys (default 7)
+    let mut groups: HashMap<String, Vec<(PathBuf, OjnHeader)>> = HashMap::new();
+    for (path, header) in charts {
+        let key = format!("{}|{}|{}", header.title, header.artist, 7);
+        groups.entry(key).or_default().push((path, header));
+    }
+
+    *songs = groups
+        .into_values()
+        .map(|mut entries| {
+            entries.sort_by_key(|(_, h)| {
+                [h.level_easy, h.level_normal, h.level_hard]
+                    .into_iter()
+                    .find(|&l| l > 0)
+                    .unwrap_or(0)
+            });
+
+            let first = entries.first().cloned().unwrap_or_else(|| {
+                (PathBuf::new(), OjnHeader {
+                    song_id: 0, encode_version: 0.0, genre: 0, bpm: 0.0,
+                    level_easy: 0, level_normal: 0, level_hard: 0,
+                    event_count_easy: 0, event_count_normal: 0, event_count_hard: 0,
+                    note_count_easy: 0, note_count_normal: 0, note_count_hard: 0,
+                    measure_count_easy: 0, measure_count_normal: 0, measure_count_hard: 0,
+                    title: String::new(), artist: String::new(), noter: String::new(),
+                    ojm_filename: String::new(), cover_size: 0,
+                    duration_easy: 0, duration_normal: 0, duration_hard: 0,
+                    note_offset_easy: 0, note_offset_normal: 0, note_offset_hard: 0,
+                    cover_offset: 0,
+                })
+            });
+
+            let cover = entries.iter().find_map(|(path, header)| {
+                if header.cover_offset > 0 && header.cover_size > 0 {
+                    let data = std::fs::read(path).ok()?;
+                    extract_cover_image(&data).ok()
+                } else {
+                    None
+                }
+            });
+
+            let max_level = entries.iter()
+                .flat_map(|(_, h)| [h.level_easy, h.level_normal, h.level_hard])
+                .max()
+                .unwrap_or(0);
+
+            SongEntry {
+                title: first.1.title.clone(),
+                artist: first.1.artist.clone(),
+                noter: first.1.noter.clone(),
+                genre: first.1.genre.to_string(),
+                bpm: first.1.bpm,
+                duration_sec: (first.1.duration_hard as f32) / 1000.0,
+                keys: 7,
+                charts: entries.iter().map(|(path, header)| ChartEntry {
+                    path: path.clone(),
+                    title: header.title.clone(),
+                    artist: header.artist.clone(),
+                    noter: header.noter.clone(),
+                    genre: header.genre.to_string(),
+                    bpm: header.bpm,
+                    duration_sec: (header.duration_hard as f32) / 1000.0,
+                    note_counts: [header.note_count_easy, header.note_count_normal, header.note_count_hard],
+                    levels: [header.level_easy, header.level_normal, header.level_hard],
+                    keys: 7,
+                }).collect(),
+                cover,
+                max_level,
+            }
+        })
+        .collect();
+
     log::info!("Scanned {} songs from {} directories", songs.len(), dirs.len());
 }
 

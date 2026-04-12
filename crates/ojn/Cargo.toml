@@ -1,0 +1,10 @@
+[package]
+name = "open2jam-rs-ojn"
+version = "0.1.0"
+edition = "2021"
+description = "OJN chart file parser for O2Jam"
+
+[dependencies]
+encoding_rs = "0.8"
+thiserror = "1"
+log = "0.4"
