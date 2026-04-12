@@ -23,8 +23,7 @@ use crate::render::atlas::SkinAtlas;
 use crate::render::textured_renderer::{TexturedRenderer, BlendMode};
 use crate::render::hud::{HudLayout, render_hud_with_atlas};
 
-const SCROLL_SPEED: f64 = 1.0;
-const AUTO_PLAY: bool = true;
+const SCROLL_SPEED: f64 = 4.0;
 
 /// GPU resources that must be dropped before the device.
 /// This wrapper allows explicit drop ordering to prevent segfaults.
@@ -88,10 +87,12 @@ pub struct App {
     hybrid_clock_prev_delta: Option<f64>,
     /// Frame counter for clock validation warmup.
     hybrid_clock_frame_count: u64,
+    /// Whether auto-play mode is enabled (false = manual input mode).
+    auto_play: bool,
 }
 
 impl App {
-    pub fn new(ojn_path: Option<std::path::PathBuf>) -> Result<Self> {
+    pub fn new(ojn_path: Option<std::path::PathBuf>, auto_play: bool) -> Result<Self> {
         Ok(Self {
             ojn_path,
             event_loop: None,
@@ -105,6 +106,7 @@ impl App {
             hybrid_clock_prev: None,
             hybrid_clock_prev_delta: None,
             hybrid_clock_frame_count: 0,
+            auto_play,
         })
     }
 
@@ -174,39 +176,25 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 use winit::event::ElementState;
                 use winit::keyboard::{Key, NamedKey};
-                
-                // Map keys to lanes (SDF JKL; for lanes 1-7)
-                let lane_from_key = |logical_key: &Key| -> Option<usize> {
-                    match logical_key {
-                        Key::Character(c) => match c.as_str() {
-                            "s" | "S" => Some(0), // Lane 1
-                            "d" | "D" => Some(1), // Lane 2
-                            "f" | "F" => Some(2), // Lane 3
-                            "j" | "J" => Some(3), // Lane 4
-                            "k" | "K" => Some(4), // Lane 5
-                            "l" | "L" => Some(5), // Lane 6
-                            ";" => Some(6),       // Lane 7
-                            _ => None,
-                        },
-                        _ => None,
-                    }
-                };
+                use crate::resources::key_bindings::key_to_lane;
 
-                if let Some(lane) = lane_from_key(&event.logical_key) {
+                // Process lane key input during rendering and startup
+                // Use OS hardware timestamps for frame-quantisation-free input
+                if let Some(lane) = key_to_lane(&event.logical_key) {
                     if let Some(gs) = &mut self.game_state {
+                        let os_timestamp = std::time::Instant::now();
                         match event.state {
                             ElementState::Pressed => {
-                                // Judge the note/long note in this lane
-                                let judged = gs.handle_key_press(lane, 200.0); // 200ms judgment window
-                                if judged.is_some() {
-                                    info!("Note judged in lane {}", lane);
+                                // Ignore OS key repeat events — if the lane is already
+                                // pressed, this is a repeated press from holding the key.
+                                if !gs.pressed_lanes[lane] {
+                                    if let Some(audio_mgr) = &mut self.audio {
+                                        gs.handle_key_press(lane, os_timestamp, audio_mgr);
+                                    }
                                 }
                             }
                             ElementState::Released => {
-                                let release_judgment = gs.handle_key_release(lane);
-                                if let Some(j) = release_judgment {
-                                    info!("Long note released in lane {}, judgment: {:?}", lane, j);
-                                }
+                                gs.handle_key_release(lane, os_timestamp);
                             }
                         }
                     }
@@ -269,17 +257,18 @@ impl ApplicationHandler for App {
                 if self.start_load_game_state && self.loading_state.is_none() {
                     self.start_load_game_state = false;
                     if let Some(path) = self.ojn_path.clone() {
+                        let auto_play = self.auto_play;
                         info!("Starting background game state load from: {}", path.display());
                         let skin_res = self.render.as_ref()
                             .and_then(|r| r.gpu.as_ref())
                             .and_then(|g| g.skin.clone());
-                        
+
                         let (tx, rx) = mpsc::channel();
                         let thread_handle = thread::spawn(move || {
-                            let result = GameState::load(&path, SCROLL_SPEED, AUTO_PLAY, skin_res.as_ref());
+                            let result = GameState::load(&path, SCROLL_SPEED, auto_play, skin_res.as_ref());
                             let _ = tx.send(LoadingMessage::GameLoaded(result));
                         });
-                        
+
                         self.loading_state = Some(LoadingState {
                             receiver: rx,
                             _thread: thread_handle,
@@ -686,7 +675,7 @@ impl App {
                 .map(|t| now.duration_since(t).as_millis() as u64)
                 .unwrap_or(0);
 
-            let prev_combo = gs.stats.combo;
+            let _prev_combo = gs.stats.combo;
             let prev_jam_combo = gs.stats.jam_combo;
             let prev_max_combo = gs.stats.max_combo;
             gs.update(elapsed_ms);
@@ -702,19 +691,25 @@ impl App {
                 }
 
                 gs.spawn_notes();
-                gs.auto_judge_notes(); // Auto-play judgment
+                if let Some(audio_mgr) = &mut self.audio {
+                    gs.process_audio(audio_mgr);
+                    gs.process_judgments(audio_mgr);
+                }
                 gs.cleanup_notes();
                 gs.cleanup_effects(); // Remove expired effects
 
-                // Trigger combo counter animation when combo increases
-                if gs.stats.combo > prev_combo {
+                // Trigger combo counter animation when combo increases.
+                // Uses gs.prev_frame_combo (persisted across frames) instead of
+                // a local variable, because handle_key_press increments combo in
+                // the winit event handler BEFORE the render frame starts.
+                if gs.stats.combo > gs.prev_frame_combo {
                     gs.combo_counter.increment();
                     // Only show combo title/max combo when starting a new combo streak (combo was 0)
-                    if prev_combo == 0 {
+                    if gs.prev_frame_combo == 0 {
                         gs.show_combo_title();
                         gs.show_max_combo_counter();
                     }
-                } else if gs.stats.combo == 0 && prev_combo > 0 {
+                } else if gs.stats.combo == 0 && gs.prev_frame_combo > 0 {
                     gs.combo_counter.reset();
                 }
 
@@ -729,9 +724,10 @@ impl App {
                     gs.show_combo_title();
                 }
 
-                if let Some(audio_mgr) = &mut self.audio {
-                    gs.process_audio(audio_mgr);
+                // Update prev_frame_combo for the next frame's comparison
+                gs.prev_frame_combo = gs.stats.combo;
 
+                if let Some(audio_mgr) = &mut self.audio {
                     // ── Step 1: Hybrid Clock Validation ──
                     let base = Instant::now();
                     let (now_ms, delta_ms, monotonic) = audio_mgr.validate_hybrid_clock(
@@ -860,6 +856,8 @@ impl App {
             if let (Some(atlas), Some(skin_res)) = (&gpu.atlas, &gpu.skin) {
                 if let Some(skin) = skin_res.get_skin("o2jam") {
                     // Whitelist of static sprite IDs to render in the background pass.
+                    // NOTE: static_keyboard is NOT here — it must be drawn AFTER notes
+                    // so it occludes notes that have passed the judgment line.
                     const STATIC_SPRITES: &[&str] = &[
                         "bga10",
                         "note_bg",
@@ -870,7 +868,6 @@ impl App {
                         // "pill" is drawn by HUD based on pill_count
                         // "jam_bar" is drawn by HUD with fill clipping, not as static sprite
                         // "timebar" is drawn by HUD with progress-based fill clipping
-                        "static_keyboard",
                     ];
 
                     for entity in &skin.entities {
@@ -902,8 +899,11 @@ impl App {
         if let (Some(ref mut gpu), Some(gs)) = (&mut render.gpu, &self.game_state) {
             let render_time = gs.clock.render_time();
             let bpm = gs.clock.bpm() as f64;
-            let viewport_height = skin_h as f64;
             let judgment_line_y = skin_judgment_line_y as f64;
+            // measure_basis is the value that measure_size = 0.8 × this.
+            // In the original Java HiSpeed, this is hardcoded as 385 for a judgment_line of 480,
+            // which is approximately 0.8 × 480 = 384. We use judgment_line_y directly for accuracy.
+            let measure_basis = judgment_line_y;
 
             if let (Some(atlas), Some(_skin_res)) = (&gpu.atlas, &gpu.skin) {
                 // Only draw chart elements (measure marks, notes, long notes) after startup delay
@@ -932,7 +932,7 @@ impl App {
                                     ev.time_ms,
                                     &gs.timing,
                                     judgment_line_y,
-                                    viewport_height,
+                                    measure_basis,
                                     gs.scroll_speed,
                                 );
                                 // Only draw if within viewport (above top, below bottom skip)
@@ -946,20 +946,40 @@ impl App {
                         }
                     }
 
+                    // Draw PRESSED_NOTE lane effects BEFORE notes (behind them).
+                    // These are the lane light-up effects at y < judgment_line_y.
+                    for lane in 0..7 {
+                        if gs.pressed_lanes[lane] {
+                            for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_lane_effects[lane] {
+                                if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
+                                    .or_else(|| atlas.get_frame(sprite_id).copied())
+                                {
+                                    let sprite_w = pressed_frame.width as f32 * skin_scale_x;
+                                    let sprite_h = pressed_frame.height as f32 * skin_scale_y;
+                                    let x = offset_x + *x_pos as f32 * skin_scale_x;
+                                    let y = offset_y + *y_pos as f32 * skin_scale_y;
+                                    gpu.textured_renderer.draw_textured_quad(
+                                        x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    // Draw tap notes (layer 5 in original)
                     for note in &gs.active_notes {
                         let y = note_y_position_bpm_aware(
                             render_time,
                             note.target_time_ms,
                             &gs.timing,
                             judgment_line_y,
-                            viewport_height,
+                            measure_basis,
                             gs.scroll_speed,
                         );
 
                         let lane_prefab = &gs.note_prefabs.lanes[note.lane];
                         let lane_x = offset_x + lane_prefab.x as f32 * skin_scale_x;
 
-                        // Use the sprite ID from the skin XML prefab, fallback to lane-based default
                         let head_frame_name = lane_prefab.sprite_id.as_deref().unwrap_or_else(|| {
                             match note.lane {
                                 0 | 1 | 2 => "head_note_white",
@@ -968,13 +988,12 @@ impl App {
                             }
                         });
 
-                        // Use animated frame if available, fall back to static frame
                         let head_frame = atlas.get_frame_at_time(head_frame_name, render_time as f64)
                             .or_else(|| atlas.get_frame(head_frame_name).copied());
                         if let Some(head_frame) = head_frame {
                             let note_w = head_frame.width as f32 * skin_scale_x;
                             let note_h = head_frame.height as f32 * skin_scale_y;
-                            let x = lane_x; // Left edge aligned with receptor (entity.x is left edge in skin XML)
+                            let x = lane_x;
                             let y = offset_y + y as f32 * skin_scale_y - note_h / 2.0;
                             gpu.textured_renderer.draw_textured_quad(
                                 x, y, note_w, note_h, head_frame.uv, [1.0, 1.0, 1.0, 1.0],
@@ -982,7 +1001,7 @@ impl App {
                         }
                     }
 
-                    // Draw long notes dynamically from game state
+                    // Draw long notes (layer 5 in original, same as tap notes)
                     for long_note in &gs.active_long_notes {
                         let lane_prefab = &gs.note_prefabs.lanes[long_note.lane];
                         let lane_x = offset_x + lane_prefab.x as f32 * skin_scale_x;
@@ -993,7 +1012,7 @@ impl App {
                             long_note.head_time_ms,
                             &gs.timing,
                             judgment_line_y,
-                            viewport_height,
+                            measure_basis,
                             gs.scroll_speed,
                         );
 
@@ -1002,7 +1021,7 @@ impl App {
                             long_note.tail_time_ms,
                             &gs.timing,
                             judgment_line_y,
-                            viewport_height,
+                            measure_basis,
                             gs.scroll_speed,
                         );
 
@@ -1091,12 +1110,92 @@ impl App {
                             }
                         }
                     }
+
+                    // Draw static_keyboard AFTER notes so it occludes notes below the judgment line.
+                    // Matches original layer order: notes (5) → static_keyboard (6) → pressed keys (8).
+                    if let Some(skin_res) = &gpu.skin {
+                        if let Some(skin) = skin_res.get_skin("o2jam") {
+                            for entity in &skin.entities {
+                                let sprite_id = match &entity.sprite {
+                                    Some(s) => s, None => continue,
+                                };
+                                let first = sprite_id.split(',').next().unwrap_or(sprite_id).trim();
+                                if first != "static_keyboard" { continue; }
+                                if let Some(frame) = atlas.get_frame(first) {
+                                    let fw = frame.width as f32 * skin_scale_x;
+                                    let fh = frame.height as f32 * skin_scale_y;
+                                    let fx = offset_x + entity.x as f32 * skin_scale_x;
+                                    let fy = offset_y + entity.y as f32 * skin_scale_y;
+                                    gpu.textured_renderer.draw_textured_quad(
+                                        fx, fy, fw, fh, frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    // Draw PRESSED_NOTE overlays on top of static_keyboard (layer 8 in original).
+                    for lane in 0..7 {
+                        if gs.pressed_lanes[lane] {
+                            for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_keyboard_overlays[lane] {
+                                if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
+                                    .or_else(|| atlas.get_frame(sprite_id).copied())
+                                {
+                                    let sprite_w = pressed_frame.width as f32 * skin_scale_x;
+                                    let sprite_h = pressed_frame.height as f32 * skin_scale_y;
+                                    let x = offset_x + *x_pos as f32 * skin_scale_x;
+                                    let y = offset_y + *y_pos as f32 * skin_scale_y;
+                                    gpu.textured_renderer.draw_textured_quad(
+                                        x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
+                                    );
+                                }
+                            }
+                        }
+                    }
                 } // end if gs.is_rendering
+
+                // Draw PRESSED_NOTE overlays during startup (before gameplay begins)
+                // Draw both lane effects (behind) and keyboard overlays (on top)
+                if !gs.is_rendering {
+                    if let Some(atlas) = &gpu.atlas {
+                        for lane in 0..7 {
+                            if gs.pressed_lanes[lane] {
+                                // Lane effects (y < judgment_line)
+                                for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_lane_effects[lane] {
+                                    if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
+                                        .or_else(|| atlas.get_frame(sprite_id).copied())
+                                    {
+                                        let sprite_w = pressed_frame.width as f32 * skin_scale_x;
+                                        let sprite_h = pressed_frame.height as f32 * skin_scale_y;
+                                        let x = offset_x + *x_pos as f32 * skin_scale_x;
+                                        let y = offset_y + *y_pos as f32 * skin_scale_y;
+                                        gpu.textured_renderer.draw_textured_quad(
+                                            x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
+                                        );
+                                    }
+                                }
+                                // Keyboard key overlays
+                                for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_keyboard_overlays[lane] {
+                                    if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
+                                        .or_else(|| atlas.get_frame(sprite_id).copied())
+                                    {
+                                        let sprite_w = pressed_frame.width as f32 * skin_scale_x;
+                                        let sprite_h = pressed_frame.height as f32 * skin_scale_y;
+                                        let x = offset_x + *x_pos as f32 * skin_scale_x;
+                                        let y = offset_y + *y_pos as f32 * skin_scale_y;
+                                        gpu.textured_renderer.draw_textured_quad(
+                                            x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        // 8. Draw note click effects (EFFECT_CLICK for Cool/Good on tap notes)
-        // These are drawn centered on each lane at the judgment line position
+        // 8. Draw note click effects
         if let (Some(ref mut gpu), Some(gs)) = (&mut render.gpu, &self.game_state) {
             if gs.is_rendering {
                 if let Some(atlas) = &gpu.atlas {

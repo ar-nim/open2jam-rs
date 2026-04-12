@@ -31,6 +31,14 @@ pub struct NotePrefabs {
     pub judgment_line_y: u32,
     pub skin_width: u32,
     pub skin_height: u32,
+    /// PRESSED_NOTE lane effects: per lane, list of (sprite_id, x_position, y_position).
+    /// These are drawn BEFORE notes (behind them), typically at y < judgment_line_y.
+    /// E.g. pressed_note_lane_white at y=215.
+    pub pressed_lane_effects: [Vec<(String, i32, i32)>; NUM_LANES],
+    /// PRESSED_NOTE keyboard overlays: per lane, list of (sprite_id, x_position, y_position).
+    /// These are drawn AFTER static_keyboard (on top of it), typically at y >= judgment_line_y.
+    /// E.g. pressed_note_keyboard_white1 at y=487.
+    pub pressed_keyboard_overlays: [Vec<(String, i32, i32)>; NUM_LANES],
 }
 
 impl NotePrefabs {
@@ -54,25 +62,46 @@ impl NotePrefabs {
             judgment_line_y,
             skin_width,
             skin_height,
+            pressed_lane_effects: Default::default(),
+            pressed_keyboard_overlays: Default::default(),
         }
     }
 
     /// Build note prefabs from a parsed skin definition.
     ///
     /// Follows the Java pattern: NOTE_N entities create both regular and long note prefabs.
+    /// PRESSED_NOTE_N entities provide key press overlays with their sprite AND Y position.
     /// Long note sprites use `head`, `body`, `tail` attributes (falling back to `sprite`).
     pub fn from_skin(skin: &SkinDef) -> Self {
         let mut lanes: [Option<NotePrefab>; NUM_LANES] = Default::default();
+        let mut pressed_lane_effects: [Vec<(String, i32, i32)>; NUM_LANES] = Default::default();
+        let mut pressed_keyboard_overlays: [Vec<(String, i32, i32)>; NUM_LANES] = Default::default();
 
         for entity in &skin.entities {
+            // Check for PRESSED_NOTE_N and split by y position
+            if let Some(lane) = Self::extract_pressed_lane_from_entity(entity) {
+                if lane < NUM_LANES {
+                    if let Some(ref sprite) = entity.sprite {
+                        let entry = (sprite.clone(), entity.x, entity.y);
+                        // Lane effects: drawn BEFORE notes (y < judgment_line_y)
+                        // Keyboard overlays: drawn AFTER static_keyboard (y >= judgment_line_y)
+                        if entity.y < skin.judgment_line_y as i32 {
+                            pressed_lane_effects[lane].push(entry);
+                        } else {
+                            pressed_keyboard_overlays[lane].push(entry);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Regular NOTE_N or LONG_NOTE_N
             let lane_index = Self::extract_lane_from_note_entity(entity);
             if let Some(lane) = lane_index {
                 if lane >= NUM_LANES {
                     continue;
                 }
 
-                // Java pattern: sprite is the main note sprite
-                // head/body/tail are optional, falling back to sprite
                 let sprite_id = entity.sprite.clone();
                 let head_sprite = entity.head_sprite.clone().or_else(|| sprite_id.clone());
                 let body_sprite = entity.body_sprite.clone().or_else(|| sprite_id.clone());
@@ -85,12 +114,11 @@ impl NotePrefabs {
                     head_sprite,
                     body_sprite,
                     tail_sprite,
-                    is_long_note: true, // NOTE_N entities create long note prototypes in Java
+                    is_long_note: true,
                 });
             }
         }
 
-        // Fill in missing lanes with defaults
         for lane in 0..NUM_LANES {
             if lanes[lane].is_none() {
                 lanes[lane] = Some(NotePrefab {
@@ -105,7 +133,6 @@ impl NotePrefabs {
             }
         }
 
-        // Unwrap is safe because we filled all lanes above
         let lanes: [NotePrefab; NUM_LANES] = lanes.map(|p| p.unwrap());
 
         NotePrefabs {
@@ -113,6 +140,8 @@ impl NotePrefabs {
             judgment_line_y: skin.judgment_line_y,
             skin_width: skin.width,
             skin_height: skin.height,
+            pressed_lane_effects,
+            pressed_keyboard_overlays,
         }
     }
 
@@ -141,6 +170,19 @@ impl NotePrefabs {
             }
         }
 
+        None
+    }
+
+    /// Extract the lane index from a PRESSED_NOTE entity ID.
+    fn extract_pressed_lane_from_entity(entity: &EntityDef) -> Option<usize> {
+        let id = entity.id.as_ref()?;
+        if let Some(suffix) = id.strip_prefix("PRESSED_NOTE_") {
+            if let Ok(n) = suffix.parse::<usize>() {
+                if n >= 1 && n <= 7 {
+                    return Some(n - 1);
+                }
+            }
+        }
         None
     }
 }

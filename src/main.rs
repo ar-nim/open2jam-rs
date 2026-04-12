@@ -30,21 +30,40 @@ fn main() -> Result<()> {
     env_logger::init();
     info!("Starting open2jam-rs preview mode");
 
-    // Get OJN file path from command line args
-    let ojn_path = std::env::args()
-        .nth(1)
-        .map(PathBuf::from);
+    // Parse command line args: <path-to-ojn-file> [--autoplay]
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut ojn_path: Option<PathBuf> = None;
+    let mut auto_play = false; // Off by default — manual input mode
+
+    for arg in &args {
+        if arg == "--autoplay" {
+            auto_play = true;
+        } else if ojn_path.is_none() {
+            ojn_path = Some(PathBuf::from(arg));
+        }
+    }
 
     if let Some(path) = &ojn_path {
         info!("Will load chart from: {}", path.display());
+        if auto_play {
+            info!("Auto-play mode enabled (--autoplay flag)");
+        } else {
+            info!("Manual input mode (S D F Space J K L)");
+        }
     } else {
         eprintln!("Open2Jam Preview Mode");
         eprintln!("====================");
         eprintln!();
-        eprintln!("Usage: cargo run -- <path-to-ojn-file>");
+        eprintln!("Usage: cargo run -- <path-to-ojn-file> [--autoplay]");
         eprintln!();
-        eprintln!("Example:");
-        eprintln!("  cargo run -- /path/to/song.ojn");
+        eprintln!("Examples:");
+        eprintln!("  cargo run -- /path/to/song.ojn              # Manual input mode");
+        eprintln!("  cargo run -- /path/to/song.ojn --autoplay   # Auto-play mode");
+        eprintln!();
+        eprintln!("Default keys:");
+        eprintln!("  Lane 1-3: S D F");
+        eprintln!("  Lane 4:   Space");
+        eprintln!("  Lane 5-7: J K L");
         eprintln!();
         eprintln!("Requirements:");
         eprintln!("  - .ojn file (chart)");
@@ -52,7 +71,7 @@ fn main() -> Result<()> {
     }
 
     // Create and run the application
-    let app = App::new(ojn_path)?;
+    let app = App::new(ojn_path, auto_play)?;
     app.run()?;
 
     info!("Shutting down cleanly");

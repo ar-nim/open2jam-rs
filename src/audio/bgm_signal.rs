@@ -29,6 +29,10 @@ use crate::audio::manager::StereoFrame;
 ///
 /// Contains everything needed to play a BGM note at a precise moment:
 /// the audio samples, when to start (delay_samples), and how loud (volume/pan).
+///
+/// `source_id` is used for deduplication: when a keysound is pushed for the same
+/// lane while the previous one is still playing, the duplicate is silently skipped
+/// to prevent phase cancellation from overlapping identical samples.
 #[derive(Debug, Clone)]
 pub struct BgmCommand {
     /// The audio samples to play.
@@ -41,6 +45,10 @@ pub struct BgmCommand {
     pub volume: f32,
     /// Pan position (-1.0 = full left, 0.0 = center, +1.0 = full right).
     pub pan: f32,
+    /// Source identifier for deduplication (e.g., lane index for keysounds).
+    /// When a command with the same source_id arrives while one is still active,
+    /// the new one replaces the old instead of accumulating (like a voice steal).
+    pub source_id: u64,
 }
 
 /// A signal that outputs silence for `delay` samples, then plays the inner signal.
@@ -56,6 +64,8 @@ pub struct ScheduledSignal {
     volume: f32,
     /// Pan position used to adjust left/right balance.
     pan: f32,
+    /// Source identifier for deduplication.
+    source_id: u64,
 }
 
 impl ScheduledSignal {
@@ -67,12 +77,14 @@ impl ScheduledSignal {
     /// * `delay_samples` - Number of silence samples before playback starts
     /// * `volume` - Volume gain (0.0 to 1.0+)
     /// * `pan` - Pan position (-1.0 to +1.0)
-    pub fn new(frames: Arc<Frames<StereoFrame>>, delay_samples: u32, volume: f32, pan: f32) -> Self {
+    /// * `source_id` - Source identifier for deduplication (e.g., lane index)
+    pub fn new(frames: Arc<Frames<StereoFrame>>, delay_samples: u32, volume: f32, pan: f32, source_id: u64) -> Self {
         Self {
             inner: FramesSignal::from(frames),
             delay: delay_samples,
             volume,
             pan,
+            source_id,
         }
     }
 
@@ -180,10 +192,18 @@ impl BgmSignalQueue {
     ///
     /// This is called from the audio thread's `sample()` method to pick up
     /// any new BGM commands that the main thread has pushed.
+    ///
+    /// **Deduplication**: if a command arrives with a `source_id` that matches an
+    /// already-active signal, the old signal is removed and the new one takes its
+    /// place. This prevents phase cancellation from overlapping identical samples
+    /// (e.g. rapid key presses on the same lane).
     fn drain_commands(&mut self) {
         if let Some(consumer) = &mut self.consumer {
             while let Ok(cmd) = consumer.pop() {
-                let signal = ScheduledSignal::new(cmd.frames, cmd.delay_samples, cmd.volume, cmd.pan);
+                // Remove any existing signal with the same source_id (voice steal)
+                self.active_signals.retain(|s| s.source_id != cmd.source_id);
+
+                let signal = ScheduledSignal::new(cmd.frames, cmd.delay_samples, cmd.volume, cmd.pan, cmd.source_id);
                 self.active_signals.push(signal);
             }
         }
@@ -253,7 +273,7 @@ mod tests {
     #[test]
     fn test_scheduled_signal_initial_silence() {
         let frames = Frames::from_slice(44100, &[[0.5f32, 0.5f32]; 100]);
-        let mut signal = ScheduledSignal::new(frames, 10, 1.0, 0.0);
+        let mut signal = ScheduledSignal::new(frames, 10, 1.0, 0.0, 1);
 
         // First 10 samples should be silence
         let mut out = vec![[0.0f32; 2]; 10];
@@ -272,7 +292,7 @@ mod tests {
     #[test]
     fn test_scheduled_signal_pan_left() {
         let frames = Frames::from_slice(44100, &[[1.0f32, 1.0f32]; 10]);
-        let mut signal = ScheduledSignal::new(frames, 0, 1.0, -1.0); // Full left
+        let mut signal = ScheduledSignal::new(frames, 0, 1.0, -1.0, 1); // Full left
 
         let mut out = vec![[0.0f32; 2]; 10];
         signal.sample(1.0 / 44100.0, &mut out);
@@ -284,7 +304,7 @@ mod tests {
     #[test]
     fn test_scheduled_signal_pan_right() {
         let frames = Frames::from_slice(44100, &[[1.0f32, 1.0f32]; 10]);
-        let mut signal = ScheduledSignal::new(frames, 0, 1.0, 1.0); // Full right
+        let mut signal = ScheduledSignal::new(frames, 0, 1.0, 1.0, 1); // Full right
 
         let mut out = vec![[0.0f32; 2]; 10];
         signal.sample(1.0 / 44100.0, &mut out);
@@ -309,6 +329,7 @@ mod tests {
             delay_samples: 0,
             volume: 1.0,
             pan: 0.0,
+            source_id: 1,
         })
         .unwrap();
 
@@ -317,6 +338,7 @@ mod tests {
             delay_samples: 0,
             volume: 1.0,
             pan: 0.0,
+            source_id: 2,
         })
         .unwrap();
 
@@ -330,5 +352,44 @@ mod tests {
 
         // Both signals should be mixed (both channels active)
         assert!(out.iter().all(|f| f[0] == 0.5 && f[1] == 0.5));
+    }
+
+    #[test]
+    fn test_bgm_signal_queue_dedup_same_source() {
+        use rtrb::RingBuffer;
+
+        let (mut prod, cons) = RingBuffer::new(1024);
+
+        // Push two signals with the SAME source_id
+        let frames1 = Frames::from_slice(44100, &[[1.0f32, 1.0f32]; 100]);
+        let frames2 = Frames::from_slice(44100, &[[0.5f32, 0.5f32]; 100]);
+
+        prod.push(BgmCommand {
+            frames: frames1,
+            delay_samples: 0,
+            volume: 1.0,
+            pan: 0.0,
+            source_id: 42,
+        })
+        .unwrap();
+
+        prod.push(BgmCommand {
+            frames: frames2,
+            delay_samples: 0,
+            volume: 1.0,
+            pan: 0.0,
+            source_id: 42, // Same source_id — should replace the first
+        })
+        .unwrap();
+
+        let mut queue = BgmSignalQueue::new();
+        queue.set_consumer(cons);
+
+        let mut out = vec![[0.0f32; 2]; 10];
+        queue.sample(1.0 / 44100.0, &mut out);
+
+        // Only the second signal should be active (voice steal)
+        assert!(out.iter().all(|f| f[0] == 0.5 && f[1] == 0.5),
+            "Only the newer signal with same source_id should play, got {:?}", &out[..3]);
     }
 }
