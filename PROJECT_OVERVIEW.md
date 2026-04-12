@@ -19,7 +19,7 @@
 
 A Rust port of [open2jam-modern](../open2jam-modern) — a community reimplementation of the **O2Jam** rhythm game (2002 Korean arcade-style music game).
 
-The project is currently in **preview mode**: no song selection UI, no menus. You launch it with a path to an `.ojn` chart file and it plays in auto-play mode with full judgment, effects, and scoring.
+The project is in **preview mode**: no song selection UI, no menus. You launch it with a path to an `.ojn` chart file. By default it runs in **manual input mode** (keyboard-based). Pass `--autoplay` for auto-play.
 
 ## File Structure
 
@@ -42,6 +42,7 @@ open2jam-rs/
 │   │   │                      # stream created paused → play() starts after startup delay
 │   │   ├── bgm_signal.rs      # BgmSignalQueue + ScheduledSignal — custom oddio::Signal
 │   │   │                      # that mixes multiple concurrent BGM notes by accumulation
+│   │   │                      # with source_id deduplication (voice-steal for same-lane keysounds)
 │   │   ├── cache.rs           # Decoded sample cache (SoundCache)
 │   │   ├── chart_audio.rs     # Chart-to-audio linkage
 │   │   └── trigger.rs         # Time-driven audio trigger system (legacy, kept for reference)
@@ -52,12 +53,14 @@ open2jam-rs/
 │   │   ├── timing_data.rs     # Velocity tree (TimingData) — BPM-aware beat calculation
 │   │   │                      # matches Java's TimingData/VelocityChange with getBeat()
 │   │   ├── judgment.rs        # Hit detection (COOL/GOOD/BAD/MISS, tap + release)
+│   │   │                      # 192 TPB system — judgment windows scale with BPM
 │   │   └── modifiers.rs       # Game modifiers (Hi-Speed, etc.)
 │   │
 │   ├── parsing/               # File format parsers
 │   │   ├── mod.rs             # Module exports
 │   │   ├── ojn.rs             # OJN binary chart parser (.ojn) — notes, BPM changes,
 │   │   │                      # measure markers, time signature (channel 0), sample IDs
+│   │   │                      # HOLD/RELEASE pairing for long note end_time_ms
 │   │   ├── ojm.rs             # OJM binary audio parser (.ojm) — sample extraction
 │   │   ├── chart.rs           # Chart data model (TimedEvent, NoteEvent, BpmChangeEvent)
 │   │   └── xml.rs             # Skin XML parser (resources.xml) — sprites, entities, effects
@@ -73,7 +76,7 @@ open2jam-rs/
 │   ├── resources/             # Shared resource types
 │   │   ├── mod.rs             # Module exports
 │   │   ├── clock.rs           # Game clock — game_time vs render_time, BPM tracking, interpolation
-│   │   ├── key_bindings.rs    # Keyboard configuration (S D F J K L ;)
+│   │   ├── key_bindings.rs    # Keyboard configuration (S D F Space J K L)
 │   │   ├── skin_assets.rs     # Skin asset loading
 │   │   ├── chart_model.rs     # Chart data types
 │   │   ├── state.rs           # State management utilities
@@ -82,6 +85,7 @@ open2jam-rs/
 │   └── skin/                  # Skin system
 │       ├── mod.rs             # Module exports
 │       └── prefab.rs          # Note prefab definitions per lane (x, sprite IDs, long note support)
+│                              # PRESSED_NOTE parsing (lane effects + keyboard overlays)
 ```
 
 ## Architecture
@@ -110,6 +114,7 @@ main() → App::new() → App::run()
                   │     ├─ BgmSignalQueue → single oddio::Signal in mixer
                   │     │     ├─ Receives BgmCommand via rtrb SPSC queue (lock-free)
                   │     │     ├─ Drains commands in sample() callback
+                  │     │     ├─ source_id dedup: same source steals voice (replaces old signal)
                   │     │     └─ Mixes all active notes by ACCUMULATION (not overwrite)
                   │     ├─ SoundCache → decoded OGG/WAV buffers
                   │     └─ ScheduledSignal → per-note wrapper with delay_samples
@@ -122,10 +127,12 @@ main() → App::new() → App::run()
                         ├─ active_long_notes → long notes (head/body/tail, holding state)
                         ├─ pending_judgments → visual judgment popups (pop-in animation)
                         ├─ combo_counter → combo wobble animation state
-                        ├─ stats → life, score, combo, judgment counts
+                        ├─ stats → life, score, combo, pill_count, jam_counter, judgment counts
                         ├─ note_click_effects → EFFECT_CLICK sprites (COOL/GOOD)
                         ├─ long_flare_effects → EFFECT_LONGFLARE sprites (additive glow)
-                        └─ auto_judge_notes() / handle_key_press() / handle_key_release()
+                        ├─ handle_key_press() → immediate judgment + keysound
+                        ├─ handle_key_release() → kill flare, stop holding
+                        └─ process_judgments() → miss detection + long note tail release
 ```
 
 ## Core Game Loop
@@ -133,13 +140,13 @@ main() → App::new() → App::run()
 1. **Delta Time** — measured per frame (rounded to prevent cumulative drift)
 2. **Game State Update** — advance clock by delta_ms (startup delay phase → gameplay)
 3. **Note Spawning** — spawn notes within lead-time window from chart events (2x travel time + 500ms)
-4. **Auto-Judge / Input** — auto-play mode judges all notes as COOL; manual mode processes keyboard input
-5. **Judgment Processing** — COOL/GOOD triggers effects (click/flare), records stats, updates combo
-6. **Long Note Tail Judgment** — auto-release when tail passes judgment line
+4. **Auto-Judge / Input** — auto-play mode judges all notes as COOL; manual mode processes keyboard input via `handle_key_press()`
+5. **Judgment Processing** — COOL/GOOD triggers effects (click/flare), records stats, updates combo, pill system
+6. **Long Note Tail Judgment** — auto-release when tail passes judgment line (runs in BOTH modes)
 7. **BGM Lookahead Scheduling** — scan chart 500ms ahead, push BgmCommand to rtrb queue with sample-accurate delay
 8. **Audio Callback** — cpal drains rtrb, creates ScheduledSignal, BgmSignalQueue mixes all active notes
-9. **Effect Cleanup** — remove expired click/flare effects (duration-based lifecycle)
-10. **Render** — draw skin background → judgment line → notes → effects → HUD (layered order)
+9. **Effect Cleanup** — remove expired click/flare effects (duration-based or killed lifecycle)
+10. **Render** — draw skin background → lane effects → notes → static_keyboard → pressed overlays → long notes → effects → HUD (layered order)
 
 ## The Scroll Formula
 
@@ -147,7 +154,7 @@ main() → App::new() → App::run()
 Notes scroll based on **BPM**, not fixed speed:
 
 ```
-distance_px = speed × beats_remaining × (0.8 × viewport_height) / 4
+distance_px = speed × beats_remaining × (0.8 × judgment_line_y) / 4
 beats_remaining = (target_time_ms - render_time_ms) / (60000 / BPM)
 ```
 
@@ -156,16 +163,18 @@ Uses a velocity tree (`TimingData`) that stores BPM change points with cumulativ
 
 ```
 beats = timing.getBeat(target_time) - timing.getBeat(render_time)
-distance_px = speed × beats × (0.8 × viewport_height) / 4
+distance_px = speed × beats × (0.8 × judgment_line_y) / 4
 ```
 
 `getBeat()` uses binary search to find the correct BPM segment and correctly accumulates beats across all intermediate BPM changes. This ensures scroll speed changes smoothly when BPM shifts mid-chart.
+
+**measure_size = 0.8 × judgment_line_y = 0.8 × 480 = 384** — matches Java HiSpeed's hardcoded `measureSize = 385` (the +1 is the original game's 1px overlap tweak).
 
 **Higher BPM = faster scroll.** A note at 200 BPM moves twice as fast as one at 100 BPM.
 
 The travel time determines spawn lead:
 ```
-travel_time_ms = (4 × viewport_height / (speed × measure_size)) × 60000 / BPM
+travel_time_ms = (4 × judgment_line_y / (speed × measure_size)) × 60000 / BPM
 spawn_lead = 2 × travel_time + 500ms   // 2x ensures notes appear at very top even at low BPM/1x speed
 ```
 
@@ -191,17 +200,24 @@ Main Thread (per frame):                     Audio Thread (cpal callback):
       ms_to_samples(note_time - now)            a. Sample into temp buffer
    b. Push BgmCommand {                         b. ACCUMULATE into output buffer
       frames, delay_samples,                     (add samples, don't overwrite)
-      volume, pan } to rtrb producer          4. Remove finished signals
-3. Continue rendering                        5. Mixer writes accumulated output
+      volume, pan, source_id }                   c. source_id match → STEAL VOICE
+      to rtrb producer                           (replace old signal)
+3. Continue rendering                        4. Remove finished signals
+                                             5. Mixer writes accumulated output
 ```
 
 **Key insight:** BgmSignalQueue is a SINGLE `oddio::Signal` that manages multiple notes internally. The mixer sees it as one entity. Inside `sample()`, it mixes all active notes by **accumulation**, preventing the overwrite bug where simultaneous BGM notes would erase each other.
 
+**source_id deduplication:** When a BgmCommand arrives with a source_id matching an already-active signal, the old signal is removed (voice-steal) and the new one takes its place. This prevents phase cancellation from overlapping identical samples in dense streams.
+
 ## Key Input
 
-Default lane bindings: **S D F J K L ;** for lanes 1–7.
+Default lane bindings: **S D F Space J K L** for lanes 1–7.
 
-Key press triggers judgment (tap or long note head). Key release evaluates long note tail timing.
+- **Key press** → `handle_key_press()` → finds next unjudged note in lane → judges if within ±bad_window → plays keysound → shows effect
+- **Key release** → `handle_key_release()` → kills long note flare, stops holding
+- **OS key repeat** is suppressed: if `pressed_lanes[lane]` is already true, the press is ignored (holding ≠ pressing)
+- Keysound only fires when the press is within the judgment window (matching O2Jam: pressing too early/late produces no sound)
 
 ## Skin System
 
@@ -210,6 +226,9 @@ Key press triggers judgment (tap or long note head). Key release evaluates long 
 - Notes use per-lane **prefabs** with customizable head/body/tail sprites
 - The base skin is 800×600, scaled to fit the window with letterboxing
 - **Effect sprites** (EFFECT_CLICK, EFFECT_LONGFLARE) extracted from skin XML with frame count and speed
+- **PRESSED_NOTE entities** split into two groups:
+  - **Lane effects** (y < judgment_line_y, e.g., y=215): drawn BEFORE notes, behind them
+  - **Keyboard overlays** (y >= judgment_line_y, e.g., y=487): drawn AFTER static_keyboard, on top
 - **Animation frame speed** parsed as FPS from XML (e.g., `framespeed="60"` → 60fps → 16.67ms/frame)
 
 ## Entity State Machine (Notes)
@@ -220,30 +239,36 @@ Tap Note:
   NOT_JUDGED → (missed/passed)             → MISSED → cleanup
 
 Long Note:
-  NOT_JUDGED → (head hit)     → JUDGED + HOLDING
-  HOLDING    → (key release)  → RELEASED → tail judgment → cleanup
-  HOLDING    → (tail reached) → auto-release judgment → cleanup
+  NOT_JUDGED → (head hit)     → JUDGED + HOLDING + flare triggered
+  HOLDING    → (key release)  → RELEASED → tail judgment → flare killed → cleanup
+  HOLDING    → (tail reached) → auto-release judgment → flare killed → cleanup
   NOT_JUDGED → (head missed)  → MISSED → cleanup
 ```
 
 ## Judgment System
 
-### Tap Note Judgment
-- **COOL**: ±~30ms window (BPM-dependent), +2 life, 200 + combo×10 score, triggers EFFECT_CLICK
-- **GOOD**: ±~80ms window, +1 life, 100 score, triggers EFFECT_CLICK
-- **BAD**: ±~130ms window, 0 life (Normal: +1), 0 score, breaks combo
-- **MISS**: outside all windows, -10 life, 0 score, breaks combo
+### Tap Note Judgment (192 TPB — windows scale with BPM)
+- **COOL**: ±6/192 measures ≈ ±50ms @ 150 BPM, +2 life, 200 + combo×10 score, triggers EFFECT_CLICK
+- **GOOD**: ±18/192 measures ≈ ±150ms @ 150 BPM, +1 life, 100 + combo×5 score, triggers EFFECT_CLICK
+- **BAD**: ±25/192 measures ≈ ±208ms @ 150 BPM, -5 life (Hard), 4 score, breaks combo
+- **MISS**: outside all windows, -30 life (Hard), -10 score, breaks combo
 
 ### Long Note Release Judgment
 - Evaluated against tail time when player releases key or tail passes judgment line
-- Same timing windows as tap notes
-- Head judgment propagates: if head was BAD/MISS, release auto-MISS
+- ±24/192 measures for BAD window (slightly stricter than tap notes)
+- Same scoring as tap notes
+
+### Pill (Buffer) System
+- Every **15 consecutive Cools** awards a pill/buffer (max 5 stored)
+- When a **Bad** is judged and pills > 0: converts to Cool and consumes one pill
+- Good/Miss resets the consecutive Cools counter
 
 ### Combo System
 - COOL/GOOD increases combo counter
 - BAD/MISS resets combo to 0
 - Combo counter has wobble animation (pop-in + slide)
 - Jam counter (combo milestone) shows briefly on certain thresholds
+- Jam combo: every 100 jam_counter = 1 jam combo (multiplier for scoring)
 
 ## Visual Effects System
 
@@ -261,17 +286,16 @@ Long Note:
 - **Sprite**: from skin XML (e.g., `longflare`), typically 15 frames
 - **Position**: centered on note X, top-aligned at skin XML entity Y (e.g., y="460")
 - **Animation**: loops continuously through frames until duration expires
-- **Duration**:
-  - **Autoplay**: equals actual hold time (`tail_time - head_time`)
-  - **Manual play**: uses sprite-based duration (frame_count × frame_speed_ms)
+- **Duration**: sprite-based (frame_count × frame_speed_ms)
 - **Blend mode**: **additive blending** (GL_SRC_ALPHA, GL_DST_ALPHA) for vibrant glow effect
-- **Cleanup**: removed when `is_active()` returns false, or killed on key release / miss
+- **Cleanup**: killed on key release, tail pass, or miss — removed from active list
 
 ### PendingJudgment (Judgment Popup)
 - **Triggered on**: any judgment (COOL/GOOD/BAD/MISS)
 - **Position**: per-lane, from skin XML HUD layout
 - **Animation**: pop-in (50%→100% scale over 100ms), stays full size for 750ms
 - **Behavior**: instant-replace — new judgment kills previous one immediately
+- **Pill conversion**: when a pill converts Bad → Cool, the popup shows "COOL" (the effective judgment)
 
 ## Hybrid Phase-Locked Clock
 
@@ -291,6 +315,7 @@ Main Thread (rendering):
 - `samples_played` never resets (except on `stream.play()`) — only ever increases
 - `T_visual` provides continuous interpolation between discrete audio callback steps
 - At 144Hz+ rendering, this eliminates micro-stutter while staying phase-locked to audio
+- cpal buffer: 128 samples (~2.9ms latency at 44.1kHz)
 
 ## Current Status — What Works
 
@@ -299,44 +324,54 @@ Main Thread (rendering):
 - [x] OJM audio decoding (WAV + OGG samples)
 - [x] Texture atlas building from skin XML sprites
 - [x] Beat-based note scrolling (BPM-dependent, velocity tree for BPM changes)
-- [x] Note spawning & cleanup (lead-time calculation, 2x travel time buffer)
+- [x] Note spawning & cleanup (lead-time calculation, bad_window + 100ms safety margin)
 - [x] Auto-play mode (auto-judge all notes as COOL)
-- [x] Long note rendering (head/body/tail with stretchable body)
-- [x] Keyboard input → judgment (press + release)
-- [x] Tap note judgment (COOL/GOOD/BAD/MISS with timing windows)
+- [x] Long note rendering (head/body/tail with stretchable body, head-clamped at judgment line)
+- [x] Manual input mode (keyboard → immediate judgment → keysound + effects)
+- [x] Tap note judgment (COOL/GOOD/BAD/MISS with 192 TPB timing windows)
 - [x] Long note head + tail judgment (hold + release evaluation)
+- [x] Pill/buffer system (15 consecutive Cools → pill, converts Bad → Cool)
+- [x] OS key repeat suppression (holding ≠ pressing)
 - [x] EFFECT_CLICK rendering (positioned on judgment line, correct speed, alpha blending)
-- [x] EFFECT_LONGFLARE rendering (positioned at skin Y, additive blending, dynamic duration)
+- [x] EFFECT_LONGFLARE rendering (positioned at skin Y, additive blending, killed on release/miss)
+- [x] PRESSED_NOTE rendering (lane effects behind notes, keyboard overlays on top)
 - [x] Animation looping (modulo-based, matches Java AnimatedEntity)
-- [x] Effect lifecycle (duration-based cleanup)
+- [x] Effect lifecycle (duration-based or killed)
 - [x] Combo counter with wobble animation
 - [x] Jam counter (combo milestone popup)
-- [x] Score calculation (200 + combo×10 for COOL, 100 for GOOD)
-- [x] Life / health system (HP gain/loss per judgment)
-- [x] HUD rendering (score, combo, lifebar, timer, judgment popups)
+- [x] Score calculation (200 + combo×10 for COOL, 100 + combo×5 for GOOD)
+- [x] Life / health system (HP gain/loss per judgment, Hard difficulty)
+- [x] HUD rendering (score, combo, lifebar, timer, judgment popups, timebar)
 - [x] Audio trigger system (time-driven sample playback)
 - [x] Startup delay animation (2000ms lifebar fill)
 - [x] Dual blend mode pipelines (alpha + additive)
-- [x] **BGM signal queue with proper mixing** — multiple concurrent notes mix by accumulation (rtrb + oddio::Signal)
+- [x] **BGM signal queue with proper mixing** — multiple concurrent notes mix by accumulation
+- [x] **source_id deduplication** — same-lane keysounds steal voice instead of overlapping
 - [x] **Fractional measure size (channel 0)** — time signature events parsed and applied per measure
-- [x] **BPM-aware velocity tree** — scroll correctly accounts for mid-chart BPM changes (TimingData)
+- [x] **BPM-aware velocity tree** — scroll correctly accounts for mid-chart BPM changes
 - [x] **Audio clock synchronization** — stream starts paused, play() resets counters after startup delay
 - [x] **Sample-accurate BGM scheduling** — lookahead scheduler pushes commands with delay_samples
 - [x] **CPU usage monitor** — callback timing (avg/max/budget logged every 10s)
+- [x] **1-based measure conversion** — OJN 0-based measures converted to game's 1-based system
+- [x] **Correct scroll measure_size** — 0.8 × judgment_line_y (384) matches Java HiSpeed (385)
+- [x] **Correct z-order** — notes → static_keyboard → pressed overlays (original layer order)
 - [ ] Song selection menu
 - [ ] Skin selection UI
 - [ ] Audio latency compensation (manual offset adjustment)
 - [ ] Stop channels (chart events that pause audio)
 - [ ] Hi-Speed modifier (UI + scroll adjustment)
-- [ ] Note judgment windows (COOL/GOOD/BAD/MISS text popups — partially done)
+- [ ] Note judgment text popups (COOL/GOOD/BAD/MISS text from skin — sprites only, no text yet)
 - [ ] Max combo counter display
-- [ ] Manual input mode (keyboard → judgment)
+- [ ] Difficulty selection (Easy/Normal/Hard)
 
 ## How to Run
 
 ```bash
-# Basic usage — auto-play a chart
+# Manual input mode (default) — play with keyboard
 cargo run -- /path/to/song.ojn
+
+# Auto-play mode — watch the game play itself
+cargo run -- /path/to/song.ojn --autoplay
 
 # Requirements:
 #   - .ojn file (chart)
@@ -368,10 +403,31 @@ cargo run -- /path/to/song.ojn
 2. **No singletons** — dependency injection via explicit state
 3. **Separate time authorities** — audio hardware for playback, hybrid clock for rendering
 4. **Skin XML is the authority for visuals** — layout, dimensions, sprite mappings
-5. **Match Java open2jam behavior** — judgment logic, effect lifecycle, animation looping, blend modes
+5. **Match Java open2jam behavior** — judgment logic, effect lifecycle, animation looping, blend modes, layer order
 6. **Real-time safe audio** — no allocations, locks, or panics in cpal callback
+7. **Event-driven input** — judgment fires immediately on key press (not buffered for later matching)
 
 ## Key Implementation Details
+
+### 192 TPB Judgment System
+All judgment windows are defined as fractions of a measure (192 ticks per beat, 4 beats per measure):
+
+```
+COOL_MEASURES      = 6/192   ≈ ±0.03125 measures
+GOOD_MEASURES      = 18/192  ≈ ±0.09375 measures
+BAD_MEASURES_TAP   = 25/192  ≈ ±0.13021 measures
+BAD_MEASURES_RELEASE = 24/192 ≈ ±0.125 measures
+```
+
+Converted to milliseconds at the current BPM:
+```
+window_ms = measures × 4 × 60000 / BPM
+```
+
+At 150 BPM: COOL ≈ ±50ms, GOOD ≈ ±150ms, BAD ≈ ±208ms.
+At 90 BPM: COOL ≈ ±83ms, GOOD ≈ ±250ms, BAD ≈ ±347ms.
+
+This **BPM elasticity** means slow songs have wider windows (more forgiving), fast songs have narrower windows (stricter).
 
 ### Frame Speed Parsing
 XML `framespeed` attribute is in **FPS**, not milliseconds. Conversion:
@@ -415,9 +471,21 @@ Where `240000 = 4 * 60 * 1000` (4 beats × 60 seconds × 1000ms).
 5. `play()` resets `samples_played` to 0 (compensates ALSA starting callback early) → calls `stream.play()` → `active = true`
 6. BGM scheduling only begins after `is_active() == true` (prevents stale delay values)
 
+### Song End Timing
+The game ends when `game_time >= end_time_ms`, where:
+```
+end_position = ceil(max(measure + position across all events)) + 1
+end_time_ms  = ((end_position - refPosition) / bpm × 240000) + refTime
+```
+
+OJN measures are stored 0-based in the file, but the game uses 1-based coordinates (measure 1 = game clock 0:00). The `+1` is added to each measure before computing the formula, matching the C++ `block.Measure + 1` conversion.
+
 ### CPU Usage Monitor
 Callback timing is tracked atomically in every cpal callback:
 - `max_callback_us`: peak duration since startup (compare-exchange update)
 - `avg_callback_us`: exponential moving average (alpha = 0.01)
 - Logged every ~10 seconds on the main thread (zero impact on audio thread)
-- Budget at 256 samples / 44.1kHz ≈ 5805µs; healthy is <20%, danger is >50%
+- Budget at 128 samples / 44.1kHz ≈ 2902µs; healthy is <20%, danger is >50%
+
+### cleanup_notes Safety Margin
+Notes are kept for `bad_window + 100ms` after passing the judgment line. This ensures that late key presses (up to ~340ms after the note target at 130 BPM) can still find and judge the note. Previously notes were removed the instant they passed the judgment line, causing the "2nd note not judged" bug.
