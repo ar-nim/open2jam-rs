@@ -1,0 +1,30 @@
+[package]
+name = "open2jam-rs"
+version = "0.1.0"
+edition = "2021"
+description = "O2Jam rhythm game port in Rust with wgpu + oddio"
+
+[dependencies]
+open2jam-rs-core = { path = "../core" }
+wgpu = "29.0.1"
+winit = { version = "0.30.13", features = ["rwh_06"] }
+raw-window-handle = "0.6"
+oddio = "0.7.4"
+cpal = "0.17.3"
+pollster = "0.3"
+mint = "0.5"
+bytemuck = { version = "1.25", features = ["derive"] }
+lewton = "0.10"
+hound = "3.5"
+encoding_rs = "0.8"
+quick-xml = "0.38"
+thiserror = "1"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rtrb = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = true

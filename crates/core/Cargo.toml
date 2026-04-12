@@ -1,0 +1,12 @@
+[package]
+name = "open2jam-rs-core"
+version = "0.1.0"
+edition = "2021"
+description = "Shared types for open2jam-rs: config, key bindings, game options"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+thiserror = "1"
+dirs = "5"
