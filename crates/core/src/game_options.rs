@@ -34,9 +34,9 @@ impl std::fmt::Display for SpeedType {
 #[serde(rename_all = "kebab-case")]
 pub enum ChannelMod {
     None,
-    Mirror,
-    Shuffle,
     Random,
+    Panic,
+    Mirror,
 }
 
 impl Default for ChannelMod {
@@ -49,9 +49,9 @@ impl std::fmt::Display for ChannelMod {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::None => write!(f, "None"),
-            Self::Mirror => write!(f, "Mirror"),
-            Self::Shuffle => write!(f, "Shuffle"),
             Self::Random => write!(f, "Random"),
+            Self::Panic => write!(f, "Panic"),
+            Self::Mirror => write!(f, "Mirror"),
         }
     }
 }

@@ -59,9 +59,9 @@ pub fn ui_modifiers(ui: &mut egui::Ui, opts: &mut GameOptions) {
             .selected_text(opts.channel_modifier.to_string())
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut opts.channel_modifier, ChannelMod::None, "None");
-                ui.selectable_value(&mut opts.channel_modifier, ChannelMod::Mirror, "Mirror");
-                ui.selectable_value(&mut opts.channel_modifier, ChannelMod::Shuffle, "Shuffle");
                 ui.selectable_value(&mut opts.channel_modifier, ChannelMod::Random, "Random");
+                ui.selectable_value(&mut opts.channel_modifier, ChannelMod::Panic, "Panic");
+                ui.selectable_value(&mut opts.channel_modifier, ChannelMod::Mirror, "Mirror");
             });
     });
 

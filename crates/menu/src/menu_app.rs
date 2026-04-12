@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use open2jam_rs_core::Config;
+use open2jam_rs_core::game_options::{ChannelMod, VisibilityMod};
 use crate::ojn_scanner::{OjnScanner, SongEntry};
 use crate::panels::modifiers::ui_modifiers;
 use crate::panels::display_config::ui_display_config;
@@ -16,6 +17,16 @@ enum MenuTab {
     Advanced = 2,
 }
 
+/// Sort column for the song list table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SongSortColumn {
+    #[default]
+    Name,
+    Level,
+    Bpm,
+    Genre,
+}
+
 /// The main menu application, implementing eframe::App.
 pub struct MenuApp {
     config: Config,
@@ -25,10 +36,10 @@ pub struct MenuApp {
     search_query: String,
     scan_dirs: Vec<String>,
     active_tab: MenuTab,
-    /// Whether to save config on next update (debounced)
     config_dirty: bool,
-    /// Last time config was saved (for debounce)
     last_save_time: std::time::Instant,
+    sort_column: SongSortColumn,
+    sort_ascending: bool,
 }
 
 impl MenuApp {
@@ -49,18 +60,14 @@ impl MenuApp {
             active_tab: MenuTab::MusicSelect,
             config_dirty: false,
             last_save_time: std::time::Instant::now(),
+            sort_column: SongSortColumn::default(),
+            sort_ascending: true,
         })
     }
 
-    /// Save config to disk if dirty (debounced at 500ms).
     fn maybe_save_config(&mut self) {
-        if !self.config_dirty {
-            return;
-        }
-        let elapsed = self.last_save_time.elapsed();
-        if elapsed.as_millis() < 500 {
-            return; // Debounce: wait 500ms
-        }
+        if !self.config_dirty { return; }
+        if self.last_save_time.elapsed().as_millis() < 500 { return; }
         let config_path = Config::default_path();
         if let Err(e) = self.config.save(&config_path) {
             log::warn!("Failed to save config to {:?}: {}", config_path, e);
@@ -75,14 +82,45 @@ impl MenuApp {
         self.config_dirty = true;
         self.last_save_time = std::time::Instant::now();
     }
+
+    fn sorted_songs(&self) -> Vec<(usize, &SongEntry)> {
+        let mut filtered: Vec<(usize, &SongEntry)> = self.songs.iter().enumerate()
+            .filter(|(_, s)| {
+                self.search_query.is_empty()
+                    || s.title.to_lowercase().contains(&self.search_query.to_lowercase())
+                    || s.artist.to_lowercase().contains(&self.search_query.to_lowercase())
+            })
+            .collect();
+        let col = self.sort_column;
+        let asc = self.sort_ascending;
+        filtered.sort_by(|a, b| {
+            let ord = match col {
+                SongSortColumn::Name => a.1.title.to_lowercase().cmp(&b.1.title.to_lowercase()),
+                SongSortColumn::Level => a.1.max_level.cmp(&b.1.max_level),
+                SongSortColumn::Bpm => a.1.bpm.partial_cmp(&b.1.bpm).unwrap_or(std::cmp::Ordering::Equal),
+                SongSortColumn::Genre => a.1.genre.cmp(&b.1.genre),
+            };
+            if asc { ord } else { ord.reverse() }
+        });
+        filtered
+    }
+
+    fn play_selected_song(&self) {
+        if let Some(idx) = self.selected_song {
+            if let Some(song) = self.songs.get(idx) {
+                if let Some(chart) = song.charts.get(self.selected_difficulty) {
+                    log::info!("PLAY: {}", chart.path.display());
+                    spawn_game(&chart.path, &self.config);
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for MenuApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Auto-save config periodically
         self.maybe_save_config();
 
-        // Tab bar
         egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.active_tab, MenuTab::MusicSelect, "Music Select");
@@ -91,17 +129,13 @@ impl eframe::App for MenuApp {
             });
         });
 
-        // Bottom bar with PLAY button (always visible)
         egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 let can_play = self.active_tab == MenuTab::MusicSelect && self.selected_song.is_some();
                 let play_btn = ui.add_enabled(can_play, egui::Button::new("▶ PLAY !!!"));
-                if play_btn.clicked() {
-                    self.play_selected_song();
-                }
+                if play_btn.clicked() { self.play_selected_song(); }
                 ui.separator();
                 ui.checkbox(&mut self.config.game_options.autoplay, "Autoplay");
-
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("💾 Save Config").clicked() {
                         self.config_dirty = true;
@@ -112,7 +146,6 @@ impl eframe::App for MenuApp {
             });
         });
 
-        // Main content area
         egui::CentralPanel::default().show(ctx, |ui| {
             match self.active_tab {
                 MenuTab::MusicSelect => self.ui_music_select(ui),
@@ -124,136 +157,180 @@ impl eframe::App for MenuApp {
 }
 
 impl MenuApp {
-    fn play_selected_song(&self) {
-        if let Some(idx) = self.selected_song {
-            if let Some(song) = self.songs.get(idx) {
-                if let Some(chart) = song.charts.get(self.selected_difficulty) {
-                    log::info!("PLAY: {}", chart.path.display());
-                    spawn_game(&chart.path, &self.config);
-                }
-            }
-        }
-    }
-
     fn ui_music_select(&mut self, ui: &mut egui::Ui) {
-        // Left panel: Song Info + Modifiers
         let selected_song_data = self.selected_song.and_then(|idx| self.songs.get(idx).cloned());
 
-        egui::SidePanel::left("song_info").resizable(true).default_width(300.0).show_inside(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                if let Some(song) = selected_song_data {
-                    // ── Cover + Metadata ──
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.group(|ui| {
-                                ui.label(if song.cover.is_some() { "🖼 Cover" } else { "[No cover]" });
-                                ui.allocate_space(egui::vec2(120.0, 120.0));
-                            });
-                        });
-                        ui.vertical(|ui| {
-                            ui.heading(&song.title);
-                            ui.label(format!("🎵 {}", song.artist));
-                            ui.label(format!("BPM: {:.1}  |  Keys: {}", song.bpm, song.keys));
-                            let dur = song.duration_sec;
-                            ui.label(format!("⏱ {}:{:02}", dur as u32 / 60, dur as u32 % 60));
-                            if !song.genre.is_empty() && song.genre != "0" {
-                                ui.label(format!("Genre: {}", song.genre));
-                            }
-                        });
-                    });
-
-                    ui.separator();
-
-                    // ── Difficulty Selection ──
-                    ui.label(egui::RichText::new("Difficulty").strong());
-                    for (i, chart) in song.charts.iter().enumerate() {
-                        if chart.note_counts[i] == 0 && chart.levels[i] == 0 {
-                            continue; // Skip non-existent difficulty
-                        }
-                        let diff_name = ["Easy", "Normal", "Hard"][i.min(2)];
-                        let label = format!("{}  Lv:{}  Notes:{}", diff_name, chart.levels[i], chart.note_counts[i]);
-                        let selected = self.selected_difficulty == i;
-                        if ui.selectable_label(selected, &label).clicked() {
-                            self.selected_difficulty = i;
-                            self.config.game_options.difficulty = match i {
-                                0 => open2jam_rs_core::Difficulty::Easy,
-                                1 => open2jam_rs_core::Difficulty::Normal,
-                                _ => open2jam_rs_core::Difficulty::Hard,
-                            };
-                            self.mark_dirty();
-                        }
-                    }
-
-                    ui.separator();
-
-                    // ── Modifiers ──
-                    ui_modifiers(ui, &mut self.config.game_options);
-                    self.mark_dirty();
-                } else {
-                    ui.heading("No song selected");
-                    ui.label("Scan a directory and select a song from the list.");
-                }
-            });
-        });
-
-        // Right panel: Song List
-        egui::SidePanel::right("song_list").resizable(true).default_width(350.0).show_inside(ui, |ui| {
-            ui.vertical(|ui| {
-                // Library management bar
+        // Split the screen in half: left = song list, right = song info
+        let col_width = ui.available_width() / 2.0;
+        ui.columns(2, |cols| {
+            // ── Left: Song List ──
+            cols[0].vertical(|ui| {
+                ui.label(egui::RichText::new("Select Music").strong().heading());
+                ui.separator();
+                ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    if ui.button("📁 Choose dir").clicked() {
-                        log::info!("Choose directory clicked");
-                        // TODO: native file dialog
-                    }
+                    if ui.button("📁 Choose dir").clicked() { log::info!("Choose directory clicked"); }
                     if ui.button("🔄 Scan").clicked() && !self.scan_dirs.is_empty() {
                         scan_directories(&mut self.songs, &self.scan_dirs);
                     }
                 });
-                ui.separator();
-                ui.label(&format!("🎼 {} songs", self.songs.len()));
-
-                // Search
+                ui.label(&format!("� {} songs", self.songs.len()));
                 ui.horizontal(|ui| {
                     ui.label("🔍");
                     ui.text_edit_singleline(&mut self.search_query);
-                    if !self.search_query.is_empty() && ui.small_button("✖").clicked() {
-                        self.search_query.clear();
-                    }
+                    if !self.search_query.is_empty() && ui.small_button("✖").clicked() { self.search_query.clear(); }
                 });
                 ui.separator();
 
-                // Song list table
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let mut col_btn = |ui: &mut egui::Ui, col: SongSortColumn, label: &str| {
+                        let is_active = self.sort_column == col;
+                        let arrow = if is_active {
+                            if self.sort_ascending { " ▲" } else { " ▼" }
+                        } else { "" };
+                        if ui.selectable_label(is_active, format!("{}{}", label, arrow)).clicked() {
+                            if self.sort_column == col { self.sort_ascending = !self.sort_ascending; }
+                            else { self.sort_column = col; self.sort_ascending = true; }
+                        }
+                    };
+                    col_btn(ui, SongSortColumn::Name, "Name");
+                    ui.separator();
+                    col_btn(ui, SongSortColumn::Level, "Level");
+                    ui.separator();
+                    col_btn(ui, SongSortColumn::Bpm, "BPM");
+                });
+                ui.separator();
+
+                egui::ScrollArea::vertical().id_salt("song_list_scroll").show(ui, |ui| {
+                    ui.set_max_width(col_width - 16.0);
+                    let sorted = self.sorted_songs();
+                    let mut sel = self.selected_song;
+                    let mut sd = self.selected_difficulty;
                     egui::Grid::new("song_grid").striped(true).show(ui, |ui| {
-                        ui.label(egui::RichText::new("Name").strong());
-                        ui.label(egui::RichText::new("Lv").strong());
-                        ui.label(egui::RichText::new("Genre").strong());
-                        ui.end_row();
-
-                        let filtered: Vec<(usize, &SongEntry)> = self.songs.iter().enumerate()
-                            .filter(|(_, s)| {
-                                self.search_query.is_empty()
-                                    || s.title.to_lowercase().contains(&self.search_query.to_lowercase())
-                                    || s.artist.to_lowercase().contains(&self.search_query.to_lowercase())
-                            })
-                            .collect();
-
-                        for (orig_idx, song) in filtered {
-                            let level_str = if song.max_level > 0 {
-                                song.max_level.to_string()
-                            } else {
-                                "-".into()
-                            };
-                            let selected = self.selected_song == Some(orig_idx);
-                            let response = ui.selectable_label(selected, &song.title);
-                            if response.clicked() {
-                                self.selected_song = Some(orig_idx);
-                                self.selected_difficulty = 0;
+                        for (orig_idx, song) in sorted {
+                            if ui.selectable_label(sel == Some(orig_idx), &song.title).clicked() {
+                                sel = Some(orig_idx); sd = 0;
                             }
-                            ui.label(level_str);
-                            ui.label(if song.genre.is_empty() || song.genre == "0" { "-" } else { &song.genre });
+                            ui.label(song.max_level.to_string());
+                            ui.label(format!("{:.1}", song.bpm));
                             ui.end_row();
                         }
+                    });
+                    self.selected_song = sel;
+                    self.selected_difficulty = sd;
+                });
+            });
+
+            // ── Right: Song Info + Options ──
+            cols[1].vertical(|ui| {
+                egui::ScrollArea::vertical().id_salt("song_info_scroll").show(ui, |ui| {
+                    ui.set_max_width(col_width - 16.0);
+
+                    // ── Song Info ──
+                    ui.label(egui::RichText::new("Song Info").strong().heading());
+                    ui.separator();
+                    ui.add_space(10.0);
+                    if let Some(song) = &selected_song_data {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| { ui.group(|ui| {
+                                ui.label(if song.cover.is_some() { "🖼 Cover" } else { "[No cover]" });
+                                ui.allocate_space(egui::vec2(100.0, 100.0));
+                            });});
+                            ui.vertical(|ui| {
+                                ui.heading(&song.title);
+                                ui.label(format!("🎵 {}", song.artist));
+                                ui.label(format!("BPM: {:.1}  |  Keys: {}", song.bpm, song.keys));
+                                let dur = song.duration_sec;
+                                ui.label(format!("⏱ {}:{:02}", dur as u32 / 60, dur as u32 % 60));
+                                if !song.genre.is_empty() && song.genre != "0" {
+                                    ui.label(format!("Genre: {}", song.genre));
+                                }
+                            });
+                        });
+                    } else {
+                        ui.label("No song selected");
+                    }
+                     ui.add_space(10.0);  
+                    // ── Difficulty ──                  
+                    ui.label(egui::RichText::new("Difficulty").strong().heading());
+                    ui.separator();
+                    if let Some(song) = &selected_song_data {
+                        for (i, chart) in song.charts.iter().enumerate() {
+                            if chart.note_counts[i] == 0 && chart.levels[i] == 0 { continue; }
+                            let dn = ["Easy", "Normal", "Hard"][i.min(2)];
+                            let is_selected = self.selected_difficulty == i;
+                            let lb = format!("{} [{}]", dn, chart.levels[i]);
+                            if ui.selectable_label(is_selected, lb).clicked() {
+                                self.selected_difficulty = i;
+                                self.config.game_options.difficulty = match i {
+                                    0 => open2jam_rs_core::Difficulty::Easy,
+                                    1 => open2jam_rs_core::Difficulty::Normal,
+                                    _ => open2jam_rs_core::Difficulty::Hard,
+                                };
+                                self.mark_dirty();
+                            }
+                        }
+                    } else {
+                        ui.selectable_label(false, "Easy [-]");
+                        ui.selectable_label(false, "Normal [-]");
+                        ui.selectable_label(false, "Hard [-]");
+                    }
+
+                    // ── Game Options ──
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new("Game Options").strong().heading());
+                    ui.separator();
+
+                    // Speed
+                    ui.label(egui::RichText::new("Speed").strong().size(14.0));
+                    ui.add_space(5.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("−").clicked() {
+                            self.config.game_options.speed_multiplier = (self.config.game_options.speed_multiplier - 0.5).max(0.5);
+                            self.mark_dirty();
+                        }
+                        ui.add(egui::DragValue::new(&mut self.config.game_options.speed_multiplier)
+                            .speed(0.5)
+                            .clamp_range(0.5..=10.0)
+                            .custom_formatter(|n, _| format!("{:.1}", n))
+                            .custom_parser(|s| s.parse::<f64>().ok()));
+                        if ui.button("+").clicked() {
+                            self.config.game_options.speed_multiplier = (self.config.game_options.speed_multiplier + 0.5).min(10.0);
+                            self.mark_dirty();
+                        }
+                    });
+
+                    ui.add_space(5.0);
+                    
+                    // Arrangement Mods
+                    ui.label(egui::RichText::new("Arrangement Mods").strong().size(14.0));
+                    ui.add_space(5.0);
+                    ui.horizontal(|ui| {
+                        let mut clicked = false;
+                        for mod_val in [ChannelMod::None, ChannelMod::Random, ChannelMod::Panic, ChannelMod::Mirror] {
+                            let is_selected = self.config.game_options.channel_modifier == mod_val;
+                            if ui.selectable_label(is_selected, mod_val.to_string()).clicked() {
+                                self.config.game_options.channel_modifier = mod_val;
+                                clicked = true;
+                            }
+                        }
+                        if clicked { self.mark_dirty(); }
+                    });
+                    ui.add_space(5.0);
+
+                    // Visibility Mods
+                    ui.label(egui::RichText::new("Visibility Mods").strong().size(14.0));
+                    ui.add_space(5.0);
+                    ui.horizontal(|ui| {
+                        let mut clicked = false;
+                        for mod_val in [VisibilityMod::None, VisibilityMod::Hidden, VisibilityMod::Sudden, VisibilityMod::Dark] {
+                            let is_selected = self.config.game_options.visibility_modifier == mod_val;
+                            if ui.selectable_label(is_selected, mod_val.to_string()).clicked() {
+                                self.config.game_options.visibility_modifier = mod_val;
+                                clicked = true;
+                            }
+                        }
+                        if clicked { self.mark_dirty(); }
                     });
                 });
             });
@@ -261,24 +338,13 @@ impl MenuApp {
     }
 
     fn ui_configuration(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            // ── Key Bindings ──
-            ui.group(|ui| {
-                ui_key_bind_editor(ui, &mut self.config);
-            });
+        egui::ScrollArea::vertical().id_salt("config_scroll").show(ui, |ui| {
+            ui.group(|ui| { ui_key_bind_editor(ui, &mut self.config); });
             self.mark_dirty();
-
             ui.separator();
-
-            // ── Display Configuration ──
-            ui.group(|ui| {
-                ui_display_config(ui, &mut self.config.game_options);
-            });
+            ui.group(|ui| { ui_display_config(ui, &mut self.config.game_options); });
             self.mark_dirty();
-
             ui.separator();
-
-            // ── GUI Settings ──
             ui.group(|ui| {
                 ui.label(egui::RichText::new("GUI Settings").strong());
                 ui.horizontal(|ui| {
@@ -297,17 +363,14 @@ impl MenuApp {
     }
 
     fn ui_advanced(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("advanced_scroll").show(ui, |ui| {
             ui.group(|ui| {
                 ui.label(egui::RichText::new("Advanced Options").strong());
-
                 ui.checkbox(&mut self.config.game_options.haste_mode, "Haste Mode");
                 ui.add_enabled(self.config.game_options.haste_mode, |ui: &mut egui::Ui| {
                     ui.checkbox(&mut self.config.game_options.haste_mode_normalize_speed, "Normalize Speed")
                 });
-
                 ui.separator();
-
                 ui.horizontal(|ui| {
                     ui.label("Buffer Size:");
                     ui.add(egui::DragValue::new(&mut self.config.game_options.buffer_size).clamp_range(1..=4096));
@@ -336,23 +399,16 @@ fn spawn_game(chart_path: &std::path::Path, config: &Config) {
         let project_root = exe.parent()
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf());
-
         log::info!("Game binary: {} (exists: {})", game_bin.display(), game_bin.exists());
         log::info!("Project root: {:?}", project_root);
-
         let mut cmd = std::process::Command::new(&game_bin);
         cmd.arg(chart_path);
-        if config.game_options.autoplay {
-            cmd.arg("--autoplay");
-        }
+        if config.game_options.autoplay { cmd.arg("--autoplay"); }
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::inherit());
         cmd.stderr(std::process::Stdio::inherit());
-        if let Some(ref dir) = project_root {
-            cmd.current_dir(dir);
-        }
-        #[cfg(unix)]
-        {
+        if let Some(ref dir) = project_root { cmd.current_dir(dir); }
+        #[cfg(unix)] {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
         }
