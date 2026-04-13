@@ -331,14 +331,19 @@ impl MenuApp {
             }
         });
 
-        // Extract visible columns before config is moved into Self
+        // Extract config values before config is moved into Self
         let visible_columns = config.visible_columns;
+        let selected_difficulty = match config.game_options.difficulty {
+            open2jam_rs_core::Difficulty::Easy => 0,
+            open2jam_rs_core::Difficulty::Normal => 1,
+            open2jam_rs_core::Difficulty::Hard => 2,
+        };
 
         Ok(Self {
             config,
             songs: Vec::new(),
             selected_song: None,
-            selected_difficulty: 0,
+            selected_difficulty,
             search_query: String::new(),
             db_pool: None,
             libraries: Vec::new(),
@@ -1107,7 +1112,6 @@ impl MenuApp {
                                             .clicked()
                                         {
                                             sel = Some(orig_idx);
-                                            sd = 0;
                                         }
                                     }
                                     SongColumn::Artist => {
@@ -1116,14 +1120,12 @@ impl MenuApp {
                                             .clicked()
                                         {
                                             sel = Some(orig_idx);
-                                            sd = 0;
                                         }
                                     }
                                     SongColumn::Level => {
                                         let text = self.songs[orig_idx].levels[di].to_string();
                                         if ui.selectable_label(is_sel, &text).clicked() {
                                             sel = Some(orig_idx);
-                                            sd = 0;
                                         }
                                     }
                                     SongColumn::Bpm => {
