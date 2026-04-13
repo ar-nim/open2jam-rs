@@ -2,7 +2,7 @@
 
 use egui::Slider;
 use open2jam_rs_core::game_options::GameOptions;
-use open2jam_rs_core::FpsLimiter;
+use open2jam_rs_core::game_options::{FpsLimiter, VSyncMode};
 
 /// Common preset resolutions (16:9 and 4:3).
 const PRESET_RESOLUTIONS: &[(u32, u32)] = &[
@@ -99,10 +99,20 @@ pub fn ui_display_config(
     ui.separator();
 
     // ── Sync & Limiting ──
-    ui.checkbox(&mut opts.display_vsync, "Use VSync");
+    ui.horizontal(|ui| {
+        ui.label("VSync:");
+        egui::ComboBox::from_id_salt("vsync_mode")
+            .selected_text(opts.vsync_mode.to_string())
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut opts.vsync_mode, VSyncMode::On, "On");
+                ui.selectable_value(&mut opts.vsync_mode, VSyncMode::Fast, "Fast");
+                ui.selectable_value(&mut opts.vsync_mode, VSyncMode::Off, "Off");
+            });
+    });
 
-    // FPS limiter — greyed out when VSync is on
-    ui.add_enabled_ui(!opts.display_vsync, |ui| {
+    // FPS limiter — greyed out when VSync is On
+    let fps_limiter_enabled = opts.vsync_mode != VSyncMode::On;
+    ui.add_enabled_ui(fps_limiter_enabled, |ui| {
         ui.horizontal(|ui| {
             ui.label("FPS Limiter:");
             egui::ComboBox::from_id_salt("fps_limiter")

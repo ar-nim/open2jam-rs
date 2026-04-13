@@ -187,13 +187,16 @@ pub struct App {
     display_fullscreen: bool,
     scroll_speed: f64,
     difficulty: open2jam_rs_core::Difficulty,
-    display_vsync: bool,
+    vsync_mode: open2jam_rs_core::game_options::VSyncMode,
+    fps_limiter: open2jam_rs_core::game_options::FpsLimiter,
     /// Key name → lane index mapping (built from config)
     key_to_lane: HashMap<String, usize>,
     /// Frame counter for FPS tracking (atomic for safe access from any thread).
     frame_count: std::sync::atomic::AtomicU64,
     /// Last time we logged FPS/CPU stats.
     last_fps_log: Instant,
+    /// Hybrid spin-sleep frame limiter for precise frame pacing.
+    frame_limiter: Option<spin_sleep::LoopHelper>,
 }
 
 impl App {
@@ -234,10 +237,12 @@ impl App {
             display_fullscreen: opts.display_fullscreen,
             scroll_speed,
             difficulty: opts.difficulty,
-            display_vsync: opts.display_vsync,
+            vsync_mode: opts.vsync_mode,
+            fps_limiter: opts.fps_limiter,
             key_to_lane: build_key_mapping(&config.key_bindings.k7.lanes),
             frame_count: std::sync::atomic::AtomicU64::new(0),
             last_fps_log: Instant::now(),
+            frame_limiter: None,
         })
     }
 
@@ -255,6 +260,24 @@ impl App {
             info!("Audio manager failed to initialise (running headless).");
         }
         self.audio = Some(audio_mgr);
+
+        // Set up frame limiter if VSync is not On (Fast or Off modes)
+        if self.vsync_mode != open2jam_rs_core::game_options::VSyncMode::On {
+            let target_fps = match self.fps_limiter {
+                open2jam_rs_core::game_options::FpsLimiter::Unlimited => None,
+                open2jam_rs_core::game_options::FpsLimiter::X1 => {
+                    // Will be set after window creation when we know refresh rate
+                    None
+                }
+                open2jam_rs_core::game_options::FpsLimiter::X2 => Some(120.0), // placeholder, updated later
+                open2jam_rs_core::game_options::FpsLimiter::X4 => Some(240.0),
+                open2jam_rs_core::game_options::FpsLimiter::X8 => Some(480.0),
+            };
+            if let Some(fps) = target_fps {
+                self.frame_limiter = Some(spin_sleep::LoopHelper::builder().build_with_target_rate(fps));
+                info!("Frame limiter enabled at {:.0} fps", fps);
+            }
+        }
 
         let event_loop = self.event_loop.take().unwrap();
         event_loop.run_app(&mut self)?;
@@ -299,6 +322,11 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(render) = &self.render {
             render.window.request_redraw();
+        }
+        // Frame limiter sleep (hybrid spin-sleep)
+        if let Some(ref mut limiter) = self.frame_limiter {
+            limiter.loop_start();
+            limiter.loop_sleep();
         }
     }
 
@@ -531,10 +559,10 @@ impl App {
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
 
-        let present_mode = if self.display_vsync {
-            wgpu::PresentMode::AutoVsync
-        } else {
-            wgpu::PresentMode::AutoNoVsync
+        let present_mode = match self.vsync_mode {
+            open2jam_rs_core::game_options::VSyncMode::On => wgpu::PresentMode::AutoVsync,
+            open2jam_rs_core::game_options::VSyncMode::Fast => wgpu::PresentMode::Mailbox,
+            open2jam_rs_core::game_options::VSyncMode::Off => wgpu::PresentMode::AutoNoVsync,
         };
 
         let config = wgpu::SurfaceConfiguration {

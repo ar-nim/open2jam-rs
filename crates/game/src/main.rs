@@ -28,7 +28,7 @@ use log::{info, warn};
 use open2jam_rs_core::Config;
 
 fn main() -> Result<()> {
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     info!("Starting open2jam-rs preview mode");
 
     // Load config from shared location (same as menu writes to)

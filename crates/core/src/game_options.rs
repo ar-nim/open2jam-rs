@@ -83,6 +83,34 @@ impl std::fmt::Display for VisibilityMod {
     }
 }
 
+/// VSync mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VSyncMode {
+    /// AutoVsync — standard vsync, limits to refresh rate.
+    On,
+    /// Mailbox — triple-buffered vsync, lower latency, no tearing.
+    Fast,
+    /// AutoNoVsync — no vsync, unlimited framerate.
+    Off,
+}
+
+impl Default for VSyncMode {
+    fn default() -> Self {
+        Self::On
+    }
+}
+
+impl std::fmt::Display for VSyncMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::On => write!(f, "On"),
+            Self::Fast => write!(f, "Fast"),
+            Self::Off => write!(f, "Off"),
+        }
+    }
+}
+
 /// FPS limiter setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -203,9 +231,9 @@ pub struct GameOptions {
     #[serde(default)]
     pub display_fullscreen: bool,
 
-    /// Enable VSync.
-    #[serde(default = "default_true")]
-    pub display_vsync: bool,
+    /// VSync mode (On=AutoVsync, Fast=Mailbox, Off=AutoNoVsync).
+    #[serde(default)]
+    pub vsync_mode: VSyncMode,
 
     /// FPS limiter.
     #[serde(default)]
@@ -294,7 +322,7 @@ impl Default for GameOptions {
             timed_judgment: false,
             difficulty: Difficulty::Normal,
             display_fullscreen: false,
-            display_vsync: true,
+            vsync_mode: VSyncMode::On,
             fps_limiter: FpsLimiter::X1,
             display_width: 1280,
             display_height: 720,
