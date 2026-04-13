@@ -299,15 +299,9 @@ impl GameStats {
 
         // Update life based on difficulty
         self.life += match difficulty {
-            open2jam_rs_core::Difficulty::Easy => {
-                effective_judgment.hp_change_easy()
-            }
-            open2jam_rs_core::Difficulty::Normal => {
-                effective_judgment.hp_change_normal()
-            }
-            open2jam_rs_core::Difficulty::Hard => {
-                effective_judgment.hp_change_hard()
-            }
+            open2jam_rs_core::Difficulty::Easy => effective_judgment.hp_change_easy(),
+            open2jam_rs_core::Difficulty::Normal => effective_judgment.hp_change_normal(),
+            open2jam_rs_core::Difficulty::Hard => effective_judgment.hp_change_hard(),
         };
         self.life = self.life.clamp(0, self.max_life);
 
@@ -1251,7 +1245,8 @@ impl GameState {
                     );
                     note.missed = true;
                     note.judgment_type = Some(JudgmentType::Miss);
-                    self.stats.record_judgment(JudgmentType::Miss, false, self.difficulty);
+                    self.stats
+                        .record_judgment(JudgmentType::Miss, false, self.difficulty);
                     missed_lanes.push(note.lane);
                 }
             }
@@ -1270,7 +1265,8 @@ impl GameState {
                     long_note.missed = true;
                     long_note.head_judgment = Some(JudgmentType::Miss);
                     long_note.dead = true;
-                    self.stats.record_judgment(JudgmentType::Miss, false, self.difficulty);
+                    self.stats
+                        .record_judgment(JudgmentType::Miss, false, self.difficulty);
                     missed_lanes.push(long_note.lane);
                 }
             }
@@ -1314,7 +1310,8 @@ impl GameState {
                 if (render_time - note.target_time_ms).abs() < auto_play_tolerance_ms {
                     note.judged = true;
                     note.judgment_type = Some(JudgmentType::Cool);
-                    self.stats.record_judgment(JudgmentType::Cool, false, self.difficulty);
+                    self.stats
+                        .record_judgment(JudgmentType::Cool, false, self.difficulty);
                     click_effect_lanes.push(note.lane);
                     judgments_to_add.push(PendingJudgment::new(
                         JudgmentType::Cool,
@@ -1332,7 +1329,8 @@ impl GameState {
                     long_note.judged = true;
                     long_note.head_judgment = Some(JudgmentType::Cool);
                     long_note.holding = true;
-                    self.stats.record_judgment(JudgmentType::Cool, false, self.difficulty);
+                    self.stats
+                        .record_judgment(JudgmentType::Cool, false, self.difficulty);
                     auto_longflare_lanes.push(long_note.lane);
                     judgments_to_add.push(PendingJudgment::new(
                         JudgmentType::Cool,
@@ -1361,7 +1359,8 @@ impl GameState {
                     judgments_to_add.push(PendingJudgment::new(j, ln.lane, render_time));
                 } else {
                     ln.tail_judgment = Some(JudgmentType::Miss);
-                    self.stats.record_judgment(JudgmentType::Miss, false, self.difficulty);
+                    self.stats
+                        .record_judgment(JudgmentType::Miss, false, self.difficulty);
                     flare_lanes_to_kill.push(ln.lane);
                     judgments_to_add.push(PendingJudgment::new(
                         JudgmentType::Miss,
@@ -1428,7 +1427,9 @@ impl GameState {
                     let judgment = judge_tap_note(time_diff, bpm);
                     note.judged = true;
                     let has_pill = self.stats.pill_count > 0;
-                    let effective = self.stats.record_judgment(judgment, has_pill, self.difficulty);
+                    let effective = self
+                        .stats
+                        .record_judgment(judgment, has_pill, self.difficulty);
                     note.judgment_type = Some(effective);
                     log::debug!(
                         "[INPUT]   *** HIT! Judgment: {:?} (raw: {:?}), diff={:.2}ms ***",
@@ -1497,7 +1498,9 @@ impl GameState {
                     let judgment = judge_tap_note(time_diff, bpm);
                     ln.judged = true;
                     let has_pill = self.stats.pill_count > 0;
-                    let effective = self.stats.record_judgment(judgment, has_pill, self.difficulty);
+                    let effective = self
+                        .stats
+                        .record_judgment(judgment, has_pill, self.difficulty);
                     ln.head_judgment = Some(effective);
                     ln.holding = true;
                     log::debug!(

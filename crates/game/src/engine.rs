@@ -12,8 +12,8 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::Window;
 use winit::keyboard::Key;
+use winit::window::Window;
 
 use crate::audio::AudioManager;
 use crate::game_state::GameState;
@@ -23,8 +23,8 @@ use crate::parsing::TimedEvent;
 use crate::render::atlas::SkinAtlas;
 use crate::render::hud::{render_hud_with_atlas, HudLayout};
 use crate::render::textured_renderer::{BlendMode, TexturedRenderer};
-use open2jam_rs_core::Config;
 use open2jam_rs_core::game_options::SpeedType;
+use open2jam_rs_core::Config;
 
 /// Base scroll speed — multiplied by user-configured speed multiplier.
 const BASE_SCROLL_SPEED: f64 = 4.0;
@@ -114,7 +114,11 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(ojn_path: Option<std::path::PathBuf>, auto_play: bool, config: &Config) -> Result<Self> {
+    pub fn new(
+        ojn_path: Option<std::path::PathBuf>,
+        auto_play: bool,
+        config: &Config,
+    ) -> Result<Self> {
         let opts = &config.game_options;
 
         // Compute scroll speed from config

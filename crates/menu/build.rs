@@ -11,8 +11,7 @@
 use std::path::PathBuf;
 
 /// Inter v4.1 release download URL (contains InterVariable.ttf).
-const INTER_URL: &str =
-    "https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip";
+const INTER_URL: &str = "https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip";
 
 /// Noto Sans SC release download URL.
 const NOTO_SC_URL: &str =
@@ -78,8 +77,10 @@ fn download_noto_sans_sc(assets_dir: &PathBuf) -> Result<(), Box<dyn std::error:
 fn download_zip(name: &str, url: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     use std::process::Command;
 
-    let tmp_dir = std::env::temp_dir().join(format!("open2jam-rs-font-{}-{}", name, std::process::id()));
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("Failed to create temp dir {:?}: {}", tmp_dir, e))?;
+    let tmp_dir =
+        std::env::temp_dir().join(format!("open2jam-rs-font-{}-{}", name, std::process::id()));
+    std::fs::create_dir_all(&tmp_dir)
+        .map_err(|e| format!("Failed to create temp dir {:?}: {}", tmp_dir, e))?;
     let zip_path = tmp_dir.join("font.zip");
 
     let _ = std::fs::remove_file(&zip_path);
@@ -87,7 +88,14 @@ fn download_zip(name: &str, url: &str) -> Result<PathBuf, Box<dyn std::error::Er
     println!("cargo:warning=Downloading {}...", url);
 
     let status = Command::new("curl")
-        .args(["-sL", "--connect-timeout", "30", "-o", zip_path.to_str().unwrap(), url])
+        .args([
+            "-sL",
+            "--connect-timeout",
+            "30",
+            "-o",
+            zip_path.to_str().unwrap(),
+            url,
+        ])
         .status()
         .map_err(|e| format!("Failed to run curl: {}", e))?;
     if !status.success() {
@@ -95,7 +103,13 @@ fn download_zip(name: &str, url: &str) -> Result<PathBuf, Box<dyn std::error::Er
     }
 
     let status = Command::new("unzip")
-        .args(["-q", "-o", zip_path.to_str().unwrap(), "-d", tmp_dir.to_str().unwrap()])
+        .args([
+            "-q",
+            "-o",
+            zip_path.to_str().unwrap(),
+            "-d",
+            tmp_dir.to_str().unwrap(),
+        ])
         .status()
         .map_err(|e| format!("Failed to run unzip: {}", e))?;
     if !status.success() {

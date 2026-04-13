@@ -38,9 +38,7 @@ pub fn build_key_to_lane(config_keys: &[String]) -> impl Fn(&Key) -> Option<usiz
             for (name, lane) in &mapping {
                 let n = name.to_lowercase();
                 // Support both exact match and common aliases
-                if n == named_str
-                    || named_aliases_match(&n, &named_str)
-                {
+                if n == named_str || named_aliases_match(&n, &named_str) {
                     return Some(*lane);
                 }
             }
@@ -98,7 +96,7 @@ fn named_aliases_match(a: &str, b: &str) -> bool {
         ("alt", "altleft"),
         ("alt", "altright"),
     ];
-    pairs.iter().any(|(x, y)| {
-        (a == *x && b == *y) || (a == *y && b == *x)
-    })
+    pairs
+        .iter()
+        .any(|(x, y)| (a == *x && b == *y) || (a == *y && b == *x))
 }
