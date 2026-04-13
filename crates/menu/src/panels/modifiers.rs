@@ -1,8 +1,8 @@
 //! Modifiers panel — volume, speed, channel/visibility mods, difficulty selection.
 
-use egui::{Slider, ComboBox, DragValue};
-use open2jam_rs_core::{SpeedType, ChannelMod, VisibilityMod, Difficulty};
+use egui::{ComboBox, DragValue, Slider};
 use open2jam_rs_core::game_options::GameOptions;
+use open2jam_rs_core::{ChannelMod, Difficulty, SpeedType, VisibilityMod};
 
 pub fn ui_modifiers(ui: &mut egui::Ui, opts: &mut GameOptions) {
     ui.separator();
@@ -36,7 +36,11 @@ pub fn ui_modifiers(ui: &mut egui::Ui, opts: &mut GameOptions) {
                 ui.selectable_value(&mut opts.speed_type, SpeedType::RegulSpeed, "Regul-Speed");
             });
         if opts.speed_type == SpeedType::HiSpeed {
-            ui.add(DragValue::new(&mut opts.speed_multiplier).speed(0.1).clamp_range(0.5..=10.0));
+            ui.add(
+                DragValue::new(&mut opts.speed_multiplier)
+                    .speed(0.1)
+                    .clamp_range(0.5..=10.0),
+            );
         }
     });
 
@@ -72,8 +76,16 @@ pub fn ui_modifiers(ui: &mut egui::Ui, opts: &mut GameOptions) {
             .selected_text(opts.visibility_modifier.to_string())
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut opts.visibility_modifier, VisibilityMod::None, "None");
-                ui.selectable_value(&mut opts.visibility_modifier, VisibilityMod::Hidden, "Hidden");
-                ui.selectable_value(&mut opts.visibility_modifier, VisibilityMod::Sudden, "Sudden");
+                ui.selectable_value(
+                    &mut opts.visibility_modifier,
+                    VisibilityMod::Hidden,
+                    "Hidden",
+                );
+                ui.selectable_value(
+                    &mut opts.visibility_modifier,
+                    VisibilityMod::Sudden,
+                    "Sudden",
+                );
                 ui.selectable_value(&mut opts.visibility_modifier, VisibilityMod::Dark, "Dark");
             });
     });

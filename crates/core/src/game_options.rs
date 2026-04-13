@@ -219,6 +219,10 @@ pub struct GameOptions {
     #[serde(default = "default_height")]
     pub display_height: u32,
 
+    /// Display refresh rate in Hz (0 = use monitor default).
+    #[serde(default)]
+    pub display_refresh_rate: u32,
+
     /// Audio buffer size (1–4096).
     #[serde(default = "default_buffer")]
     pub buffer_size: u32,
@@ -248,12 +252,24 @@ pub struct GameOptions {
     pub haste_mode_normalize_speed: bool,
 }
 
-fn default_speed() -> f32 { 1.0 }
-fn default_one() -> f32 { 1.0 }
-fn default_true() -> bool { true }
-fn default_width() -> u32 { 1280 }
-fn default_height() -> u32 { 720 }
-fn default_buffer() -> u32 { 128 }
+fn default_speed() -> f32 {
+    1.0
+}
+fn default_one() -> f32 {
+    1.0
+}
+fn default_true() -> bool {
+    true
+}
+fn default_width() -> u32 {
+    1280
+}
+fn default_height() -> u32 {
+    720
+}
+fn default_buffer() -> u32 {
+    128
+}
 
 impl Default for GameOptions {
     fn default() -> Self {
@@ -274,6 +290,7 @@ impl Default for GameOptions {
             fps_limiter: FpsLimiter::X1,
             display_width: 1280,
             display_height: 720,
+            display_refresh_rate: 0,
             buffer_size: 128,
             display_lag: 0.0,
             audio_latency: 0.0,

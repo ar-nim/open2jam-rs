@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 
 use crate::db::{self, CachedChart, ChartScanEntry, LibraryEntry};
 use crate::panels::display_config::ui_display_config;
-use crate::panels::key_bind_editor::ui_key_bind_editor;
+use crate::panels::key_bind_editor::{handle_key_capture, ui_key_bind_editor, KeyCaptureState};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -217,6 +217,21 @@ pub struct MenuApp {
 
     // Column visibility: defaults to Name, Level, BPM
     visible_columns: [bool; 6], // indexed by SongColumn discriminant
+
+    // Cached sorted/filtered song list — rebuilt only when inputs change
+    cached_sorted: Vec<usize>,
+    cached_sort_col: SongSortColumn,
+    cached_sort_asc: bool,
+    cached_search_query: String,
+    cached_genre_filter: Option<u32>,
+    cached_song_count: usize,
+    cached_difficulty: usize,
+
+    // Key capture state for the keyboard configuration editor
+    key_capture_state: KeyCaptureState,
+
+    // Monitor resolution info (populated lazily on first config tab render)
+    monitor_native_resolution: Option<(u32, u32)>,
 }
 
 impl MenuApp {
@@ -340,6 +355,15 @@ impl MenuApp {
             // Default visible columns: Name, Level, BPM
             visible_columns: [true, false, true, true, false, false],
             genre_filter: None,
+            cached_sorted: Vec::new(),
+            cached_sort_col: SongSortColumn::default(),
+            cached_sort_asc: true,
+            cached_search_query: String::new(),
+            cached_genre_filter: None,
+            cached_song_count: 0,
+            cached_difficulty: 0,
+            key_capture_state: KeyCaptureState::Idle,
+            monitor_native_resolution: None,
         })
     }
 
@@ -365,54 +389,99 @@ impl MenuApp {
         self.last_save_time = Instant::now();
     }
 
-    fn sorted_songs(&self) -> Vec<(usize, &SongEntry)> {
-        let mut filtered: Vec<(usize, &SongEntry)> = self
-            .songs
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| {
-                // Genre filter
-                if let Some(genre_id) = self.genre_filter {
-                    if s.genre != genre_id {
-                        return false;
-                    }
-                }
-                // Text search
-                self.search_query.is_empty()
-                    || s.title
-                        .to_lowercase()
-                        .contains(&self.search_query.to_lowercase())
-                    || s.artist
-                        .to_lowercase()
-                        .contains(&self.search_query.to_lowercase())
-            })
-            .collect();
-        let col = self.sort_column;
-        let asc = self.sort_ascending;
-        // Use the selected difficulty index for level/duration sorting
-        let diff_idx = self.selected_difficulty.min(2);
-        filtered.sort_by(|a, b| {
-            let ord = match col {
-                SongSortColumn::Name => a.1.title.to_lowercase().cmp(&b.1.title.to_lowercase()),
-                SongSortColumn::Artist => a.1.artist.to_lowercase().cmp(&b.1.artist.to_lowercase()),
-                SongSortColumn::Level => a.1.levels[diff_idx].cmp(&b.1.levels[diff_idx]),
-                SongSortColumn::Bpm => {
-                    a.1.bpm
-                        .partial_cmp(&b.1.bpm)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                }
-                SongSortColumn::Genre => a.1.genre.cmp(&b.1.genre),
-                SongSortColumn::Duration => a.1.durations_sec[diff_idx]
-                    .partial_cmp(&b.1.durations_sec[diff_idx])
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            };
-            if asc {
-                ord
-            } else {
-                ord.reverse()
+    /// Populate monitor resolution info from egui viewport data.
+    /// Uses monitor_size (logical pixels) × native_pixels_per_point to get native resolution.
+    fn ensure_monitor_info(&mut self, ctx: &egui::Context) {
+        if self.monitor_native_resolution.is_some() {
+            return;
+        }
+        ctx.input(|i| {
+            let vp = i.viewport();
+            if let Some(monitor_size) = vp.monitor_size {
+                let ppp = vp.native_pixels_per_point.unwrap_or(1.0);
+                let native_w = (monitor_size.x * ppp) as u32;
+                let native_h = (monitor_size.y * ppp) as u32;
+                self.monitor_native_resolution = Some((native_w, native_h));
+                log::info!(
+                    "Monitor native resolution: {}x{} (logical {}x{} @ {:.1}x)",
+                    native_w,
+                    native_h,
+                    monitor_size.x,
+                    monitor_size.y,
+                    ppp
+                );
             }
         });
-        filtered
+    }
+
+    /// Rebuild sorted index cache only when inputs changed. Returns cached indices.
+    fn update_sorted_cache(&mut self) -> &[usize] {
+        let needs_rebuild = self.cached_sort_col != self.sort_column
+            || self.cached_sort_asc != self.sort_ascending
+            || self.cached_search_query != self.search_query
+            || self.cached_genre_filter != self.genre_filter
+            || self.cached_song_count != self.songs.len()
+            || self.cached_difficulty != self.selected_difficulty;
+
+        if needs_rebuild {
+            let diff_idx = self.selected_difficulty.min(2);
+            let query_lower = self.search_query.to_lowercase();
+            let mut filtered: Vec<usize> = self
+                .songs
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| {
+                    if let Some(genre_id) = self.genre_filter {
+                        if s.genre != genre_id {
+                            return false;
+                        }
+                    }
+                    if self.search_query.is_empty() {
+                        return true;
+                    }
+                    s.title.to_lowercase().contains(&query_lower)
+                        || s.artist.to_lowercase().contains(&query_lower)
+                })
+                .map(|(i, _)| i)
+                .collect();
+
+            let col = self.sort_column;
+            let asc = self.sort_ascending;
+            filtered.sort_by(|&a, &b| {
+                let sa = &self.songs[a];
+                let sb = &self.songs[b];
+                let ord = match col {
+                    SongSortColumn::Name => sa.title.to_lowercase().cmp(&sb.title.to_lowercase()),
+                    SongSortColumn::Artist => {
+                        sa.artist.to_lowercase().cmp(&sb.artist.to_lowercase())
+                    }
+                    SongSortColumn::Level => sa.levels[diff_idx].cmp(&sb.levels[diff_idx]),
+                    SongSortColumn::Bpm => sa
+                        .bpm
+                        .partial_cmp(&sb.bpm)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                    SongSortColumn::Genre => sa.genre.cmp(&sb.genre),
+                    SongSortColumn::Duration => sa.durations_sec[diff_idx]
+                        .partial_cmp(&sb.durations_sec[diff_idx])
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                };
+                if asc {
+                    ord
+                } else {
+                    ord.reverse()
+                }
+            });
+
+            self.cached_sorted = filtered;
+            self.cached_sort_col = self.sort_column;
+            self.cached_sort_asc = self.sort_ascending;
+            self.cached_search_query = self.search_query.clone();
+            self.cached_genre_filter = self.genre_filter;
+            self.cached_song_count = self.songs.len();
+            self.cached_difficulty = self.selected_difficulty;
+        }
+
+        &self.cached_sorted
     }
 
     fn play_selected_song(&self) {
@@ -639,6 +708,7 @@ impl MenuApp {
 impl eframe::App for MenuApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.maybe_save_config();
+        self.ensure_monitor_info(ctx);
 
         // Drain messages from background threads (non-blocking)
         while let Ok(msg) = self.msg_rx.try_recv() {
@@ -741,9 +811,35 @@ impl eframe::App for MenuApp {
 
         egui::CentralPanel::default().show(ctx, |ui| match self.active_tab {
             MenuTab::MusicSelect => self.ui_music_select(ui),
-            MenuTab::Configuration => self.ui_configuration(ui),
+            MenuTab::Configuration => self.ui_configuration(ui, ctx),
             MenuTab::Advanced => self.ui_advanced(ui),
         });
+
+        // Process keyboard events for key capture (only on Configuration tab)
+        if self.active_tab == MenuTab::Configuration
+            && matches!(self.key_capture_state, KeyCaptureState::Listening(_))
+        {
+            ctx.input(|i| {
+                for event in &i.events {
+                    if let egui::Event::Key {
+                        key, pressed: true, ..
+                    } = event
+                    {
+                        let key_text = key.name();
+                        if !key_text.is_empty() {
+                            let captured = handle_key_capture(
+                                key_text,
+                                &mut self.key_capture_state,
+                                &mut self.config,
+                            );
+                            if captured {
+                                self.mark_dirty();
+                            }
+                        }
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -910,8 +1006,8 @@ impl MenuApp {
 
                 // ── Song list table (sticky header + scrollable body) ──
                 {
-                    // Collect sorted data out of self before entering TableBuilder closure
-                    let sorted_indices: Vec<usize> = self.sorted_songs().into_iter().map(|(i, _)| i).collect();
+                    // Update cache (only rebuilds when inputs change), then copy for use in closure
+                    let sorted_indices: Vec<usize> = self.update_sorted_cache().to_vec();
                     let mut sel = self.selected_song;
                     let mut sd = self.selected_difficulty;
                     let di = self.selected_difficulty.min(2);
@@ -940,7 +1036,8 @@ impl MenuApp {
                         if i == 0 {
                             builder = builder.column(egui_extras::Column::remainder());
                         } else {
-                            builder = builder.column(egui_extras::Column::initial(80.0).resizable(true));
+                            builder =
+                                builder.column(egui_extras::Column::initial(80.0).resizable(true));
                         }
                     }
 
@@ -951,7 +1048,11 @@ impl MenuApp {
                                 if let Some(sort_col) = col.to_sort_column() {
                                     let is_active = cur_col == sort_col;
                                     let arrow = if is_active {
-                                        if cur_asc { " ^" } else { " v" }
+                                        if cur_asc {
+                                            " ^"
+                                        } else {
+                                            " v"
+                                        }
                                     } else {
                                         ""
                                     };
@@ -971,53 +1072,56 @@ impl MenuApp {
                         }
                     });
 
-                    // Body rows
-                    table.body(|mut body| {
-                        for &orig_idx in &sorted_indices {
-                            body.row(18.0, |mut row| {
-                                let is_sel = sel == Some(orig_idx);
-                                row.set_selected(is_sel);
-                                for col in &visible {
-                                    row.col(|ui| {
-                                        match col {
-                                            SongColumn::Name => {
-                                                if ui.selectable_label(is_sel, &self.songs[orig_idx].title).clicked() {
-                                                    sel = Some(orig_idx);
-                                                    sd = 0;
-                                                }
-                                            }
-                                            SongColumn::Artist => {
-                                                if ui.selectable_label(is_sel, &self.songs[orig_idx].artist).clicked() {
-                                                    sel = Some(orig_idx);
-                                                    sd = 0;
-                                                }
-                                            }
-                                            SongColumn::Level => {
-                                                let text = self.songs[orig_idx].levels[di].to_string();
-                                                if ui.selectable_label(is_sel, &text).clicked() {
-                                                    sel = Some(orig_idx);
-                                                    sd = 0;
-                                                }
-                                            }
-                                            SongColumn::Bpm => {
-                                                ui.label(format!("{:.1}", self.songs[orig_idx].bpm));
-                                            }
-                                            SongColumn::Duration => {
-                                                let d = self.songs[orig_idx].durations_sec[di];
-                                                ui.label(format!("{}:{:02}", d as u32 / 60, d as u32 % 60));
-                                            }
-                                            SongColumn::Genre => {
-                                                if self.songs[orig_idx].genre == 0 {
-                                                    ui.label("");
-                                                } else {
-                                                    ui.label(genre_name(self.songs[orig_idx].genre));
-                                                }
-                                            }
+                    // Body rows — .rows() virtualizes: only visible rows are rendered
+                    table.body(|body| {
+                        body.rows(18.0, sorted_indices.len(), |mut row| {
+                            let orig_idx = sorted_indices[row.index()];
+                            let is_sel = sel == Some(orig_idx);
+                            row.set_selected(is_sel);
+                            for col in &visible {
+                                row.col(|ui| match col {
+                                    SongColumn::Name => {
+                                        if ui
+                                            .selectable_label(is_sel, &self.songs[orig_idx].title)
+                                            .clicked()
+                                        {
+                                            sel = Some(orig_idx);
+                                            sd = 0;
                                         }
-                                    });
-                                }
-                            });
-                        }
+                                    }
+                                    SongColumn::Artist => {
+                                        if ui
+                                            .selectable_label(is_sel, &self.songs[orig_idx].artist)
+                                            .clicked()
+                                        {
+                                            sel = Some(orig_idx);
+                                            sd = 0;
+                                        }
+                                    }
+                                    SongColumn::Level => {
+                                        let text = self.songs[orig_idx].levels[di].to_string();
+                                        if ui.selectable_label(is_sel, &text).clicked() {
+                                            sel = Some(orig_idx);
+                                            sd = 0;
+                                        }
+                                    }
+                                    SongColumn::Bpm => {
+                                        ui.label(format!("{:.1}", self.songs[orig_idx].bpm));
+                                    }
+                                    SongColumn::Duration => {
+                                        let d = self.songs[orig_idx].durations_sec[di];
+                                        ui.label(format!("{}:{:02}", d as u32 / 60, d as u32 % 60));
+                                    }
+                                    SongColumn::Genre => {
+                                        if self.songs[orig_idx].genre == 0 {
+                                            ui.label("");
+                                        } else {
+                                            ui.label(genre_name(self.songs[orig_idx].genre));
+                                        }
+                                    }
+                                });
+                            }
+                        });
                     });
 
                     // Apply sort click
@@ -1143,7 +1247,10 @@ impl MenuApp {
                                     }
                                     let is_selected = self.selected_difficulty == i;
                                     if ui
-                                        .selectable_label(is_selected, format!("{} [{}]", dn[i], level))
+                                        .selectable_label(
+                                            is_selected,
+                                            format!("{} [{}]", dn[i], level),
+                                        )
                                         .clicked()
                                     {
                                         self.selected_difficulty = i;
@@ -1291,17 +1398,21 @@ impl MenuApp {
         });
     }
 
-    fn ui_configuration(&mut self, ui: &mut egui::Ui) {
+    fn ui_configuration(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        // Ensure monitor info is populated before rendering display config
+        self.ensure_monitor_info(ctx);
+        let native_res = self.monitor_native_resolution;
+
         egui::ScrollArea::vertical()
             .id_salt("config_scroll")
             .show(ui, |ui| {
                 ui.group(|ui| {
-                    ui_key_bind_editor(ui, &mut self.config);
+                    ui_key_bind_editor(ui, &mut self.config, &mut self.key_capture_state);
                 });
                 self.mark_dirty();
                 ui.separator();
                 ui.group(|ui| {
-                    ui_display_config(ui, &mut self.config.game_options);
+                    ui_display_config(ui, &mut self.config.game_options, native_res);
                 });
                 self.mark_dirty();
                 ui.separator();
