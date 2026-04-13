@@ -908,41 +908,50 @@ impl MenuApp {
                 });
                 ui.separator();
 
-                egui::ScrollArea::both()
-                    .id_salt("song_list_scroll")
-                    .show(ui, |ui| {
-                        let sorted = self.sorted_songs();
-                        let mut sel = self.selected_song;
-                        let mut sd = self.selected_difficulty;
-                        let di = self.selected_difficulty.min(2);
+                // ── Song list table (sticky header + scrollable body) ──
+                {
+                    // Collect sorted data out of self before entering TableBuilder closure
+                    let sorted_indices: Vec<usize> = self.sorted_songs().into_iter().map(|(i, _)| i).collect();
+                    let mut sel = self.selected_song;
+                    let mut sd = self.selected_difficulty;
+                    let di = self.selected_difficulty.min(2);
 
-                        let all_cols = [
-                            SongColumn::Name,
-                            SongColumn::Artist,
-                            SongColumn::Level,
-                            SongColumn::Bpm,
-                            SongColumn::Duration,
-                            SongColumn::Genre,
-                        ];
-                        let vc = self.visible_columns;
-                        let visible: Vec<_> =
-                            all_cols.into_iter().filter(|c| vc[*c as usize]).collect();
+                    let all_cols = [
+                        SongColumn::Name,
+                        SongColumn::Artist,
+                        SongColumn::Level,
+                        SongColumn::Bpm,
+                        SongColumn::Duration,
+                        SongColumn::Genre,
+                    ];
+                    let vc = self.visible_columns;
+                    let visible: Vec<_> =
+                        all_cols.into_iter().filter(|c| vc[*c as usize]).collect();
 
-                        let cur_col = self.sort_column;
-                        let cur_asc = self.sort_ascending;
-                        let mut clicked_sort: Option<SongSortColumn> = None;
+                    let cur_col = self.sort_column;
+                    let cur_asc = self.sort_ascending;
+                    let mut clicked_sort: Option<SongSortColumn> = None;
 
-                        egui::Grid::new("song_grid").striped(true).show(ui, |ui| {
-                            // Header row
-                            for col in &visible {
+                    // Build column list for TableBuilder — first col gets remainder, rest are initial
+                    let mut builder = egui_extras::TableBuilder::new(ui)
+                        .id_salt("song_table")
+                        .striped(true);
+                    for (i, _col) in visible.iter().enumerate() {
+                        if i == 0 {
+                            builder = builder.column(egui_extras::Column::remainder());
+                        } else {
+                            builder = builder.column(egui_extras::Column::initial(80.0).resizable(true));
+                        }
+                    }
+
+                    // Header row — .header() returns Table (not TableBuilder)
+                    let table = builder.header(20.0, |mut header| {
+                        for col in &visible {
+                            header.col(|ui| {
                                 if let Some(sort_col) = col.to_sort_column() {
                                     let is_active = cur_col == sort_col;
                                     let arrow = if is_active {
-                                        if cur_asc {
-                                            " ▲"
-                                        } else {
-                                            " ▼"
-                                        }
+                                        if cur_asc { " ^" } else { " v" }
                                     } else {
                                         ""
                                     };
@@ -958,58 +967,71 @@ impl MenuApp {
                                 } else {
                                     ui.label(col.header_label());
                                 }
-                            }
-                            ui.end_row();
-
-                            // Data rows
-                            for (orig_idx, song) in sorted {
-                                let is_sel = sel == Some(orig_idx);
-                                for col in &visible {
-                                    let text = match col {
-                                        SongColumn::Name => &song.title,
-                                        SongColumn::Artist => &song.artist,
-                                        SongColumn::Level => &song.levels[di].to_string(),
-                                        SongColumn::Bpm => {
-                                            let s = format!("{:.1}", song.bpm);
-                                            ui.label(s);
-                                            continue;
-                                        }
-                                        SongColumn::Duration => {
-                                            let d = song.durations_sec[di];
-                                            let s =
-                                                format!("{}:{:02}", d as u32 / 60, d as u32 % 60);
-                                            ui.label(s);
-                                            continue;
-                                        }
-                                        SongColumn::Genre => {
-                                            if song.genre == 0 {
-                                                ui.label("");
-                                            } else {
-                                                ui.label(genre_name(song.genre));
-                                            }
-                                            continue;
-                                        }
-                                    };
-                                    if ui.selectable_label(is_sel, text).clicked() {
-                                        sel = Some(orig_idx);
-                                        sd = 0;
-                                    }
-                                }
-                                ui.end_row();
-                            }
-                        });
-                        // Apply sort click after Grid (avoids mutable borrow during Grid)
-                        if let Some(sc) = clicked_sort {
-                            if cur_col == sc {
-                                self.sort_ascending = !cur_asc;
-                            } else {
-                                self.sort_column = sc;
-                                self.sort_ascending = true;
-                            }
+                            });
                         }
-                        self.selected_song = sel;
-                        self.selected_difficulty = sd;
                     });
+
+                    // Body rows
+                    table.body(|mut body| {
+                        for &orig_idx in &sorted_indices {
+                            body.row(18.0, |mut row| {
+                                let is_sel = sel == Some(orig_idx);
+                                row.set_selected(is_sel);
+                                for col in &visible {
+                                    row.col(|ui| {
+                                        match col {
+                                            SongColumn::Name => {
+                                                if ui.selectable_label(is_sel, &self.songs[orig_idx].title).clicked() {
+                                                    sel = Some(orig_idx);
+                                                    sd = 0;
+                                                }
+                                            }
+                                            SongColumn::Artist => {
+                                                if ui.selectable_label(is_sel, &self.songs[orig_idx].artist).clicked() {
+                                                    sel = Some(orig_idx);
+                                                    sd = 0;
+                                                }
+                                            }
+                                            SongColumn::Level => {
+                                                let text = self.songs[orig_idx].levels[di].to_string();
+                                                if ui.selectable_label(is_sel, &text).clicked() {
+                                                    sel = Some(orig_idx);
+                                                    sd = 0;
+                                                }
+                                            }
+                                            SongColumn::Bpm => {
+                                                ui.label(format!("{:.1}", self.songs[orig_idx].bpm));
+                                            }
+                                            SongColumn::Duration => {
+                                                let d = self.songs[orig_idx].durations_sec[di];
+                                                ui.label(format!("{}:{:02}", d as u32 / 60, d as u32 % 60));
+                                            }
+                                            SongColumn::Genre => {
+                                                if self.songs[orig_idx].genre == 0 {
+                                                    ui.label("");
+                                                } else {
+                                                    ui.label(genre_name(self.songs[orig_idx].genre));
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                    });
+
+                    // Apply sort click
+                    if let Some(sc) = clicked_sort {
+                        if cur_col == sc {
+                            self.sort_ascending = !cur_asc;
+                        } else {
+                            self.sort_column = sc;
+                            self.sort_ascending = true;
+                        }
+                    }
+                    self.selected_song = sel;
+                    self.selected_difficulty = sd;
+                }
 
                 // Lazy cover extraction on background thread when selection changes
                 if let Some(idx) = self.selected_song {

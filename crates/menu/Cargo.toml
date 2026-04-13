@@ -9,6 +9,7 @@ open2jam-rs-core = { path = "../core" }
 open2jam-rs-ojn = { path = "../ojn" }
 eframe = "0.30"
 egui = "0.30"
+egui_extras = "0.30"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
