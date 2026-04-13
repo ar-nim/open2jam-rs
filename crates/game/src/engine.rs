@@ -13,6 +13,7 @@ use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::Window;
+use winit::keyboard::Key;
 
 use crate::audio::AudioManager;
 use crate::game_state::GameState;
@@ -22,8 +23,21 @@ use crate::parsing::TimedEvent;
 use crate::render::atlas::SkinAtlas;
 use crate::render::hud::{render_hud_with_atlas, HudLayout};
 use crate::render::textured_renderer::{BlendMode, TexturedRenderer};
+use open2jam_rs_core::Config;
+use open2jam_rs_core::game_options::SpeedType;
 
-const SCROLL_SPEED: f64 = 4.0;
+/// Base scroll speed — multiplied by user-configured speed multiplier.
+const BASE_SCROLL_SPEED: f64 = 4.0;
+
+/// Build a key name → lane index mapping from the config's K7 layout.
+fn build_key_mapping(keys: &[open2jam_rs_core::key_bindings::KeyMap]) -> HashMap<String, usize> {
+    let mut map = HashMap::new();
+    for (lane, key_map) in keys.iter().enumerate() {
+        map.insert(key_map.key.clone(), lane);
+    }
+    info!("Key bindings loaded: {:?}", map);
+    map
+}
 
 /// GPU resources that must be dropped before the device.
 /// This wrapper allows explicit drop ordering to prevent segfaults.
@@ -89,10 +103,31 @@ pub struct App {
     hybrid_clock_frame_count: u64,
     /// Whether auto-play mode is enabled (false = manual input mode).
     auto_play: bool,
+    /// Config-driven game settings
+    display_width: u32,
+    display_height: u32,
+    display_fullscreen: bool,
+    scroll_speed: f64,
+    difficulty: open2jam_rs_core::Difficulty,
+    /// Key name → lane index mapping (built from config)
+    key_to_lane: HashMap<String, usize>,
 }
 
 impl App {
-    pub fn new(ojn_path: Option<std::path::PathBuf>, auto_play: bool) -> Result<Self> {
+    pub fn new(ojn_path: Option<std::path::PathBuf>, auto_play: bool, config: &Config) -> Result<Self> {
+        let opts = &config.game_options;
+
+        // Compute scroll speed from config
+        let scroll_speed = if opts.speed_type == SpeedType::HiSpeed {
+            BASE_SCROLL_SPEED * opts.speed_multiplier as f64
+        } else {
+            BASE_SCROLL_SPEED
+        };
+        info!(
+            "Scroll speed: {:.1} (speed_type={:?}, multiplier={:.1})",
+            scroll_speed, opts.speed_type, opts.speed_multiplier
+        );
+
         Ok(Self {
             ojn_path,
             event_loop: None,
@@ -107,6 +142,12 @@ impl App {
             hybrid_clock_prev_delta: None,
             hybrid_clock_frame_count: 0,
             auto_play,
+            display_width: opts.display_width,
+            display_height: opts.display_height,
+            display_fullscreen: opts.display_fullscreen,
+            scroll_speed,
+            difficulty: opts.difficulty,
+            key_to_lane: build_key_mapping(&config.key_bindings.k7.lanes),
         })
     }
 
@@ -136,12 +177,24 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.render.is_none() {
-            info!("Creating window and initialising wgpu...");
-            let attrs = winit::window::WindowAttributes::default()
+            info!(
+                "Creating window ({}x{}, fullscreen={}) and initialising wgpu...",
+                self.display_width, self.display_height, self.display_fullscreen
+            );
+
+            let mut attrs = winit::window::WindowAttributes::default()
                 .with_title("open2jam-rs")
-                .with_inner_size(winit::dpi::LogicalSize::new(1000, 750))
+                .with_inner_size(winit::dpi::LogicalSize::new(
+                    self.display_width as f64,
+                    self.display_height as f64,
+                ))
                 .with_visible(true)
                 .with_resizable(true);
+
+            if self.display_fullscreen {
+                attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            }
+
             let window = event_loop.create_window(attrs).unwrap();
             self.init_wgpu(window);
 
@@ -174,13 +227,57 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                use crate::resources::key_bindings::key_to_lane;
                 use winit::event::ElementState;
-                use winit::keyboard::{Key, NamedKey};
+                use winit::keyboard::NamedKey;
 
                 // Process lane key input during rendering and startup
                 // Use OS hardware timestamps for frame-quantisation-free input
-                if let Some(lane) = key_to_lane(&event.logical_key) {
+                let lane = match &event.logical_key {
+                    // Character keys: match by the character text
+                    Key::Character(c) => self.key_to_lane.get(c.as_str()).copied(),
+                    // Named keys: match by canonical name
+                    Key::Named(named) => {
+                        // Only match named keys that winit 0.30 actually has as variants.
+                        // Punctuation keys (comma, semicolon, etc.) are character keys.
+                        let name = match named {
+                            NamedKey::Space => "Space",
+                            NamedKey::Enter => "Enter",
+                            NamedKey::Escape => "Escape",
+                            NamedKey::Tab => "Tab",
+                            NamedKey::Backspace => "Backspace",
+                            NamedKey::Delete => "Delete",
+                            NamedKey::Insert => "Insert",
+                            NamedKey::ArrowUp => "ArrowUp",
+                            NamedKey::ArrowDown => "ArrowDown",
+                            NamedKey::ArrowLeft => "ArrowLeft",
+                            NamedKey::ArrowRight => "ArrowRight",
+                            NamedKey::Home => "Home",
+                            NamedKey::End => "End",
+                            NamedKey::PageUp => "PageUp",
+                            NamedKey::PageDown => "PageDown",
+                            NamedKey::Shift => "Shift",
+                            NamedKey::Control => "Control",
+                            NamedKey::Alt => "Alt",
+                            NamedKey::F1 => "F1",
+                            NamedKey::F2 => "F2",
+                            NamedKey::F3 => "F3",
+                            NamedKey::F4 => "F4",
+                            NamedKey::F5 => "F5",
+                            NamedKey::F6 => "F6",
+                            NamedKey::F7 => "F7",
+                            NamedKey::F8 => "F8",
+                            NamedKey::F9 => "F9",
+                            NamedKey::F10 => "F10",
+                            NamedKey::F11 => "F11",
+                            NamedKey::F12 => "F12",
+                            _ => "Unknown",
+                        };
+                        self.key_to_lane.get(name).copied()
+                    }
+                    _ => None,
+                };
+
+                if let Some(lane) = lane {
                     if let Some(gs) = &mut self.game_state {
                         let os_timestamp = std::time::Instant::now();
                         match event.state {
@@ -269,9 +366,17 @@ impl ApplicationHandler for App {
                             .and_then(|g| g.skin.clone());
 
                         let (tx, rx) = mpsc::channel();
+                        let scroll_speed = self.scroll_speed;
+                        let auto_play = self.auto_play;
+                        let difficulty = self.difficulty;
                         let thread_handle = thread::spawn(move || {
-                            let result =
-                                GameState::load(&path, SCROLL_SPEED, auto_play, skin_res.as_ref());
+                            let result = GameState::load(
+                                &path,
+                                scroll_speed,
+                                auto_play,
+                                difficulty,
+                                skin_res.as_ref(),
+                            );
                             let _ = tx.send(LoadingMessage::GameLoaded(result));
                         });
 
