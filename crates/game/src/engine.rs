@@ -27,7 +27,7 @@ use open2jam_rs_core::game_options::SpeedType;
 use open2jam_rs_core::Config;
 
 /// Base scroll speed — multiplied by user-configured speed multiplier.
-const BASE_SCROLL_SPEED: f64 = 4.0;
+const BASE_SCROLL_SPEED: f64 = 1.0;
 
 /// Build a key name → lane index mapping from the config's K7 layout.
 fn build_key_mapping(keys: &[open2jam_rs_core::key_bindings::KeyMap]) -> HashMap<String, usize> {
@@ -37,6 +37,84 @@ fn build_key_mapping(keys: &[open2jam_rs_core::key_bindings::KeyMap]) -> HashMap
     }
     info!("Key bindings loaded: {:?}", map);
     map
+}
+
+/// Convert a character from `Key::Character` to the config storage format.
+///
+/// Config stores keys as winit PhysicalKey names:
+///   - Letters: "KeyA".."KeyZ" (always uppercase)
+///   - Digits: "Digit0".."Digit9"
+///   - Punctuation: "Comma", "Period", "Semicolon", "Quote", "Slash", etc.
+///   - Special: "Space"
+fn config_key_for_character(c: &str) -> &str {
+    // Single ASCII letter → "KeyX"
+    if c.len() == 1 {
+        let ch = c.chars().next().unwrap();
+        if ch.is_ascii_alphabetic() {
+            // We need to return a &'static str, so use a match
+            return match ch.to_ascii_uppercase() {
+                'A' => "KeyA",
+                'B' => "KeyB",
+                'C' => "KeyC",
+                'D' => "KeyD",
+                'E' => "KeyE",
+                'F' => "KeyF",
+                'G' => "KeyG",
+                'H' => "KeyH",
+                'I' => "KeyI",
+                'J' => "KeyJ",
+                'K' => "KeyK",
+                'L' => "KeyL",
+                'M' => "KeyM",
+                'N' => "KeyN",
+                'O' => "KeyO",
+                'P' => "KeyP",
+                'Q' => "KeyQ",
+                'R' => "KeyR",
+                'S' => "KeyS",
+                'T' => "KeyT",
+                'U' => "KeyU",
+                'V' => "KeyV",
+                'W' => "KeyW",
+                'X' => "KeyX",
+                'Y' => "KeyY",
+                'Z' => "KeyZ",
+                _ => c,
+            };
+        }
+        if ch.is_ascii_digit() {
+            return match ch {
+                '0' => "Digit0",
+                '1' => "Digit1",
+                '2' => "Digit2",
+                '3' => "Digit3",
+                '4' => "Digit4",
+                '5' => "Digit5",
+                '6' => "Digit6",
+                '7' => "Digit7",
+                '8' => "Digit8",
+                '9' => "Digit9",
+                _ => c,
+            };
+        }
+        // Punctuation characters
+        return match ch {
+            ',' => "Comma",
+            '.' => "Period",
+            ';' => "Semicolon",
+            '\'' => "Quote",
+            '/' => "Slash",
+            '\\' => "Backslash",
+            '[' => "BracketLeft",
+            ']' => "BracketRight",
+            '-' => "Minus",
+            '=' => "Equal",
+            '`' => "Backquote",
+            ' ' => "Space",
+            _ => c,
+        };
+    }
+    c
 }
 
 /// GPU resources that must be dropped before the device.
@@ -237,8 +315,11 @@ impl ApplicationHandler for App {
                 // Process lane key input during rendering and startup
                 // Use OS hardware timestamps for frame-quantisation-free input
                 let lane = match &event.logical_key {
-                    // Character keys: match by the character text
-                    Key::Character(c) => self.key_to_lane.get(c.as_str()).copied(),
+                    // Character keys: convert to config format (e.g. "s" → "KeyS")
+                    Key::Character(c) => {
+                        let lookup = config_key_for_character(c);
+                        self.key_to_lane.get(lookup).copied()
+                    }
                     // Named keys: match by canonical name
                     Key::Named(named) => {
                         // Only match named keys that winit 0.30 actually has as variants.
