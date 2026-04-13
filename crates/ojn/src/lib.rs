@@ -35,7 +35,7 @@ pub enum Difficulty {
 pub enum Channel {
     TimeSignature,
     BpmChange,
-    Note(u8), // lanes 1-7
+    Note(u8),     // lanes 1-7
     AutoPlay(u8), // channels 9-15
 }
 
@@ -62,7 +62,7 @@ impl Channel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NoteType {
     Tap,
-    Hold,  // HEAD of a long note
+    Hold,    // HEAD of a long note
     Release, // TAIL of a long note
 }
 
@@ -152,6 +152,7 @@ pub struct OjnHeader {
     pub artist: String,
     pub noter: String,
     pub ojm_filename: String,
+    pub bmp_size: u32,
     pub cover_size: u32,
     pub duration_easy: u32,
     pub duration_normal: u32,
@@ -203,6 +204,95 @@ pub fn extract_cover_image(data: &[u8]) -> Result<Vec<u8>, OjnError> {
         });
     }
     Ok(data[offset..offset + size].to_vec())
+}
+
+/// Extract the BMP thumbnail (typically 8×8) from OJN file bytes.
+/// The BMP data starts right after the cover JPEG image.
+/// Returns raw BMP bytes if a thumbnail exists.
+pub fn extract_bmp_thumbnail(data: &[u8]) -> Result<Vec<u8>, OjnError> {
+    let header = parse_header(data)?;
+    if header.cover_offset == 0 || header.bmp_size == 0 {
+        return Err(OjnError::NoCoverImage);
+    }
+    let offset = (header.cover_offset + header.cover_size) as usize;
+    let size = header.bmp_size as usize;
+    if offset + size > data.len() {
+        return Err(OjnError::Truncated {
+            expected: offset + size,
+            actual: data.len(),
+        });
+    }
+    Ok(data[offset..offset + size].to_vec())
+}
+
+/// Extract and decode the BMP thumbnail as RGBA pixels, ready for GPU upload.
+/// Returns `(width, height, rgba_bytes)` or `None` if no thumbnail exists.
+pub fn decode_bmp_thumbnail(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    let bmp_bytes = extract_bmp_thumbnail(data).ok()?;
+    decode_bmp(&bmp_bytes)
+}
+
+/// Decode raw BMP bytes into RGBA pixel data.
+/// Supports both 24-bit BMP (no alpha) and 32-bit BMP (RGBA).
+fn decode_bmp(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    if data.len() < 54 {
+        return None;
+    }
+    // BMP magic: 'B' 'M'
+    if data[0] != b'B' || data[1] != b'M' {
+        return None;
+    }
+
+    let data_offset = u32::from_le_bytes([data[10], data[11], data[12], data[13]]) as usize;
+    let width = i32::from_le_bytes([data[18], data[19], data[20], data[21]]) as usize;
+    let height_abs = (i32::from_le_bytes([data[22], data[23], data[24], data[25]])).unsigned_abs() as usize;
+    let bpp = u16::from_le_bytes([data[28], data[29]]) as u32;
+
+    if width == 0 || height_abs == 0 || data_offset >= data.len() {
+        return None;
+    }
+
+    let pixel_data = &data[data_offset..];
+
+    // BMP rows are bottom-to-top and padded to 4-byte boundaries.
+    // Each row size = ceil(width * bpp / 8) rounded up to 4 bytes.
+    let bytes_per_pixel = (bpp + 7) / 8;
+    let row_stride = (width * bytes_per_pixel as usize + 3) & !3;
+
+    if pixel_data.len() < row_stride * height_abs {
+        return None;
+    }
+
+    let mut rgba = Vec::with_capacity(width * height_abs * 4);
+
+    // Iterate rows bottom-to-top (BMP storage order), convert to RGBA
+    for row in (0..height_abs).rev() {
+        let row_start = row * row_stride;
+        for col in 0..width {
+            let px = row_start + col * bytes_per_pixel as usize;
+            if px + 3 <= pixel_data.len() {
+                match bpp {
+                    24 => {
+                        // BGR
+                        rgba.push(pixel_data[px + 2]); // R
+                        rgba.push(pixel_data[px + 1]); // G
+                        rgba.push(pixel_data[px]);     // B
+                        rgba.push(255);                // A
+                    }
+                    32 => {
+                        // BGRA
+                        rgba.push(pixel_data[px + 2]); // R
+                        rgba.push(pixel_data[px + 1]); // G
+                        rgba.push(pixel_data[px]);     // B
+                        rgba.push(pixel_data[px + 3]); // A
+                    }
+                    _ => return None,
+                }
+            }
+        }
+    }
+
+    Some((width, height_abs, rgba))
 }
 
 // ---------------------------------------------------------------------------
@@ -356,7 +446,7 @@ fn parse_header(data: &[u8]) -> Result<OjnHeader, OjnError> {
         // [64..76] package counts (unused for now)
         // [76..80] old encode version, old song ID
         // [80..100] old genre
-        // [100..104] bmp_size
+        bmp_size: u32::from_le_bytes([data[100], data[101], data[102], data[103]]),
         // [104..108] old file version
         title: decode_c_string(&data[108..172]),
         artist: decode_c_string(&data[172..204]),
@@ -419,7 +509,12 @@ fn parse_difficulty_notes(
             break;
         }
 
-        let measure_num = u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
+        let measure_num = u32::from_le_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]);
         let channel_num = u16::from_le_bytes([data[offset + 4], data[offset + 5]]);
         let events_count = u16::from_le_bytes([data[offset + 6], data[offset + 7]]);
         offset += 8;
@@ -432,7 +527,12 @@ fn parse_difficulty_notes(
 
         let mut events = Vec::with_capacity(events_count as usize);
         for _ in 0..events_count {
-            let event_bytes = [data[offset], data[offset + 1], data[offset + 2], data[offset + 3]];
+            let event_bytes = [
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ];
             events.push(event_bytes);
             offset += 4;
         }
@@ -496,7 +596,10 @@ fn build_timed_events(
         }
 
         // Add measure marker for current measure (before processing events)
-        if !events.iter().any(|e| matches!(e, TimedEvent::Measure(m) if m.measure == measure_num)) {
+        if !events
+            .iter()
+            .any(|e| matches!(e, TimedEvent::Measure(m) if m.measure == measure_num))
+        {
             events.push(TimedEvent::Measure(MeasureEvent {
                 time_ms,
                 measure: measure_num,
@@ -589,7 +692,9 @@ fn build_timed_events(
             TimedEvent::BpmChange(b) => b.time_ms,
             TimedEvent::Measure(m) => m.time_ms,
         };
-        time_a.partial_cmp(&time_b).unwrap_or(std::cmp::Ordering::Equal)
+        time_a
+            .partial_cmp(&time_b)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // Pair long note HOLD/RELEASE events (second pass)
@@ -647,7 +752,11 @@ mod tests {
         let h = &chart.header;
 
         assert_eq!(h.song_id, 100);
-        assert!((h.bpm - 130.0).abs() < 1.0, "BPM should be ~130, got {}", h.bpm);
+        assert!(
+            (h.bpm - 130.0).abs() < 1.0,
+            "BPM should be ~130, got {}",
+            h.bpm
+        );
         assert_eq!(h.title, "Bach Alive");
         assert_eq!(h.artist, "Beautiful Day");
         assert_eq!(h.noter, "HWAN");
@@ -707,16 +816,26 @@ mod tests {
     #[test]
     fn test_chart_has_events() {
         let chart = parse_file("test_assets/o2ma100.ojn").expect("Failed to parse OJN");
-        let note_count = chart.events.iter().filter(|e| matches!(e, TimedEvent::Note(_))).count();
-        assert!(note_count > 0, "Chart should have note events, got {}", note_count);
+        let note_count = chart
+            .events
+            .iter()
+            .filter(|e| matches!(e, TimedEvent::Note(_)))
+            .count();
+        assert!(
+            note_count > 0,
+            "Chart should have note events, got {}",
+            note_count
+        );
 
         // Print first 30 events to check ordering
         println!("First 30 events (sorted by time):");
         for (i, event) in chart.events.iter().enumerate().take(30) {
             match event {
                 TimedEvent::Note(n) => {
-                    println!("  [{}] Note at {:.1}ms, lane {:?}, type: {:?}, end_time: {:?}",
-                        i, n.time_ms, n.channel, n.note_type, n.end_time_ms);
+                    println!(
+                        "  [{}] Note at {:.1}ms, lane {:?}, type: {:?}, end_time: {:?}",
+                        i, n.time_ms, n.channel, n.note_type, n.end_time_ms
+                    );
                 }
                 TimedEvent::BpmChange(b) => {
                     println!("  [{}] BPM at {:.1}ms, bpm={}", i, b.time_ms, b.bpm);
@@ -728,7 +847,9 @@ mod tests {
         }
 
         // Check unique measure numbers
-        let measure_nums: Vec<u32> = chart.events.iter()
+        let measure_nums: Vec<u32> = chart
+            .events
+            .iter()
             .filter_map(|e| match e {
                 TimedEvent::Measure(m) => Some(m.measure),
                 _ => None,
@@ -737,7 +858,9 @@ mod tests {
         println!("\nMeasure numbers in events: {:?}", measure_nums);
 
         // Check long notes
-        let long_note_heads: Vec<_> = chart.events.iter()
+        let long_note_heads: Vec<_> = chart
+            .events
+            .iter()
             .filter_map(|e| match e {
                 TimedEvent::Note(n) if n.note_type == NoteType::Hold => Some(n),
                 _ => None,
@@ -746,15 +869,21 @@ mod tests {
 
         println!("\nLong note heads: {}", long_note_heads.len());
         for ln in &long_note_heads {
-            println!("  HOLD at {:.1}ms, lane {:?}, end_time_ms: {:?}",
-                ln.time_ms, ln.channel, ln.end_time_ms);
+            println!(
+                "  HOLD at {:.1}ms, lane {:?}, end_time_ms: {:?}",
+                ln.time_ms, ln.channel, ln.end_time_ms
+            );
         }
     }
 
     #[test]
     fn test_chart_has_measure_markers() {
         let chart = parse_file("test_assets/o2ma100.ojn").expect("Failed to parse OJN");
-        let measure_count = chart.events.iter().filter(|e| matches!(e, TimedEvent::Measure(_))).count();
+        let measure_count = chart
+            .events
+            .iter()
+            .filter(|e| matches!(e, TimedEvent::Measure(_)))
+            .count();
         assert!(measure_count > 0, "Chart should have measure markers");
     }
 }
