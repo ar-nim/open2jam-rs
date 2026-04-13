@@ -261,29 +261,58 @@ impl App {
         }
         self.audio = Some(audio_mgr);
 
-        // Set up frame limiter if VSync is not On (Fast or Off modes)
-        if self.vsync_mode != open2jam_rs_core::game_options::VSyncMode::On {
-            let target_fps = match self.fps_limiter {
-                open2jam_rs_core::game_options::FpsLimiter::Unlimited => None,
-                open2jam_rs_core::game_options::FpsLimiter::X1 => {
-                    // Will be set after window creation when we know refresh rate
-                    None
-                }
-                open2jam_rs_core::game_options::FpsLimiter::X2 => Some(120.0), // placeholder, updated later
-                open2jam_rs_core::game_options::FpsLimiter::X4 => Some(240.0),
-                open2jam_rs_core::game_options::FpsLimiter::X8 => Some(480.0),
-            };
-            if let Some(fps) = target_fps {
-                self.frame_limiter = Some(spin_sleep::LoopHelper::builder().build_with_target_rate(fps));
-                info!("Frame limiter enabled at {:.0} fps", fps);
-            }
-        }
-
         let event_loop = self.event_loop.take().unwrap();
         event_loop.run_app(&mut self)?;
 
         info!("App shutting down.");
         Ok(())
+    }
+
+    /// Set up the hybrid spin-sleep frame limiter based on monitor refresh rate
+    /// and the configured FPS limiter multiplier.
+    fn setup_frame_limiter(&mut self) {
+        use open2jam_rs_core::game_options::{FpsLimiter, VSyncMode};
+
+        // Skip if VSync is On (wgpu handles pacing)
+        if self.vsync_mode == VSyncMode::On {
+            return;
+        }
+
+        // Skip if Unlimited
+        if self.fps_limiter == FpsLimiter::Unlimited {
+            return;
+        }
+
+        // Get the refresh rate from the window's current monitor
+        let base_hz = self
+            .render
+            .as_ref()
+            .and_then(|r| r.window.current_monitor())
+            .and_then(|monitor| {
+                // Get the video mode with the highest refresh rate (likely the native one)
+                let modes: Vec<_> = monitor.video_modes().collect();
+                modes
+                    .into_iter()
+                    .max_by_key(|vm| vm.refresh_rate_millihertz())
+            })
+            .map(|vm| vm.refresh_rate_millihertz() as f64 / 1000.0)
+            .unwrap_or(60.0); // Fallback to 60 Hz
+
+        let multiplier = match self.fps_limiter {
+            FpsLimiter::X1 => 1.0,
+            FpsLimiter::X2 => 2.0,
+            FpsLimiter::X4 => 4.0,
+            FpsLimiter::X8 => 8.0,
+            FpsLimiter::Unlimited => 1.0, // unreachable, handled above
+        };
+
+        let target_fps = base_hz * multiplier;
+        self.frame_limiter =
+            Some(spin_sleep::LoopHelper::builder().build_with_target_rate(target_fps));
+        info!(
+            "Frame limiter: {:.0} Hz × {:.0} = {:.0} fps",
+            base_hz, multiplier, target_fps
+        );
     }
 }
 
@@ -310,6 +339,9 @@ impl ApplicationHandler for App {
 
             let window = event_loop.create_window(attrs).unwrap();
             self.init_wgpu(window);
+
+            // Set up frame limiter based on monitor refresh rate
+            self.setup_frame_limiter();
 
             if self.ojn_path.is_none() {
                 info!("No OJN file specified — running in demo mode (no notes)");
