@@ -8,8 +8,8 @@
 
 /// 192 TPB (ticks per beat) system thresholds in measures.
 /// A measure = 4 beats, so these are fractions of a full measure.
-const COOL_MEASURES: f64 = 6.0 / 192.0;    // ±0.03125 measures
-const GOOD_MEASURES: f64 = 18.0 / 192.0;   // ±0.09375 measures
+const COOL_MEASURES: f64 = 6.0 / 192.0; // ±0.03125 measures
+const GOOD_MEASURES: f64 = 18.0 / 192.0; // ±0.09375 measures
 const BAD_MEASURES_TAP: f64 = 25.0 / 192.0; // ±0.13021 measures (tap notes)
 const BAD_MEASURES_RELEASE: f64 = 24.0 / 192.0; // ±0.125 measures (long note releases)
 
@@ -179,21 +179,33 @@ mod tests {
     fn test_cool_window_at_150_bpm() {
         // At 150 BPM, COOL window should be ~50ms
         let window = cool_window_ms(150.0);
-        assert!((window - 50.0).abs() < 1.0, "COOL window at 150 BPM should be ~50ms, got {}", window);
+        assert!(
+            (window - 50.0).abs() < 1.0,
+            "COOL window at 150 BPM should be ~50ms, got {}",
+            window
+        );
     }
 
     #[test]
     fn test_good_window_at_150_bpm() {
         // At 150 BPM, GOOD window should be ~150ms
         let window = good_window_ms(150.0);
-        assert!((window - 150.0).abs() < 1.0, "GOOD window at 150 BPM should be ~150ms, got {}", window);
+        assert!(
+            (window - 150.0).abs() < 1.0,
+            "GOOD window at 150 BPM should be ~150ms, got {}",
+            window
+        );
     }
 
     #[test]
     fn test_bad_window_tap_at_150_bpm() {
         // At 150 BPM, BAD window (tap) should be ~208ms
         let window = bad_window_ms_tap(150.0);
-        assert!((window - 208.3).abs() < 1.0, "BAD window at 150 BPM should be ~208ms, got {}", window);
+        assert!(
+            (window - 208.3).abs() < 1.0,
+            "BAD window at 150 BPM should be ~208ms, got {}",
+            window
+        );
     }
 
     #[test]

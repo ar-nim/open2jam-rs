@@ -8,10 +8,10 @@
 //! providing continuous, monotonic time for rendering while remaining phase-locked
 //! to the discrete steps of the audio buffer.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::Arc;
 use std::sync::RwLock;
+use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{info, warn};
@@ -92,7 +92,7 @@ impl AudioManager {
                     mixer: Some(mixer),
                     _stream: Some(stream),
                     state,
-                    active: false,  // Stream created but not started
+                    active: false, // Stream created but not started
                     bgm_producer: Some(bgm_producer),
                     shared_sync_point,
                 }
@@ -136,7 +136,9 @@ impl AudioManager {
         let channels = config.channels();
         info!(
             "Audio device: rate={}, channels={}, format={:?}",
-            sample_rate, channels, config.sample_format()
+            sample_rate,
+            channels,
+            config.sample_format()
         );
 
         let (mut mixer_control, mut mixer) = Mixer::<StereoFrame>::new();
@@ -175,15 +177,16 @@ impl AudioManager {
                 .samples_played
                 .fetch_add(frames_len as u64, Ordering::Relaxed);
             let now_ns = callback_token.elapsed().as_nanos() as u64;
-            state
-                .last_callback_instant
-                .store(now_ns, Ordering::Relaxed);
+            state.last_callback_instant.store(now_ns, Ordering::Relaxed);
 
             // Update max (compare-exchange loop)
             let mut current_max = state.max_callback_us.load(Ordering::Relaxed);
             while elapsed_us > current_max {
                 match state.max_callback_us.compare_exchange_weak(
-                    current_max, elapsed_us, Ordering::Relaxed, Ordering::Relaxed,
+                    current_max,
+                    elapsed_us,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
                 ) {
                     Ok(_) => break,
                     Err(val) => current_max = val,
@@ -212,12 +215,14 @@ impl AudioManager {
                     oddio::run(&mut mixer, sample_rate, frames);
                     let elapsed_us = start.elapsed().as_micros() as u32;
                     record_callback(frames.len(), elapsed_us, &state_for_f32);
-                    
+
                     // Broadcast sync point to main thread
                     if let Ok(mut sync) = sync_for_f32.write() {
                         *sync = AudioSyncPoint {
-                            audio_time_ms: state_for_f32.samples_played.load(Ordering::Relaxed) as f64
-                                / state_for_f32.sample_rate.load(Ordering::Relaxed) as f64 * 1000.0,
+                            audio_time_ms: state_for_f32.samples_played.load(Ordering::Relaxed)
+                                as f64
+                                / state_for_f32.sample_rate.load(Ordering::Relaxed) as f64
+                                * 1000.0,
                             os_time: Instant::now(),
                         };
                     }
@@ -239,12 +244,14 @@ impl AudioManager {
                     }
                     let elapsed_us = start.elapsed().as_micros() as u32;
                     record_callback(frame_count, elapsed_us, &state_for_i16);
-                    
+
                     // Broadcast sync point to main thread
                     if let Ok(mut sync) = sync_for_i16.write() {
                         *sync = AudioSyncPoint {
-                            audio_time_ms: state_for_i16.samples_played.load(Ordering::Relaxed) as f64
-                                / state_for_i16.sample_rate.load(Ordering::Relaxed) as f64 * 1000.0,
+                            audio_time_ms: state_for_i16.samples_played.load(Ordering::Relaxed)
+                                as f64
+                                / state_for_i16.sample_rate.load(Ordering::Relaxed) as f64
+                                * 1000.0,
                             os_time: Instant::now(),
                         };
                     }
@@ -266,12 +273,14 @@ impl AudioManager {
                     }
                     let elapsed_us = start.elapsed().as_micros() as u32;
                     record_callback(frame_count, elapsed_us, &state_for_u16);
-                    
+
                     // Broadcast sync point to main thread
                     if let Ok(mut sync) = sync_for_u16.write() {
                         *sync = AudioSyncPoint {
-                            audio_time_ms: state_for_u16.samples_played.load(Ordering::Relaxed) as f64
-                                / state_for_u16.sample_rate.load(Ordering::Relaxed) as f64 * 1000.0,
+                            audio_time_ms: state_for_u16.samples_played.load(Ordering::Relaxed)
+                                as f64
+                                / state_for_u16.sample_rate.load(Ordering::Relaxed) as f64
+                                * 1000.0,
                             os_time: Instant::now(),
                         };
                     }
@@ -440,10 +449,7 @@ impl AudioManager {
         let monotonic = delta >= 0.0;
 
         if prev_time.is_some() && !monotonic {
-            warn!(
-                "Hybrid clock went backwards! delta={:.3}ms",
-                delta
-            );
+            warn!("Hybrid clock went backwards! delta={:.3}ms", delta);
         }
 
         // Warmup: skip jitter warnings for the first 10 frames so the EMA can

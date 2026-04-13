@@ -37,7 +37,11 @@ impl Loader {
     }
 
     /// Start a loading task. Returns the progress receiver.
-    pub fn start_loading<F>(&mut self, total_steps: usize, task: F) -> &mpsc::Receiver<LoadingProgress>
+    pub fn start_loading<F>(
+        &mut self,
+        total_steps: usize,
+        task: F,
+    ) -> &mpsc::Receiver<LoadingProgress>
     where
         F: FnOnce(mpsc::Sender<LoadingProgress>) + Send + 'static,
     {

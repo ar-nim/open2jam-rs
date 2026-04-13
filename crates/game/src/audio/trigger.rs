@@ -176,7 +176,10 @@ impl AudioTriggerSystem {
                 } else {
                     trigger.state = TriggerState::Skipped;
                     self.skip_count += 1;
-                    warn!("Audio trigger skipped: sample {} not found", trigger.event.sample_id);
+                    warn!(
+                        "Audio trigger skipped: sample {} not found",
+                        trigger.event.sample_id
+                    );
                 }
             } else {
                 break;
@@ -209,9 +212,9 @@ impl AudioTriggerSystem {
     }
 
     pub fn was_triggered_within_tolerance(&self, sample_id: u32, _tolerance_ms: u64) -> bool {
-        self.triggers.iter().any(|t| {
-            t.is_fired() && t.event.sample_id == sample_id
-        })
+        self.triggers
+            .iter()
+            .any(|t| t.is_fired() && t.event.sample_id == sample_id)
     }
 
     pub fn get_trigger_drift(&self, sample_id: u32, target_time_ms: u64) -> Option<u64> {

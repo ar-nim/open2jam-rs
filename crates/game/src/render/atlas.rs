@@ -125,7 +125,10 @@ impl SkinAtlas {
             let (atlas_id, sprite_name, frame_index) = if frame_count > 1 {
                 // Multi-frame sprite: use "name_0", "name_1" etc.
                 // We need to track which frame index this is
-                let existing_count = loaded.iter().filter(|l| l.sprite_name == *sprite_id).count();
+                let existing_count = loaded
+                    .iter()
+                    .filter(|l| l.sprite_name == *sprite_id)
+                    .count();
                 (
                     format!("{}_{}", sprite_id, existing_count),
                     sprite_id.clone(),
@@ -184,7 +187,12 @@ impl SkinAtlas {
             warn!("Atlas has zero height");
             return None;
         }
-        info!("Atlas size: {}x{} ({} frames)", atlas_width, atlas_height, placements.len());
+        info!(
+            "Atlas size: {}x{} ({} frames)",
+            atlas_width,
+            atlas_height,
+            placements.len()
+        );
 
         // Pack into atlas image
         let mut atlas_img: image::RgbaImage = image::ImageBuffer::new(atlas_width, atlas_height);
@@ -306,7 +314,10 @@ impl SkinAtlas {
         if !animations.is_empty() {
             info!("Atlas: {} animated sprites", animations.len());
             for (id, a) in &animations {
-                info!("  {} -> {} frames @ {}ms", id, a.frame_count, a.frame_speed_ms);
+                info!(
+                    "  {} -> {} frames @ {}ms",
+                    id, a.frame_count, a.frame_speed_ms
+                );
             }
         }
 

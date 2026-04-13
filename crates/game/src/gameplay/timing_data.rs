@@ -40,14 +40,18 @@ pub struct TimingData {
 
 impl Default for TimingData {
     fn default() -> Self {
-        Self { changes: Vec::new() }
+        Self {
+            changes: Vec::new(),
+        }
     }
 }
 
 impl TimingData {
     /// Create an empty timing data.
     pub fn new() -> Self {
-        Self { changes: Vec::new() }
+        Self {
+            changes: Vec::new(),
+        }
     }
 
     /// Add a BPM change at the given time.
@@ -68,7 +72,11 @@ impl TimingData {
     /// Must be called after all `add()` calls and before any `getBeat()` calls.
     pub fn finish(&mut self) {
         // Sort by time
-        self.changes.sort_by(|a, b| a.time_ms.partial_cmp(&b.time_ms).unwrap_or(std::cmp::Ordering::Equal));
+        self.changes.sort_by(|a, b| {
+            a.time_ms
+                .partial_cmp(&b.time_ms)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Compute cumulative beats. Entries at the same time get the same beat
         // (zero delta), so the last entry's BPM wins — matching Java behavior
@@ -98,7 +106,10 @@ impl TimingData {
         // Find the last entry with time_ms <= target (partition_point).
         // This matches Java's binary search: when multiple entries share
         // the same time, the last one's BPM is used.
-        let idx = self.changes.partition_point(|vc| vc.time_ms <= time_ms).saturating_sub(1);
+        let idx = self
+            .changes
+            .partition_point(|vc| vc.time_ms <= time_ms)
+            .saturating_sub(1);
 
         self.changes[idx].beats_to(time_ms)
     }
@@ -110,7 +121,9 @@ impl TimingData {
         }
 
         let idx = match self.changes.binary_search_by(|vc| {
-            vc.time_ms.partial_cmp(&time_ms).unwrap_or(std::cmp::Ordering::Equal)
+            vc.time_ms
+                .partial_cmp(&time_ms)
+                .unwrap_or(std::cmp::Ordering::Equal)
         }) {
             Ok(i) => i,
             Err(i) => i.saturating_sub(1),
@@ -147,7 +160,11 @@ mod tests {
 
         // At 130 BPM, 1 beat = 60000/130 ≈ 461.54ms
         let beat1 = td.get_beat(1500.0);
-        assert!(beat1.abs() < 0.001, "beat at start should be 0, got {}", beat1);
+        assert!(
+            beat1.abs() < 0.001,
+            "beat at start should be 0, got {}",
+            beat1
+        );
 
         let beat2 = td.get_beat(1500.0 + 60000.0 / 130.0);
         assert!(
@@ -160,8 +177,8 @@ mod tests {
     #[test]
     fn test_bpm_change() {
         let mut td = TimingData::new();
-        td.add(1500.0, 120.0);   // 120 BPM → 500ms per beat
-        td.add(3500.0, 240.0);   // 240 BPM → 250ms per beat at t=3500ms
+        td.add(1500.0, 120.0); // 120 BPM → 500ms per beat
+        td.add(3500.0, 240.0); // 240 BPM → 250ms per beat at t=3500ms
         td.finish();
 
         // At t=1500ms: beat = 0
@@ -188,7 +205,7 @@ mod tests {
     #[test]
     fn test_beat_difference_across_bpm_change() {
         let mut td = TimingData::new();
-        td.add(0.0, 120.0);    // 500ms/beat
+        td.add(0.0, 120.0); // 500ms/beat
         td.add(2000.0, 240.0); // 250ms/beat
         td.finish();
 

@@ -26,7 +26,9 @@ impl Default for KeyboardLayout {
                 KeyMap { key: "KeyS".into() },
                 KeyMap { key: "KeyD".into() },
                 KeyMap { key: "KeyF".into() },
-                KeyMap { key: "Space".into() },
+                KeyMap {
+                    key: "Space".into(),
+                },
                 KeyMap { key: "KeyJ".into() },
                 KeyMap { key: "KeyK".into() },
                 KeyMap { key: "KeyL".into() },
@@ -54,10 +56,14 @@ fn default_k5() -> KeyboardLayout {
     KeyboardLayout {
         lanes: vec![
             KeyMap { key: "KeyD".into() },
-            KeyMap { key: "Space".into() },
+            KeyMap {
+                key: "Space".into(),
+            },
             KeyMap { key: "KeyK".into() },
             KeyMap { key: "KeyL".into() },
-            KeyMap { key: "Semicolon".into() },
+            KeyMap {
+                key: "Semicolon".into(),
+            },
         ],
     }
 }
@@ -67,7 +73,9 @@ fn default_k6() -> KeyboardLayout {
         lanes: vec![
             KeyMap { key: "KeyD".into() },
             KeyMap { key: "KeyF".into() },
-            KeyMap { key: "Space".into() },
+            KeyMap {
+                key: "Space".into(),
+            },
             KeyMap { key: "KeyJ".into() },
             KeyMap { key: "KeyK".into() },
             KeyMap { key: "KeyL".into() },
@@ -82,7 +90,9 @@ fn default_k8() -> KeyboardLayout {
             KeyMap { key: "KeyS".into() },
             KeyMap { key: "KeyD".into() },
             KeyMap { key: "KeyF".into() },
-            KeyMap { key: "Space".into() },
+            KeyMap {
+                key: "Space".into(),
+            },
             KeyMap { key: "KeyJ".into() },
             KeyMap { key: "KeyK".into() },
             KeyMap { key: "KeyL".into() },

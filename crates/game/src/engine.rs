@@ -17,11 +17,11 @@ use winit::window::Window;
 use crate::audio::AudioManager;
 use crate::game_state::GameState;
 use crate::gameplay::scroll::note_y_position_bpm_aware;
-use crate::parsing::TimedEvent;
 use crate::parsing::xml::{parse_file as parse_skin_xml, Resources as SkinResources};
+use crate::parsing::TimedEvent;
 use crate::render::atlas::SkinAtlas;
-use crate::render::textured_renderer::{TexturedRenderer, BlendMode};
-use crate::render::hud::{HudLayout, render_hud_with_atlas};
+use crate::render::hud::{render_hud_with_atlas, HudLayout};
+use crate::render::textured_renderer::{BlendMode, TexturedRenderer};
 
 const SCROLL_SPEED: f64 = 4.0;
 
@@ -174,9 +174,9 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                use crate::resources::key_bindings::key_to_lane;
                 use winit::event::ElementState;
                 use winit::keyboard::{Key, NamedKey};
-                use crate::resources::key_bindings::key_to_lane;
 
                 // Process lane key input during rendering and startup
                 // Use OS hardware timestamps for frame-quantisation-free input
@@ -258,14 +258,20 @@ impl ApplicationHandler for App {
                     self.start_load_game_state = false;
                     if let Some(path) = self.ojn_path.clone() {
                         let auto_play = self.auto_play;
-                        info!("Starting background game state load from: {}", path.display());
-                        let skin_res = self.render.as_ref()
+                        info!(
+                            "Starting background game state load from: {}",
+                            path.display()
+                        );
+                        let skin_res = self
+                            .render
+                            .as_ref()
                             .and_then(|r| r.gpu.as_ref())
                             .and_then(|g| g.skin.clone());
 
                         let (tx, rx) = mpsc::channel();
                         let thread_handle = thread::spawn(move || {
-                            let result = GameState::load(&path, SCROLL_SPEED, auto_play, skin_res.as_ref());
+                            let result =
+                                GameState::load(&path, SCROLL_SPEED, auto_play, skin_res.as_ref());
                             let _ = tx.send(LoadingMessage::GameLoaded(result));
                         });
 
@@ -307,13 +313,11 @@ impl App {
                 .expect("Failed to create surface")
         };
 
-        let adapter = pollster::block_on(instance.request_adapter(
-            &wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
-                force_fallback_adapter: false,
-                compatible_surface: Some(&surface),
-            },
-        ))
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::default(),
+            force_fallback_adapter: false,
+            compatible_surface: Some(&surface),
+        }))
         .expect("Failed to find adapter");
 
         let (device, queue) =
@@ -369,7 +373,10 @@ impl App {
             cover_sampler,
         };
 
-        info!("wgpu surface configured: {}x{}", config.width, config.height);
+        info!(
+            "wgpu surface configured: {}x{}",
+            config.width, config.height
+        );
         self.render = Some(RenderState {
             window,
             surface: Some(surface),
@@ -427,11 +434,16 @@ impl App {
             }
         }
 
-        info!("Skin has {} sprite frames to pack into atlas", frame_entries.len());
+        info!(
+            "Skin has {} sprite frames to pack into atlas",
+            frame_entries.len()
+        );
 
         let speed_map = sprite_speeds;
         let atlas = SkinAtlas::from_frames_with_speed(
-            device, queue, &frame_entries,
+            device,
+            queue,
+            &frame_entries,
             |sprite_id: &str| *speed_map.get(sprite_id).unwrap_or(&50),
             |file: &str| {
                 // Paths already include the skin_dir prefix from the XML parser's base_path
@@ -456,7 +468,14 @@ impl App {
                 a.width,
                 a.height
             );
-            for key in &["head_note_white", "head_note_blue", "head_note_yellow", "judgmentarea", "note_bg", "measure_mark"] {
+            for key in &[
+                "head_note_white",
+                "head_note_blue",
+                "head_note_yellow",
+                "judgmentarea",
+                "note_bg",
+                "measure_mark",
+            ] {
                 if let Some(f) = a.get_frame(key) {
                     info!("  [OK] {} -> uv={:?}, {}x{}", key, f.uv, f.width, f.height);
                 } else {
@@ -478,7 +497,12 @@ impl App {
         queue: &wgpu::Queue,
         config: &wgpu::SurfaceConfiguration,
         ojn_path: &std::path::Path,
-    ) -> (Option<wgpu::Texture>, Option<wgpu::BindGroup>, Option<wgpu::RenderPipeline>, Option<wgpu::Sampler>) {
+    ) -> (
+        Option<wgpu::Texture>,
+        Option<wgpu::BindGroup>,
+        Option<wgpu::RenderPipeline>,
+        Option<wgpu::Sampler>,
+    ) {
         let data = match std::fs::read(ojn_path) {
             Ok(d) => d,
             Err(e) => {
@@ -633,7 +657,12 @@ impl App {
         });
 
         info!("Cover texture uploaded to GPU");
-        (Some(texture), Some(bind_group), Some(pipeline), Some(sampler))
+        (
+            Some(texture),
+            Some(bind_group),
+            Some(pipeline),
+            Some(sampler),
+        )
     }
 
     fn render_frame(&mut self) -> bool {
@@ -643,7 +672,8 @@ impl App {
         };
 
         // Log first time we enter render_frame
-        static FIRST_FRAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        static FIRST_FRAME: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
 
         // If game state is None and not already loading, schedule game load for next redraw
         if self.game_state.is_none() && self.loading_state.is_none() && self.ojn_path.is_some() {
@@ -652,9 +682,19 @@ impl App {
         if !FIRST_FRAME.load(std::sync::atomic::Ordering::Relaxed) {
             FIRST_FRAME.store(true, std::sync::atomic::Ordering::Relaxed);
             info!("=== First render_frame call ===");
-            info!("gpu state: atlas={}, skin={}",
-                render.gpu.as_ref().map(|g| g.atlas.is_some()).unwrap_or(false),
-                render.gpu.as_ref().map(|g| g.skin.is_some()).unwrap_or(false));
+            info!(
+                "gpu state: atlas={}, skin={}",
+                render
+                    .gpu
+                    .as_ref()
+                    .map(|g| g.atlas.is_some())
+                    .unwrap_or(false),
+                render
+                    .gpu
+                    .as_ref()
+                    .map(|g| g.skin.is_some())
+                    .unwrap_or(false)
+            );
         }
 
         // 1. Absolute time — no delta accumulation drift
@@ -671,7 +711,8 @@ impl App {
                 self.hybrid_clock_prev_delta = None;
                 self.hybrid_clock_frame_count = 0;
             }
-            let elapsed_ms = self.game_start_instant
+            let elapsed_ms = self
+                .game_start_instant
                 .map(|t| now.duration_since(t).as_millis() as u64)
                 .unwrap_or(0);
 
@@ -745,8 +786,13 @@ impl App {
                     if fc % 60 == 0 {
                         log::info!(
                             "Hybrid clock: time={:.1}ms delta={:.3}ms monotonic={} samples={}",
-                            now_ms, delta_ms, monotonic,
-                            audio_mgr.state().samples_played.load(std::sync::atomic::Ordering::Relaxed)
+                            now_ms,
+                            delta_ms,
+                            monotonic,
+                            audio_mgr
+                                .state()
+                                .samples_played
+                                .load(std::sync::atomic::Ordering::Relaxed)
                         );
                     }
 
@@ -754,33 +800,41 @@ impl App {
                     // Log every 600 frames (~10s at 60fps)
                     static CPU_FRAME_COUNTER: std::sync::atomic::AtomicU64 =
                         std::sync::atomic::AtomicU64::new(0);
-                    let cpu_fc = CPU_FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let cpu_fc =
+                        CPU_FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if cpu_fc % 600 == 0 {
                         let (avg, max, budget, pct) = audio_mgr.callback_cpu_usage();
                         let bar = "█".repeat((pct / 2.0).max(0.5) as usize);
                         log::info!(
                             "Audio CPU: avg={}µs max={}µs budget={}µs [{:5.1}%] {}",
-                            avg, max, budget, pct, bar
+                            avg,
+                            max,
+                            budget,
+                            pct,
+                            bar
                         );
                     }
                 }
             }
-
         }
 
         // 3. Acquire surface texture
-        let Some(ref surface) = render.surface else { return false; };
+        let Some(ref surface) = render.surface else {
+            return false;
+        };
         let surface_texture = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(st) => st,
-            wgpu::CurrentSurfaceTexture::Suboptimal(st) => {
-                st
+            wgpu::CurrentSurfaceTexture::Suboptimal(st) => st,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return false
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return false,
             wgpu::CurrentSurfaceTexture::Outdated => {
                 surface.configure(&render.device, &render.config);
                 return false;
             }
-            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Validation => return false,
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Validation => {
+                return false
+            }
         };
 
         let view = surface_texture
@@ -790,10 +844,15 @@ impl App {
         // Draw cover background (only before game state is loaded)
         if self.game_state.is_none() {
             if let Some(ref gpu) = render.gpu {
-                if let (Some(pipeline), Some(bind_group)) = (&gpu.cover_pipeline, &gpu.cover_bind_group) {
-                    let mut encoder = render.device.create_command_encoder(
-                        &wgpu::CommandEncoderDescriptor { label: Some("cover_encoder") }
-                    );
+                if let (Some(pipeline), Some(bind_group)) =
+                    (&gpu.cover_pipeline, &gpu.cover_bind_group)
+                {
+                    let mut encoder =
+                        render
+                            .device
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("cover_encoder"),
+                            });
                     {
                         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: Some("cover_pass"),
@@ -824,7 +883,8 @@ impl App {
 
         // 4. Calculate skin scale and letterbox offset
         // Scale the 800x600 skin to fit the window while maintaining aspect ratio
-        let (config_width, config_height) = (render.config.width as f32, render.config.height as f32);
+        let (config_width, config_height) =
+            (render.config.width as f32, render.config.height as f32);
         let skin_w = 800.0f32;
         let skin_h = 600.0f32;
         let scale = (config_width / skin_w).min(config_height / skin_h);
@@ -886,8 +946,12 @@ impl App {
                             let frame_y = offset_y + entity.y as f32 * skin_scale_y;
 
                             gpu.textured_renderer.draw_textured_quad(
-                                frame_x, frame_y, frame_w, frame_h,
-                                atlas_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                frame_x,
+                                frame_y,
+                                frame_w,
+                                frame_h,
+                                atlas_frame.uv,
+                                [1.0, 1.0, 1.0, 1.0],
                             );
                         }
                     }
@@ -910,8 +974,10 @@ impl App {
                 // During startup: chart is invisible, not frozen
                 if gs.is_rendering {
                     // Draw measure marks scrolling with the notes (animated)
-                    if let Some(measure_frame) = atlas.get_frame_at_time("measure_mark", render_time as f64)
-                        .or_else(|| atlas.get_frame("measure_mark").copied()) {
+                    if let Some(measure_frame) = atlas
+                        .get_frame_at_time("measure_mark", render_time as f64)
+                        .or_else(|| atlas.get_frame("measure_mark").copied())
+                    {
                         let mw = measure_frame.width as f32 * skin_scale_x;
                         let mh = measure_frame.height as f32 * skin_scale_y;
 
@@ -939,7 +1005,12 @@ impl App {
                                 let screen_y = offset_y + y as f32 * skin_scale_y - mh / 2.0;
                                 if screen_y > -mh && screen_y < config_height + mh {
                                     gpu.textured_renderer.draw_textured_quad(
-                                        mx, screen_y, mw, mh, measure_frame.uv, [1.0, 1.0, 1.0, 0.5],
+                                        mx,
+                                        screen_y,
+                                        mw,
+                                        mh,
+                                        measure_frame.uv,
+                                        [1.0, 1.0, 1.0, 0.5],
                                     );
                                 }
                             }
@@ -950,8 +1021,11 @@ impl App {
                     // These are the lane light-up effects at y < judgment_line_y.
                     for lane in 0..7 {
                         if gs.pressed_lanes[lane] {
-                            for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_lane_effects[lane] {
-                                if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
+                            for (sprite_id, x_pos, y_pos) in
+                                &gs.note_prefabs.pressed_lane_effects[lane]
+                            {
+                                if let Some(pressed_frame) = atlas
+                                    .get_frame_at_time(sprite_id, render_time as f64)
                                     .or_else(|| atlas.get_frame(sprite_id).copied())
                                 {
                                     let sprite_w = pressed_frame.width as f32 * skin_scale_x;
@@ -959,7 +1033,12 @@ impl App {
                                     let x = offset_x + *x_pos as f32 * skin_scale_x;
                                     let y = offset_y + *y_pos as f32 * skin_scale_y;
                                     gpu.textured_renderer.draw_textured_quad(
-                                        x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
+                                        x,
+                                        y,
+                                        sprite_w,
+                                        sprite_h,
+                                        pressed_frame.uv,
+                                        [1.0, 1.0, 1.0, 0.6],
                                     );
                                 }
                             }
@@ -980,15 +1059,18 @@ impl App {
                         let lane_prefab = &gs.note_prefabs.lanes[note.lane];
                         let lane_x = offset_x + lane_prefab.x as f32 * skin_scale_x;
 
-                        let head_frame_name = lane_prefab.sprite_id.as_deref().unwrap_or_else(|| {
-                            match note.lane {
-                                0 | 1 | 2 => "head_note_white",
-                                3 => "head_note_blue",
-                                _ => "head_note_yellow",
-                            }
-                        });
+                        let head_frame_name =
+                            lane_prefab
+                                .sprite_id
+                                .as_deref()
+                                .unwrap_or_else(|| match note.lane {
+                                    0 | 1 | 2 => "head_note_white",
+                                    3 => "head_note_blue",
+                                    _ => "head_note_yellow",
+                                });
 
-                        let head_frame = atlas.get_frame_at_time(head_frame_name, render_time as f64)
+                        let head_frame = atlas
+                            .get_frame_at_time(head_frame_name, render_time as f64)
                             .or_else(|| atlas.get_frame(head_frame_name).copied());
                         if let Some(head_frame) = head_frame {
                             let note_w = head_frame.width as f32 * skin_scale_x;
@@ -996,7 +1078,12 @@ impl App {
                             let x = lane_x;
                             let y = offset_y + y as f32 * skin_scale_y - note_h / 2.0;
                             gpu.textured_renderer.draw_textured_quad(
-                                x, y, note_w, note_h, head_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                x,
+                                y,
+                                note_w,
+                                note_h,
+                                head_frame.uv,
+                                [1.0, 1.0, 1.0, 1.0],
                             );
                         }
                     }
@@ -1026,7 +1113,9 @@ impl App {
                         );
 
                         // Determine sprite names for this lane
-                        let head_frame_name = lane_prefab.head_sprite.as_deref()
+                        let head_frame_name = lane_prefab
+                            .head_sprite
+                            .as_deref()
                             .or(lane_prefab.sprite_id.as_deref())
                             .unwrap_or_else(|| match long_note.lane {
                                 0 | 1 | 2 => "head_note_white",
@@ -1034,7 +1123,9 @@ impl App {
                                 _ => "head_note_yellow",
                             });
 
-                        let body_frame_name = lane_prefab.body_sprite.as_deref()
+                        let body_frame_name = lane_prefab
+                            .body_sprite
+                            .as_deref()
                             .or(lane_prefab.sprite_id.as_deref())
                             .unwrap_or_else(|| match long_note.lane {
                                 0 | 1 | 2 => "body_note_white",
@@ -1043,7 +1134,9 @@ impl App {
                             });
 
                         // Tail uses the same sprite as head (or can be customized)
-                        let tail_frame_name = lane_prefab.tail_sprite.as_deref()
+                        let tail_frame_name = lane_prefab
+                            .tail_sprite
+                            .as_deref()
                             .or(lane_prefab.sprite_id.as_deref())
                             .unwrap_or(head_frame_name);
 
@@ -1065,16 +1158,24 @@ impl App {
                             // the head sprite should NOT be drawn, but the body (clipped at the judgment line)
                             // and tail should continue rendering above the judgment line.
 
-                            let judgment_line_screen_y = offset_y + judgment_line_y as f32 * skin_scale_y;
-                            let head_unclamped_screen_y = offset_y + head_y as f32 * skin_scale_y - head_h / 2.0;
-                            let tail_screen_y = offset_y + tail_y as f32 * skin_scale_y - tail_h / 2.0;
+                            let judgment_line_screen_y =
+                                offset_y + judgment_line_y as f32 * skin_scale_y;
+                            let head_unclamped_screen_y =
+                                offset_y + head_y as f32 * skin_scale_y - head_h / 2.0;
+                            let tail_screen_y =
+                                offset_y + tail_y as f32 * skin_scale_y - tail_h / 2.0;
 
                             // Determine if head is past the judgment line (use skin coords, not scaled screen)
                             let head_past_judgment = head_y > judgment_line_y;
 
                             // Calculate effective body bottom: if head is past judgment line, clamp to line
-                            let effective_head_y = if head_past_judgment { judgment_line_y } else { head_y };
-                            let effective_head_screen_y = offset_y + effective_head_y as f32 * skin_scale_y;
+                            let effective_head_y = if head_past_judgment {
+                                judgment_line_y
+                            } else {
+                                head_y
+                            };
+                            let effective_head_screen_y =
+                                offset_y + effective_head_y as f32 * skin_scale_y;
 
                             // In screen coords, body stretches from tail (higher/smaller Y) to head (lower/larger Y)
                             let body_top = tail_screen_y.min(effective_head_screen_y);
@@ -1088,23 +1189,35 @@ impl App {
                                 // Draw order (Java): body first, then tail, then head
                                 // 1. Body (middle, stretched) — clipped at judgment line if head is past
                                 gpu.textured_renderer.draw_textured_quad(
-                                    body_x, body_y, note_w, body_pixel_height,
-                                    body_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                    body_x,
+                                    body_y,
+                                    note_w,
+                                    body_pixel_height,
+                                    body_frame.uv,
+                                    [1.0, 1.0, 1.0, 1.0],
                                 );
 
                                 // 2. Tail (top cap) — only render if above judgment line
                                 if !head_past_judgment || tail_y < judgment_line_y {
                                     gpu.textured_renderer.draw_textured_quad(
-                                        lane_x, tail_screen_y, note_w, tail_h,
-                                        tail_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                        lane_x,
+                                        tail_screen_y,
+                                        note_w,
+                                        tail_h,
+                                        tail_frame.uv,
+                                        [1.0, 1.0, 1.0, 1.0],
                                     );
                                 }
 
                                 // 3. Head (bottom tap note) — only render if head is above judgment line
                                 if !head_past_judgment {
                                     gpu.textured_renderer.draw_textured_quad(
-                                        lane_x, head_unclamped_screen_y - head_h, note_w, head_h,
-                                        head_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                        lane_x,
+                                        head_unclamped_screen_y - head_h,
+                                        note_w,
+                                        head_h,
+                                        head_frame.uv,
+                                        [1.0, 1.0, 1.0, 1.0],
                                     );
                                 }
                             }
@@ -1117,17 +1230,25 @@ impl App {
                         if let Some(skin) = skin_res.get_skin("o2jam") {
                             for entity in &skin.entities {
                                 let sprite_id = match &entity.sprite {
-                                    Some(s) => s, None => continue,
+                                    Some(s) => s,
+                                    None => continue,
                                 };
                                 let first = sprite_id.split(',').next().unwrap_or(sprite_id).trim();
-                                if first != "static_keyboard" { continue; }
+                                if first != "static_keyboard" {
+                                    continue;
+                                }
                                 if let Some(frame) = atlas.get_frame(first) {
                                     let fw = frame.width as f32 * skin_scale_x;
                                     let fh = frame.height as f32 * skin_scale_y;
                                     let fx = offset_x + entity.x as f32 * skin_scale_x;
                                     let fy = offset_y + entity.y as f32 * skin_scale_y;
                                     gpu.textured_renderer.draw_textured_quad(
-                                        fx, fy, fw, fh, frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                        fx,
+                                        fy,
+                                        fw,
+                                        fh,
+                                        frame.uv,
+                                        [1.0, 1.0, 1.0, 1.0],
                                     );
                                 }
                             }
@@ -1137,8 +1258,11 @@ impl App {
                     // Draw PRESSED_NOTE overlays on top of static_keyboard (layer 8 in original).
                     for lane in 0..7 {
                         if gs.pressed_lanes[lane] {
-                            for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_keyboard_overlays[lane] {
-                                if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
+                            for (sprite_id, x_pos, y_pos) in
+                                &gs.note_prefabs.pressed_keyboard_overlays[lane]
+                            {
+                                if let Some(pressed_frame) = atlas
+                                    .get_frame_at_time(sprite_id, render_time as f64)
                                     .or_else(|| atlas.get_frame(sprite_id).copied())
                                 {
                                     let sprite_w = pressed_frame.width as f32 * skin_scale_x;
@@ -1146,7 +1270,12 @@ impl App {
                                     let x = offset_x + *x_pos as f32 * skin_scale_x;
                                     let y = offset_y + *y_pos as f32 * skin_scale_y;
                                     gpu.textured_renderer.draw_textured_quad(
-                                        x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
+                                        x,
+                                        y,
+                                        sprite_w,
+                                        sprite_h,
+                                        pressed_frame.uv,
+                                        [1.0, 1.0, 1.0, 0.6],
                                     );
                                 }
                             }
@@ -1161,8 +1290,11 @@ impl App {
                         for lane in 0..7 {
                             if gs.pressed_lanes[lane] {
                                 // Lane effects (y < judgment_line)
-                                for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_lane_effects[lane] {
-                                    if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
+                                for (sprite_id, x_pos, y_pos) in
+                                    &gs.note_prefabs.pressed_lane_effects[lane]
+                                {
+                                    if let Some(pressed_frame) = atlas
+                                        .get_frame_at_time(sprite_id, render_time as f64)
                                         .or_else(|| atlas.get_frame(sprite_id).copied())
                                     {
                                         let sprite_w = pressed_frame.width as f32 * skin_scale_x;
@@ -1170,13 +1302,21 @@ impl App {
                                         let x = offset_x + *x_pos as f32 * skin_scale_x;
                                         let y = offset_y + *y_pos as f32 * skin_scale_y;
                                         gpu.textured_renderer.draw_textured_quad(
-                                            x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
+                                            x,
+                                            y,
+                                            sprite_w,
+                                            sprite_h,
+                                            pressed_frame.uv,
+                                            [1.0, 1.0, 1.0, 0.6],
                                         );
                                     }
                                 }
                                 // Keyboard key overlays
-                                for (sprite_id, x_pos, y_pos) in &gs.note_prefabs.pressed_keyboard_overlays[lane] {
-                                    if let Some(pressed_frame) = atlas.get_frame_at_time(sprite_id, render_time as f64)
+                                for (sprite_id, x_pos, y_pos) in
+                                    &gs.note_prefabs.pressed_keyboard_overlays[lane]
+                                {
+                                    if let Some(pressed_frame) = atlas
+                                        .get_frame_at_time(sprite_id, render_time as f64)
                                         .or_else(|| atlas.get_frame(sprite_id).copied())
                                     {
                                         let sprite_w = pressed_frame.width as f32 * skin_scale_x;
@@ -1184,7 +1324,12 @@ impl App {
                                         let x = offset_x + *x_pos as f32 * skin_scale_x;
                                         let y = offset_y + *y_pos as f32 * skin_scale_y;
                                         gpu.textured_renderer.draw_textured_quad(
-                                            x, y, sprite_w, sprite_h, pressed_frame.uv, [1.0, 1.0, 1.0, 0.6],
+                                            x,
+                                            y,
+                                            sprite_w,
+                                            sprite_h,
+                                            pressed_frame.uv,
+                                            [1.0, 1.0, 1.0, 0.6],
                                         );
                                     }
                                 }
@@ -1208,35 +1353,45 @@ impl App {
                             // frame_speed_ms already converted from FPS in XML parser
                             let frame_speed_ms = anim.frame_speed_ms;
                             for effect in &gs.note_click_effects {
-                                let frame_idx = effect.frame_index(render_time, frame_speed_ms, anim.frame_count);
+                                let frame_idx = effect.frame_index(
+                                    render_time,
+                                    frame_speed_ms,
+                                    anim.frame_count,
+                                );
                                 let atlas_id = format!("{}_{}", click_sprite, frame_idx);
                                 if let Some(frame) = atlas.get_frame(&atlas_id) {
                                     let lane_prefab = &gs.note_prefabs.lanes[effect.lane];
                                     // Match Java: ne.getX() + ne.getWidth()/2 - ee.getWidth()/2
                                     // lane_prefab.x is the left edge (ne.getX())
                                     // Get note width from the sprite atlas to center properly
-                                    let note_sprite = lane_prefab.sprite_id.as_deref().unwrap_or_else(|| {
-                                        match effect.lane {
+                                    let note_sprite = lane_prefab
+                                        .sprite_id
+                                        .as_deref()
+                                        .unwrap_or_else(|| match effect.lane {
                                             0 | 1 | 2 => "head_note_white",
                                             3 => "head_note_blue",
                                             _ => "head_note_yellow",
-                                        }
-                                    });
-                                    let note_width = atlas.get_frame(note_sprite)
+                                        });
+                                    let note_width = atlas
+                                        .get_frame(note_sprite)
                                         .map(|f| f.width as f32)
                                         .unwrap_or(50.0); // fallback width
-                                    let effect_x = offset_x + lane_prefab.x as f32 * skin_scale_x
+                                    let effect_x = offset_x
+                                        + lane_prefab.x as f32 * skin_scale_x
                                         + (note_width * skin_scale_x / 2.0)
                                         - (frame.width as f32 * skin_scale_x / 2.0);
-                                    let effect_y = offset_y + skin_judgment_line_y as f32 * skin_scale_y
+                                    let effect_y = offset_y
+                                        + skin_judgment_line_y as f32 * skin_scale_y
                                         - (frame.height as f32 * skin_scale_y / 2.0);
 
                                     // Alpha blending handled by renderer (textures have alpha channel)
                                     gpu.textured_renderer.draw_textured_quad(
-                                        effect_x, effect_y,
+                                        effect_x,
+                                        effect_y,
                                         frame.width as f32 * skin_scale_x,
                                         frame.height as f32 * skin_scale_y,
-                                        frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                        frame.uv,
+                                        [1.0, 1.0, 1.0, 1.0],
                                     );
                                 }
                             }
@@ -1250,34 +1405,44 @@ impl App {
                             // frame_speed_ms already converted from FPS in XML parser
                             let frame_speed_ms = anim.frame_speed_ms;
                             for effect in &gs.long_flare_effects {
-                                let frame_idx = effect.frame_index(render_time, frame_speed_ms, anim.frame_count);
+                                let frame_idx = effect.frame_index(
+                                    render_time,
+                                    frame_speed_ms,
+                                    anim.frame_count,
+                                );
                                 let atlas_id = format!("{}_{}", flare_sprite, frame_idx);
                                 if let Some(frame) = atlas.get_frame(&atlas_id) {
                                     let lane_prefab = &gs.note_prefabs.lanes[effect.lane];
                                     // Match Java: ne.getX() + ne.getWidth()/2 - ee.getWidth()/2, ee.getY()
-                                    let note_sprite = lane_prefab.sprite_id.as_deref().unwrap_or_else(|| {
-                                        match effect.lane {
+                                    let note_sprite = lane_prefab
+                                        .sprite_id
+                                        .as_deref()
+                                        .unwrap_or_else(|| match effect.lane {
                                             0 | 1 | 2 => "head_note_white",
                                             3 => "head_note_blue",
                                             _ => "head_note_yellow",
-                                        }
-                                    });
-                                    let note_width = atlas.get_frame(note_sprite)
+                                        });
+                                    let note_width = atlas
+                                        .get_frame(note_sprite)
                                         .map(|f| f.width as f32)
                                         .unwrap_or(50.0); // fallback width
-                                    let flare_x = offset_x + lane_prefab.x as f32 * skin_scale_x
+                                    let flare_x = offset_x
+                                        + lane_prefab.x as f32 * skin_scale_x
                                         + (note_width * skin_scale_x / 2.0)
                                         - (frame.width as f32 * skin_scale_x / 2.0);
                                     // Use entity Y from skin XML (y="460"), top-aligned at that position
-                                    let flare_y = offset_y + gs.effect_longflare_y as f32 * skin_scale_y;
+                                    let flare_y =
+                                        offset_y + gs.effect_longflare_y as f32 * skin_scale_y;
 
                                     // EFFECT_LONGFLARE uses additive blending for glow effect (GL_SRC_ALPHA, GL_DST_ALPHA)
                                     gpu.textured_renderer.set_blend_mode(BlendMode::Additive);
                                     gpu.textured_renderer.draw_textured_quad(
-                                        flare_x, flare_y,
+                                        flare_x,
+                                        flare_y,
                                         frame.width as f32 * skin_scale_x,
                                         frame.height as f32 * skin_scale_y,
-                                        frame.uv, [1.0, 1.0, 1.0, 1.0],
+                                        frame.uv,
+                                        [1.0, 1.0, 1.0, 1.0],
                                     );
                                     // Reset to alpha blending for subsequent draws
                                     gpu.textured_renderer.set_blend_mode(BlendMode::Alpha);
@@ -1310,13 +1475,16 @@ impl App {
 
         // 9. Flush render pass
         if let Some(ref mut gpu) = render.gpu {
-            gpu.textured_renderer.end(&view, &render.queue, &render.device);
+            gpu.textured_renderer
+                .end(&view, &render.queue, &render.device);
         }
 
         // 10. Present
         surface_texture.present();
 
         // Return whether song has ended (for caller to handle exit)
-        self.game_state.as_ref().map_or(false, |gs| gs.is_song_ended())
+        self.game_state
+            .as_ref()
+            .map_or(false, |gs| gs.is_song_ended())
     }
 }

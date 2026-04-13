@@ -78,7 +78,13 @@ impl ScheduledSignal {
     /// * `volume` - Volume gain (0.0 to 1.0+)
     /// * `pan` - Pan position (-1.0 to +1.0)
     /// * `source_id` - Source identifier for deduplication (e.g., lane index)
-    pub fn new(frames: Arc<Frames<StereoFrame>>, delay_samples: u32, volume: f32, pan: f32, source_id: u64) -> Self {
+    pub fn new(
+        frames: Arc<Frames<StereoFrame>>,
+        delay_samples: u32,
+        volume: f32,
+        pan: f32,
+        source_id: u64,
+    ) -> Self {
         Self {
             inner: FramesSignal::from(frames),
             delay: delay_samples,
@@ -203,7 +209,13 @@ impl BgmSignalQueue {
                 // Remove any existing signal with the same source_id (voice steal)
                 self.active_signals.retain(|s| s.source_id != cmd.source_id);
 
-                let signal = ScheduledSignal::new(cmd.frames, cmd.delay_samples, cmd.volume, cmd.pan, cmd.source_id);
+                let signal = ScheduledSignal::new(
+                    cmd.frames,
+                    cmd.delay_samples,
+                    cmd.volume,
+                    cmd.pan,
+                    cmd.source_id,
+                );
                 self.active_signals.push(signal);
             }
         }
@@ -278,7 +290,10 @@ mod tests {
         // First 10 samples should be silence
         let mut out = vec![[0.0f32; 2]; 10];
         signal.sample(1.0 / 44100.0, &mut out);
-        assert!(out.iter().all(|f| f[0] == 0.0 && f[1] == 0.0), "First 10 samples should be silence");
+        assert!(
+            out.iter().all(|f| f[0] == 0.0 && f[1] == 0.0),
+            "First 10 samples should be silence"
+        );
         assert_eq!(signal.delay, 0, "Delay should be 0 after first call");
 
         // Next call: delay is 0, should output audio from the start
@@ -286,7 +301,10 @@ mod tests {
         signal.sample(1.0 / 44100.0, &mut out);
         // The inner FramesSignal should output from position 0
         eprintln!("Second output: {:?}", &out[..3]);
-        assert!(out.iter().all(|f| f[0] == 0.5 && f[1] == 0.5), "Second 10 samples should be audio");
+        assert!(
+            out.iter().all(|f| f[0] == 0.5 && f[1] == 0.5),
+            "Second 10 samples should be audio"
+        );
     }
 
     #[test]
@@ -389,7 +407,10 @@ mod tests {
         queue.sample(1.0 / 44100.0, &mut out);
 
         // Only the second signal should be active (voice steal)
-        assert!(out.iter().all(|f| f[0] == 0.5 && f[1] == 0.5),
-            "Only the newer signal with same source_id should play, got {:?}", &out[..3]);
+        assert!(
+            out.iter().all(|f| f[0] == 0.5 && f[1] == 0.5),
+            "Only the newer signal with same source_id should play, got {:?}",
+            &out[..3]
+        );
     }
 }

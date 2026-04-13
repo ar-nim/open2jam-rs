@@ -109,18 +109,15 @@ pub fn note_y_position_bpm_aware(
     measure_basis: f64,
     speed: f64,
 ) -> f64 {
-    let distance = scroll_distance_bpm_aware(render_time_ms, target_time_ms, timing, measure_basis, speed);
+    let distance =
+        scroll_distance_bpm_aware(render_time_ms, target_time_ms, timing, measure_basis, speed);
     judgment_line_y - distance
 }
 
 /// Calculate the time (ms) it takes for a note to scroll from top of screen to judgment line.
 ///
 /// This determines how far ahead of time notes need to be spawned.
-pub fn scroll_travel_time_ms(
-    bpm: f64,
-    measure_basis: f64,
-    speed: f64,
-) -> f64 {
+pub fn scroll_travel_time_ms(bpm: f64, measure_basis: f64, speed: f64) -> f64 {
     if bpm <= 0.0 || speed <= 0.0 {
         return 0.0;
     }
@@ -161,11 +158,7 @@ pub fn should_spawn_note(
 ///
 /// # Returns
 /// `true` if the note has been missed and should be removed.
-pub fn should_kill_note(
-    render_time_ms: f64,
-    target_time_ms: f64,
-    kill_tolerance_ms: f64,
-) -> bool {
+pub fn should_kill_note(render_time_ms: f64, target_time_ms: f64, kill_tolerance_ms: f64) -> bool {
     render_time_ms > target_time_ms + kill_tolerance_ms
 }
 
@@ -177,15 +170,25 @@ pub fn should_kill_note(
 mod tests {
     use super::*;
 
-    const MEASURE_BASIS: f64 = 480.0;  // judgment_line_y (skin height is 600, but scroll uses judgment_line)
+    const MEASURE_BASIS: f64 = 480.0; // judgment_line_y (skin height is 600, but scroll uses judgment_line)
     const JUDGMENT_LINE_Y: f64 = 480.0;
     const DEFAULT_BPM: f64 = 130.0;
 
     #[test]
     fn test_scroll_distance_at_target_time() {
         // When render_time equals target_time, distance should be 0 (at judgment line)
-        let distance = scroll_distance(1000.0, 1000.0, DEFAULT_BPM, MEASURE_BASIS, DEFAULT_SCROLL_SPEED);
-        assert!(distance.abs() < 0.01, "Distance at target time should be ~0, got {}", distance);
+        let distance = scroll_distance(
+            1000.0,
+            1000.0,
+            DEFAULT_BPM,
+            MEASURE_BASIS,
+            DEFAULT_SCROLL_SPEED,
+        );
+        assert!(
+            distance.abs() < 0.01,
+            "Distance at target time should be ~0, got {}",
+            distance
+        );
     }
 
     #[test]
@@ -195,7 +198,13 @@ mod tests {
         let render_time = 1000.0;
         let target_time = render_time + beat_duration_ms;
 
-        let distance = scroll_distance(render_time, target_time, DEFAULT_BPM, MEASURE_BASIS, DEFAULT_SCROLL_SPEED);
+        let distance = scroll_distance(
+            render_time,
+            target_time,
+            DEFAULT_BPM,
+            MEASURE_BASIS,
+            DEFAULT_SCROLL_SPEED,
+        );
         let expected = 1.0 * MEASURE_BASIS * MEASURE_SIZE_FRACTION / 4.0; // 1 beat = 1/4 measure
 
         assert!(
@@ -213,7 +222,13 @@ mod tests {
         let render_time = 1000.0 + beat_duration_ms;
         let target_time = 1000.0;
 
-        let distance = scroll_distance(render_time, target_time, DEFAULT_BPM, MEASURE_BASIS, DEFAULT_SCROLL_SPEED);
+        let distance = scroll_distance(
+            render_time,
+            target_time,
+            DEFAULT_BPM,
+            MEASURE_BASIS,
+            DEFAULT_SCROLL_SPEED,
+        );
         let expected = -1.0 * MEASURE_BASIS * MEASURE_SIZE_FRACTION / 4.0;
 
         assert!(
@@ -234,10 +249,15 @@ mod tests {
     fn test_scroll_distance_with_speed_multiplier() {
         let render_time = 1000.0;
         let target_time = 2000.0;
-        let distance_slow = scroll_distance(render_time, target_time, DEFAULT_BPM, MEASURE_BASIS, 0.5);
-        let distance_fast = scroll_distance(render_time, target_time, DEFAULT_BPM, MEASURE_BASIS, 2.0);
+        let distance_slow =
+            scroll_distance(render_time, target_time, DEFAULT_BPM, MEASURE_BASIS, 0.5);
+        let distance_fast =
+            scroll_distance(render_time, target_time, DEFAULT_BPM, MEASURE_BASIS, 2.0);
 
-        assert!(distance_fast > distance_slow, "Faster speed should produce greater distance");
+        assert!(
+            distance_fast > distance_slow,
+            "Faster speed should produce greater distance"
+        );
         assert!(
             (distance_fast - 4.0 * distance_slow).abs() < 0.1,
             "2x speed should produce 4x the distance of 0.5x speed"
@@ -247,7 +267,14 @@ mod tests {
     #[test]
     fn test_note_y_at_judgment_line() {
         // When at target time, note should be at judgment line
-        let y = note_y_position(1000.0, 1000.0, DEFAULT_BPM, JUDGMENT_LINE_Y, MEASURE_BASIS, DEFAULT_SCROLL_SPEED);
+        let y = note_y_position(
+            1000.0,
+            1000.0,
+            DEFAULT_BPM,
+            JUDGMENT_LINE_Y,
+            MEASURE_BASIS,
+            DEFAULT_SCROLL_SPEED,
+        );
         assert!(
             (y - JUDGMENT_LINE_Y).abs() < 0.01,
             "Note Y at target time should be at judgment line ({:.1}), got {:.1}",
@@ -259,8 +286,20 @@ mod tests {
     #[test]
     fn test_note_y_above_judgment_line() {
         // Before target, note should be above the judgment line
-        let y = note_y_position(1000.0, 1500.0, DEFAULT_BPM, JUDGMENT_LINE_Y, MEASURE_BASIS, DEFAULT_SCROLL_SPEED);
-        assert!(y < JUDGMENT_LINE_Y, "Note should be above judgment line (y={}, judgment={})", y, JUDGMENT_LINE_Y);
+        let y = note_y_position(
+            1000.0,
+            1500.0,
+            DEFAULT_BPM,
+            JUDGMENT_LINE_Y,
+            MEASURE_BASIS,
+            DEFAULT_SCROLL_SPEED,
+        );
+        assert!(
+            y < JUDGMENT_LINE_Y,
+            "Note should be above judgment line (y={}, judgment={})",
+            y,
+            JUDGMENT_LINE_Y
+        );
     }
 
     #[test]
@@ -281,16 +320,37 @@ mod tests {
 
     #[test]
     fn test_should_spawn_note() {
-        assert!(should_spawn_note(1000.0, 1500.0, 600.0), "Note within spawn window should spawn");
-        assert!(!should_spawn_note(1000.0, 2000.0, 600.0), "Note outside spawn window should not spawn");
-        assert!(!should_spawn_note(1000.0, 500.0, 600.0), "Past note should not spawn");
+        assert!(
+            should_spawn_note(1000.0, 1500.0, 600.0),
+            "Note within spawn window should spawn"
+        );
+        assert!(
+            !should_spawn_note(1000.0, 2000.0, 600.0),
+            "Note outside spawn window should not spawn"
+        );
+        assert!(
+            !should_spawn_note(1000.0, 500.0, 600.0),
+            "Past note should not spawn"
+        );
     }
 
     #[test]
     fn test_should_kill_note() {
-        assert!(!should_kill_note(1000.0, 1100.0, 0.0), "Note before target should not be killed");
-        assert!(!should_kill_note(1099.0, 1100.0, 0.0), "Note just before target should not be killed");
-        assert!(should_kill_note(1101.0, 1100.0, 0.0), "Note just after target should be killed");
-        assert!(should_kill_note(1400.0, 1100.0, 0.0), "Note well after target should be killed");
+        assert!(
+            !should_kill_note(1000.0, 1100.0, 0.0),
+            "Note before target should not be killed"
+        );
+        assert!(
+            !should_kill_note(1099.0, 1100.0, 0.0),
+            "Note just before target should not be killed"
+        );
+        assert!(
+            should_kill_note(1101.0, 1100.0, 0.0),
+            "Note just after target should be killed"
+        );
+        assert!(
+            should_kill_note(1400.0, 1100.0, 0.0),
+            "Note well after target should be killed"
+        );
     }
 }

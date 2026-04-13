@@ -41,9 +41,9 @@ pub struct SpriteDef {
 pub struct EntityDef {
     pub id: Option<String>,
     pub sprite: Option<String>,
-    pub head_sprite: Option<String>,  // For long notes
-    pub body_sprite: Option<String>,  // For long notes
-    pub tail_sprite: Option<String>,  // For long notes
+    pub head_sprite: Option<String>, // For long notes
+    pub body_sprite: Option<String>, // For long notes
+    pub tail_sprite: Option<String>, // For long notes
     pub x: i32,
     pub y: i32,
     pub layer: u32,
@@ -260,7 +260,15 @@ fn parse_sprite<R: std::io::BufRead>(
                     } else {
                         base_path.join(&file)
                     };
-                    frames.push(FrameDef { file, x, y, w, h, scale, alpha: alpha_val });
+                    frames.push(FrameDef {
+                        file,
+                        x,
+                        y,
+                        w,
+                        h,
+                        scale,
+                        alpha: alpha_val,
+                    });
                 }
             }
             Ok(Event::End(ref e)) => {
@@ -363,14 +371,27 @@ mod tests {
 
     #[test]
     fn test_parse_real_skin() {
-        let resources = parse_file("/home/arnim/projects/o2jam/open2jam-modern/src/resources/resources.xml")
-            .expect("Failed to parse skin XML");
+        let resources =
+            parse_file("/home/arnim/projects/o2jam/open2jam-modern/src/resources/resources.xml")
+                .expect("Failed to parse skin XML");
 
         // Check sprites are loaded
-        assert!(resources.sprites.contains_key("note_bg"), "note_bg sprite not found");
-        assert!(resources.sprites.contains_key("head_note_white"), "head_note_white not found");
-        assert!(resources.sprites.contains_key("judgmentarea"), "judgmentarea not found");
-        assert!(resources.sprites.contains_key("measure_mark"), "measure_mark not found");
+        assert!(
+            resources.sprites.contains_key("note_bg"),
+            "note_bg sprite not found"
+        );
+        assert!(
+            resources.sprites.contains_key("head_note_white"),
+            "head_note_white not found"
+        );
+        assert!(
+            resources.sprites.contains_key("judgmentarea"),
+            "judgmentarea not found"
+        );
+        assert!(
+            resources.sprites.contains_key("measure_mark"),
+            "measure_mark not found"
+        );
 
         // Check skin is loaded
         let skin = resources.get_skin("o2jam").expect("Skin o2jam not found");
@@ -380,20 +401,30 @@ mod tests {
         assert!(!skin.entities.is_empty());
 
         // Check entities
-        let note_1 = skin.entities.iter().find(|e| e.id.as_deref() == Some("NOTE_1"));
+        let note_1 = skin
+            .entities
+            .iter()
+            .find(|e| e.id.as_deref() == Some("NOTE_1"));
         assert!(note_1.is_some(), "NOTE_1 entity not found");
     }
 
     #[test]
     fn test_parse_sprites() {
-        let resources = parse_file("/home/arnim/projects/o2jam/open2jam-modern/src/resources/resources.xml")
-            .expect("Failed to parse skin XML");
+        let resources =
+            parse_file("/home/arnim/projects/o2jam/open2jam-modern/src/resources/resources.xml")
+                .expect("Failed to parse skin XML");
 
-        let head_white = resources.sprites.get("head_note_white").expect("head_note_white not found");
+        let head_white = resources
+            .sprites
+            .get("head_note_white")
+            .expect("head_note_white not found");
         assert_eq!(head_white.frames.len(), 3); // 3 animation frames
         assert_eq!(head_white.frame_speed_ms, 12);
 
-        let judgment = resources.sprites.get("judgmentarea").expect("judgmentarea not found");
+        let judgment = resources
+            .sprites
+            .get("judgmentarea")
+            .expect("judgmentarea not found");
         assert_eq!(judgment.frames.len(), 2);
     }
 

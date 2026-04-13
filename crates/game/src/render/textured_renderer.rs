@@ -131,37 +131,38 @@ impl TexturedRenderer {
         };
         queue.write_buffer(&resolution_buffer, 0, bytemuck::bytes_of(&res));
 
-        let res_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Textured Sprite Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: Some(std::num::NonZeroU64::new(8).unwrap()),
+        let res_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Textured Sprite Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: true,
+                            min_binding_size: Some(std::num::NonZeroU64::new(8).unwrap()),
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Textured Sprite Pipeline Layout"),
@@ -298,14 +299,22 @@ impl TexturedRenderer {
     /// `w, h` are the width and height.
     /// `uv` is (u0, v0, u1, v1) from the atlas frame.
     /// `tint` is an RGBA color multiplier (default [1,1,1,1]).
-    pub fn draw_textured_quad(&mut self, x: f32, y: f32, w: f32, h: f32, uv: [f32; 4], tint: [f32; 4]) {
+    pub fn draw_textured_quad(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        uv: [f32; 4],
+        tint: [f32; 4],
+    ) {
         let [u0, v0, u1, v1] = uv;
 
         // Vertex positions: top-left, top-right, bottom-left, bottom-right
         let positions = [
-            [x, y],       // TL
-            [x + w, y],   // TR
-            [x, y + h],   // BL
+            [x, y],         // TL
+            [x + w, y],     // TR
+            [x, y + h],     // BL
             [x + w, y + h], // BR
         ];
 

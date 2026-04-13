@@ -75,7 +75,8 @@ impl NotePrefabs {
     pub fn from_skin(skin: &SkinDef) -> Self {
         let mut lanes: [Option<NotePrefab>; NUM_LANES] = Default::default();
         let mut pressed_lane_effects: [Vec<(String, i32, i32)>; NUM_LANES] = Default::default();
-        let mut pressed_keyboard_overlays: [Vec<(String, i32, i32)>; NUM_LANES] = Default::default();
+        let mut pressed_keyboard_overlays: [Vec<(String, i32, i32)>; NUM_LANES] =
+            Default::default();
 
         for entity in &skin.entities {
             // Check for PRESSED_NOTE_N and split by y position
@@ -215,30 +216,62 @@ mod tests {
 
     #[test]
     fn test_extract_lane_from_entity() {
-        assert_eq!(NotePrefabs::extract_lane_from_note_entity(&EntityDef {
-            id: Some("NOTE_1".to_string()),
-            sprite: None, head_sprite: None, body_sprite: None, tail_sprite: None,
-            x: 0, y: 0, layer: 0,
-        }), Some(0));
+        assert_eq!(
+            NotePrefabs::extract_lane_from_note_entity(&EntityDef {
+                id: Some("NOTE_1".to_string()),
+                sprite: None,
+                head_sprite: None,
+                body_sprite: None,
+                tail_sprite: None,
+                x: 0,
+                y: 0,
+                layer: 0,
+            }),
+            Some(0)
+        );
 
-        assert_eq!(NotePrefabs::extract_lane_from_note_entity(&EntityDef {
-            id: Some("NOTE_7".to_string()),
-            sprite: None, head_sprite: None, body_sprite: None, tail_sprite: None,
-            x: 0, y: 0, layer: 0,
-        }), Some(6));
+        assert_eq!(
+            NotePrefabs::extract_lane_from_note_entity(&EntityDef {
+                id: Some("NOTE_7".to_string()),
+                sprite: None,
+                head_sprite: None,
+                body_sprite: None,
+                tail_sprite: None,
+                x: 0,
+                y: 0,
+                layer: 0,
+            }),
+            Some(6)
+        );
 
-        assert_eq!(NotePrefabs::extract_lane_from_note_entity(&EntityDef {
-            id: Some("LONG_NOTE_3".to_string()),
-            sprite: None, head_sprite: None, body_sprite: None, tail_sprite: None,
-            x: 0, y: 0, layer: 0,
-        }), Some(2));
+        assert_eq!(
+            NotePrefabs::extract_lane_from_note_entity(&EntityDef {
+                id: Some("LONG_NOTE_3".to_string()),
+                sprite: None,
+                head_sprite: None,
+                body_sprite: None,
+                tail_sprite: None,
+                x: 0,
+                y: 0,
+                layer: 0,
+            }),
+            Some(2)
+        );
 
         // Non-note entities return None
-        assert_eq!(NotePrefabs::extract_lane_from_note_entity(&EntityDef {
-            id: Some("JUDGMENT_LINE".to_string()),
-            sprite: None, head_sprite: None, body_sprite: None, tail_sprite: None,
-            x: 0, y: 0, layer: 0,
-        }), None);
+        assert_eq!(
+            NotePrefabs::extract_lane_from_note_entity(&EntityDef {
+                id: Some("JUDGMENT_LINE".to_string()),
+                sprite: None,
+                head_sprite: None,
+                body_sprite: None,
+                tail_sprite: None,
+                x: 0,
+                y: 0,
+                layer: 0,
+            }),
+            None
+        );
     }
 
     #[test]
@@ -289,16 +322,26 @@ mod tests {
         // NOTE_8 should be ignored (only 1-7 are valid)
         let entity = EntityDef {
             id: Some("NOTE_8".to_string()),
-            sprite: None, head_sprite: None, body_sprite: None, tail_sprite: None,
-            x: 0, y: 0, layer: 0,
+            sprite: None,
+            head_sprite: None,
+            body_sprite: None,
+            tail_sprite: None,
+            x: 0,
+            y: 0,
+            layer: 0,
         };
         assert!(NotePrefabs::extract_lane_from_note_entity(&entity).is_none());
 
         // NOTE_0 should be ignored
         let entity = EntityDef {
             id: Some("NOTE_0".to_string()),
-            sprite: None, head_sprite: None, body_sprite: None, tail_sprite: None,
-            x: 0, y: 0, layer: 0,
+            sprite: None,
+            head_sprite: None,
+            body_sprite: None,
+            tail_sprite: None,
+            x: 0,
+            y: 0,
+            layer: 0,
         };
         assert!(NotePrefabs::extract_lane_from_note_entity(&entity).is_none());
     }

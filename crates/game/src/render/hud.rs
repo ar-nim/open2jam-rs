@@ -171,16 +171,13 @@ fn draw_number(
 
     // Start from the right edge (base_x) and draw leftwards
     let mut x = base_x - total_width;
-    
+
     for (i, &digit) in digits.iter().enumerate() {
         let w = digit_widths[i];
         let h = digit_heights[i];
         if w > 0.0 {
             if let Some(frame) = get_frame(digit as usize) {
-                renderer.draw_textured_quad(
-                    x, base_y, w, h,
-                    frame.uv, color,
-                );
+                renderer.draw_textured_quad(x, base_y, w, h, frame.uv, color);
             }
         }
         x += w + digit_spacing;
@@ -216,15 +213,12 @@ fn draw_number_left_to_right(
 
     // Draw left-to-right from base_x
     let mut x = base_x;
-    
+
     for &digit in digits.iter() {
         if let Some(frame) = get_frame(digit as usize) {
             let w = frame.width as f32 * scale_x;
             let h = frame.height as f32 * scale_y;
-            renderer.draw_textured_quad(
-                x, base_y, w, h,
-                frame.uv, color,
-            );
+            renderer.draw_textured_quad(x, base_y, w, h, frame.uv, color);
             x += w + digit_spacing;
         }
     }
@@ -273,10 +267,7 @@ fn draw_number_centered(
         if let Some(frame) = get_frame(digit as usize) {
             let w = frame.width as f32 * scale_x;
             let h = frame.height as f32 * scale_y;
-            renderer.draw_textured_quad(
-                x, base_y, w, h,
-                frame.uv, color,
-            );
+            renderer.draw_textured_quad(x, base_y, w, h, frame.uv, color);
             x += w;
             if i < digits.len() - 1 {
                 x += digit_spacing;
@@ -299,14 +290,16 @@ pub fn draw_score(
     let (ox, oy) = offset;
     let x = ox + layout.score_x * sx;
     let y = oy + layout.score_y * sy;
-    
+
     draw_number(
         renderer,
         &|d| get_frame(&format!("score_number_{}", d)),
         score,
-        x, y,
+        x,
+        y,
         0.0, // No spacing between score numbers
-        sx, sy,
+        sx,
+        sy,
         [1.0, 1.0, 1.0, 1.0],
     );
 }
@@ -335,9 +328,11 @@ pub fn draw_max_combo(
         renderer,
         &|d| get_frame(&format!("maxcombo_number_{}", d)),
         max_combo,
-        x, y,
+        x,
+        y,
         1.0, // minimal spacing between maxcombo digits
-        sx, sy,
+        sx,
+        sy,
         [1.0, 1.0, 1.0, 1.0],
     );
 }
@@ -370,9 +365,11 @@ pub fn draw_combo(
         renderer,
         &|d| get_frame(&format!("combo_number_{}", d)),
         combo,
-        cx, cy,
+        cx,
+        cy,
         0.0, // no spacing between combo digits (same sprite width)
-        sx, sy,
+        sx,
+        sy,
         [1.0, 1.0, 1.0, 1.0],
     );
 
@@ -424,19 +421,21 @@ pub fn draw_jam_counter(
     if jam_combo == 0 {
         return;
     }
-    
+
     let (sx, sy) = skin_scale;
     let (ox, oy) = offset;
     let cx = ox + layout.jam_x * sx;
     let cy = oy + layout.jam_y * sy;
-    
+
     draw_number_centered(
         renderer,
         &|d| get_frame(&format!("jam_number_{}", d)),
         jam_combo,
-        cx, cy,
+        cx,
+        cy,
         2.0 * sx, // Small spacing between jam digits
-        sx, sy,
+        sx,
+        sy,
         [1.0, 1.0, 1.0, 1.0],
     );
 
@@ -466,23 +465,24 @@ pub fn draw_lifebar(
 ) {
     let (sx, sy) = skin_scale;
     let (ox, oy) = offset;
-    
+
     let bg_x = ox + layout.lifebar_x * sx;
     let bg_y = oy + layout.lifebar_y * sy;
     let bar_w = 11.0 * sx;
     let bar_h = 301.0 * sy;
-    
+
     // Draw lifebar background
     if let Some(bg_frame) = get_frame("lifebar_bg") {
         renderer.draw_textured_quad(
-            bg_x, bg_y,
+            bg_x,
+            bg_y,
             bg_frame.width as f32 * sx,
             bg_frame.height as f32 * sy,
             bg_frame.uv,
             [1.0, 1.0, 1.0, 1.0],
         );
     }
-    
+
     // Draw lifebar fill using vertex-position clipping.
     // Fill direction: up_to_down (fills from bottom to top)
     // At 0%: show nothing (empty)
@@ -493,7 +493,7 @@ pub fn draw_lifebar(
         // Use the atlas frame's actual dimensions (from the packed atlas)
         let frame_w = bar_frame.width as f32 * sx;
         let frame_h = bar_frame.height as f32 * sy;
-        
+
         let fill_height = frame_h * life_percent;
 
         if fill_height > 0.5 {
@@ -501,15 +501,17 @@ pub fn draw_lifebar(
             let fill_top_y = bg_y + frame_h - fill_height;
 
             let [u0, v0, u1, v1] = bar_frame.uv;
-            
+
             // Interpolate the top V coordinate based on life_percent
             // At 100%: v_top = v0 (full sprite from top)
             // At 50%: v_top = midpoint of V range
             let life_v = v0 + (v1 - v0) * (1.0 - life_percent);
-            
+
             renderer.draw_textured_quad(
-                bg_x, fill_top_y,
-                frame_w, fill_height,
+                bg_x,
+                fill_top_y,
+                frame_w,
+                fill_height,
                 [u0, life_v, u1, v1],
                 [1.0, 1.0, 1.0, 1.0],
             );
@@ -532,16 +534,16 @@ pub fn draw_timebar(
     let (sx, sy) = skin_scale;
     let (ox, oy) = offset;
     let progress = progress.clamp(0.0, 1.0);
-    
+
     let bar_x = ox + layout.timebar_x * sx;
     let bar_y = oy + layout.timebar_y * sy;
-    
+
     if let Some(bar_frame) = get_frame("timebar") {
         let frame_w = bar_frame.width as f32 * sx;
         let frame_h = bar_frame.height as f32 * sy;
         let fill_width = frame_w * progress;
         let [uv0, uv1, uv2, uv3] = bar_frame.uv;
-        
+
         // DEBUG: Log progress every 500 frames to diagnose "always full" issue
         static FRAME_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let frame = FRAME_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -549,15 +551,17 @@ pub fn draw_timebar(
             log::info!("TIMEBAR progress={:.3} (frame {}) fill_width={:.1} frame_w={:.1} uv=[{:.4}, {:.4}]", 
                 progress, frame, fill_width, frame_w, uv0, uv2);
         }
-        
+
         if fill_width > 0.5 {
             // Left-to-right fill: u0 stays fixed (left edge), u2 moves with progress
             let uv_u0 = uv0;
             let uv_u2 = uv0 + (uv2 - uv0) * progress;
-            
+
             renderer.draw_textured_quad(
-                bar_x, bar_y,
-                fill_width, frame_h,
+                bar_x,
+                bar_y,
+                fill_width,
+                frame_h,
                 [uv_u0, uv1, uv_u2, uv3],
                 [1.0, 1.0, 1.0, 1.0],
             );
@@ -580,20 +584,20 @@ pub fn draw_jam_bar(
 ) {
     let (sx, sy) = skin_scale;
     let (ox, oy) = offset;
-    
+
     let bar_x = ox + layout.jam_bar_x * sx;
     let bar_y = oy + layout.jam_bar_y * sy;
     let bar_w = 191.0 * sx;
     let bar_h = 12.0 * sy;
-    
+
     // jam_counter is now 0-99 (resets at 100), so direct normalization
     let progress = (jam_counter as f32) / 100.0;
-    
+
     // Draw the jam_bar sprite clipped to show only the filled portion
     // left_to_right: clip from the right side
     if let Some(bar_frame) = get_frame("jam_bar") {
         let fill_width = bar_w * progress;
-        
+
         if fill_width > 0.5 {
             // Clip the UV to show only the left portion
             // UV is [u0, v0, u1, v1], so interpolate u0..u1 by progress
@@ -601,10 +605,12 @@ pub fn draw_jam_bar(
             let uv_v = bar_frame.uv[1];
             let uv_u1 = uv_u + (bar_frame.uv[2] - uv_u) * progress;
             let uv_v1 = bar_frame.uv[3];
-            
+
             renderer.draw_textured_quad(
-                bar_x, bar_y,
-                fill_width, bar_h,
+                bar_x,
+                bar_y,
+                fill_width,
+                bar_h,
                 [uv_u, uv_v, uv_u1, uv_v1],
                 [1.0, 1.0, 1.0, 1.0],
             );
@@ -624,15 +630,16 @@ pub fn draw_pills(
 ) {
     let (sx, sy) = skin_scale;
     let (ox, oy) = offset;
-    
+
     for i in 0..pill_count.min(5) {
         if let Some(pos) = layout.pill_positions.get(i as usize) {
             let x = ox + pos.0 * sx;
             let y = oy + pos.1 * sy;
-            
+
             if let Some(pill_frame) = get_frame("pill") {
                 renderer.draw_textured_quad(
-                    x, y,
+                    x,
+                    y,
                     pill_frame.width as f32 * sx,
                     pill_frame.height as f32 * sy,
                     pill_frame.uv,
@@ -675,7 +682,10 @@ pub fn draw_judgment_popup(
     if elapsed < 150.0 && elapsed >= 0.0 {
         log::info!(
             "JUDGMENT {:?} elapsed={:.1}ms scale={:.3} alpha={:.3}",
-            judgment.judgment_type, elapsed, scale, alpha
+            judgment.judgment_type,
+            elapsed,
+            scale,
+            alpha
         );
     }
 
@@ -723,9 +733,11 @@ pub fn draw_duration(
         renderer,
         &|d| get_frame(&format!("time_number_{}", d)),
         minutes,
-        mx, my,
+        mx,
+        my,
         0.0, // No spacing between minute digits
-        sx, sy,
+        sx,
+        sy,
         [1.0, 1.0, 1.0, 1.0],
     );
 
@@ -741,15 +753,23 @@ pub fn draw_duration(
         let w = ones_frame.width as f32 * sx;
         let h = ones_frame.height as f32 * sy;
         renderer.draw_textured_quad(
-            sx_pos - w, sy_pos, w, h,
-            ones_frame.uv, [1.0, 1.0, 1.0, 1.0],
+            sx_pos - w,
+            sy_pos,
+            w,
+            h,
+            ones_frame.uv,
+            [1.0, 1.0, 1.0, 1.0],
         );
         if let Some(tens_frame) = get_frame(&format!("time_number_{}", sec_tens)) {
             let tw = tens_frame.width as f32 * sx;
             let th = tens_frame.height as f32 * sy;
             renderer.draw_textured_quad(
-                sx_pos - w - tw, sy_pos, tw, th,
-                tens_frame.uv, [1.0, 1.0, 1.0, 1.0],
+                sx_pos - w - tw,
+                sy_pos,
+                tw,
+                th,
+                tens_frame.uv,
+                [1.0, 1.0, 1.0, 1.0],
             );
         }
     }
@@ -770,30 +790,66 @@ pub fn draw_judgment_counts(
 ) {
     let (sx, sy) = skin_scale;
     let (ox, oy) = offset;
-    
+
     // COOL count: COUNTER_JUDGMENT_COOL x="658" y="572"
     let cx = ox + layout.judgment_cool_x * sx;
     let cy = oy + layout.judgment_cool_y * sy;
-    draw_number(renderer, &|d| get_frame(&format!("counter_number_{}", d)),
-        cool, cx, cy, 1.0 * sx, sx, sy, [1.0, 1.0, 1.0, 1.0]);
-    
+    draw_number(
+        renderer,
+        &|d| get_frame(&format!("counter_number_{}", d)),
+        cool,
+        cx,
+        cy,
+        1.0 * sx,
+        sx,
+        sy,
+        [1.0, 1.0, 1.0, 1.0],
+    );
+
     // GOOD count: COUNTER_JUDGMENT_GOOD x="728" y="572"
     let gx = ox + layout.judgment_good_x * sx;
     let gy = oy + layout.judgment_good_y * sy;
-    draw_number(renderer, &|d| get_frame(&format!("counter_number_{}", d)),
-        good, gx, gy, 1.0 * sx, sx, sy, [1.0, 1.0, 1.0, 1.0]);
-    
+    draw_number(
+        renderer,
+        &|d| get_frame(&format!("counter_number_{}", d)),
+        good,
+        gx,
+        gy,
+        1.0 * sx,
+        sx,
+        sy,
+        [1.0, 1.0, 1.0, 1.0],
+    );
+
     // BAD count: COUNTER_JUDGMENT_BAD x="658" y="581"
     let bx = ox + layout.judgment_bad_x * sx;
     let by = oy + layout.judgment_bad_y * sy;
-    draw_number(renderer, &|d| get_frame(&format!("counter_number_{}", d)),
-        bad, bx, by, 1.0 * sx, sx, sy, [1.0, 1.0, 1.0, 1.0]);
-    
+    draw_number(
+        renderer,
+        &|d| get_frame(&format!("counter_number_{}", d)),
+        bad,
+        bx,
+        by,
+        1.0 * sx,
+        sx,
+        sy,
+        [1.0, 1.0, 1.0, 1.0],
+    );
+
     // MISS count: COUNTER_JUDGMENT_MISS x="728" y="581"
     let mx = ox + layout.judgment_miss_x * sx;
     let my = oy + layout.judgment_miss_y * sy;
-    draw_number(renderer, &|d| get_frame(&format!("counter_number_{}", d)),
-        miss, mx, my, 1.0 * sx, sx, sy, [1.0, 1.0, 1.0, 1.0]);
+    draw_number(
+        renderer,
+        &|d| get_frame(&format!("counter_number_{}", d)),
+        miss,
+        mx,
+        my,
+        1.0 * sx,
+        sx,
+        sy,
+        [1.0, 1.0, 1.0, 1.0],
+    );
 }
 
 /// Resolve a sprite frame, using animation if available.
@@ -822,7 +878,13 @@ pub fn render_hud(
     current_time_ms: f64,
 ) {
     render_hud_with_atlas(
-        renderer, None, game_state, layout, skin_scale, offset, current_time_ms,
+        renderer,
+        None,
+        game_state,
+        layout,
+        skin_scale,
+        offset,
+        current_time_ms,
     )
 }
 
@@ -843,8 +905,15 @@ pub fn render_hud_with_atlas(
 
     // 1. Draw static/background elements first
     // Use life_percent_for_display() which handles startup animation vs gameplay
-    draw_lifebar(renderer, &get_frame, game_state.life_percent_for_display(), layout, skin_scale, offset);
-    
+    draw_lifebar(
+        renderer,
+        &get_frame,
+        game_state.life_percent_for_display(),
+        layout,
+        skin_scale,
+        offset,
+    );
+
     // Draw timebar (song progress) - fills left to right based on game time / song end
     // Clamped to 1.0 so it doesn't overflow past 100%
     let time_progress = if game_state.end_time_ms > 0.0 {
@@ -852,14 +921,42 @@ pub fn render_hud_with_atlas(
     } else {
         0.0
     };
-    draw_timebar(renderer, &get_frame, time_progress, layout, skin_scale, offset);
-    
-    draw_jam_bar(renderer, &get_frame, stats.jam_counter, layout, skin_scale, offset);
-    draw_pills(renderer, &get_frame, stats.pill_count, layout, skin_scale, offset);
+    draw_timebar(
+        renderer,
+        &get_frame,
+        time_progress,
+        layout,
+        skin_scale,
+        offset,
+    );
+
+    draw_jam_bar(
+        renderer,
+        &get_frame,
+        stats.jam_counter,
+        layout,
+        skin_scale,
+        offset,
+    );
+    draw_pills(
+        renderer,
+        &get_frame,
+        stats.pill_count,
+        layout,
+        skin_scale,
+        offset,
+    );
 
     // 2. Draw counters
-    draw_score(renderer, &get_frame, stats.score, layout, skin_scale, offset);
-    
+    draw_score(
+        renderer,
+        &get_frame,
+        stats.score,
+        layout,
+        skin_scale,
+        offset,
+    );
+
     // Duration display: derived directly from the authoritative game clock.
     // No separate duration counter — this ensures the MM:SS display matches
     // the actual gameplay time exactly (no offset from startup delay).
@@ -867,46 +964,76 @@ pub fn render_hud_with_atlas(
     let total_seconds = (game_time_ms / 1000.0) as u64;
     let minutes = (total_seconds / 60) as u32;
     let seconds = (total_seconds % 60) as u32;
-    
+
     draw_duration(
-        renderer, &get_frame,
-        minutes, seconds,
-        layout, skin_scale, offset,
+        renderer, &get_frame, minutes, seconds, layout, skin_scale, offset,
     );
     draw_combo(
-        renderer, &get_frame, stats.combo,
+        renderer,
+        &get_frame,
+        stats.combo,
         game_state.combo_counter.current_y(),
         game_state.combo_counter.visible,
-        layout, skin_scale, offset,
+        layout,
+        skin_scale,
+        offset,
     );
     // Combo title: only visible for 2 seconds after combo changes
     if game_state.is_combo_title_visible() {
         draw_combo_title(
-            renderer, &get_frame, stats.combo,
+            renderer,
+            &get_frame,
+            stats.combo,
             game_state.combo_counter.current_y(),
-            layout, skin_scale, offset,
+            layout,
+            skin_scale,
+            offset,
         );
     }
     // Jam counter: only visible for 1 second after jam combo increases
     if game_state.is_jam_counter_visible() {
-        draw_jam_counter(renderer, &get_frame, stats.jam_combo, layout, skin_scale, offset);
+        draw_jam_counter(
+            renderer,
+            &get_frame,
+            stats.jam_combo,
+            layout,
+            skin_scale,
+            offset,
+        );
     }
     // Max combo: only visible for 2 seconds after max combo increases
     if game_state.is_max_combo_counter_visible() {
-        draw_max_combo(renderer, &get_frame, stats.max_combo, layout, skin_scale, offset);
+        draw_max_combo(
+            renderer,
+            &get_frame,
+            stats.max_combo,
+            layout,
+            skin_scale,
+            offset,
+        );
     }
     draw_judgment_counts(
-        renderer, &get_frame,
-        stats.cool_count, stats.good_count, stats.bad_count, stats.miss_count,
-        layout, skin_scale, offset,
+        renderer,
+        &get_frame,
+        stats.cool_count,
+        stats.good_count,
+        stats.bad_count,
+        stats.miss_count,
+        layout,
+        skin_scale,
+        offset,
     );
 
     // 3. Draw active judgment popups
     for judgment in &game_state.pending_judgments {
         draw_judgment_popup(
-            renderer, &get_frame,
-            judgment, current_time_ms as f64,
-            layout, skin_scale, offset,
+            renderer,
+            &get_frame,
+            judgment,
+            current_time_ms as f64,
+            layout,
+            skin_scale,
+            offset,
         );
     }
 }

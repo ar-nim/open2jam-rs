@@ -132,8 +132,7 @@ impl Clock {
         if game_time_ms == 0 {
             self.reset();
         } else {
-            self.game_start_offset_ms =
-                Some(self.raw_time_ms.saturating_sub(game_time_ms));
+            self.game_start_offset_ms = Some(self.raw_time_ms.saturating_sub(game_time_ms));
         }
     }
 }

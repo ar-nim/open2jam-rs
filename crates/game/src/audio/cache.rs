@@ -87,8 +87,8 @@ fn decode_ogg(data: &[u8]) -> Result<Arc<Frames<[f32; 2]>>, DecodeError> {
     use lewton::inside_ogg::OggStreamReader;
 
     let cursor = Cursor::new(data.to_vec());
-    let mut reader =
-        OggStreamReader::new(cursor).map_err(|e| DecodeError::Lewton(format!("lewton open: {}", e)))?;
+    let mut reader = OggStreamReader::new(cursor)
+        .map_err(|e| DecodeError::Lewton(format!("lewton open: {}", e)))?;
 
     let sample_rate = reader.ident_hdr.audio_sample_rate as u32;
     let channels = reader.ident_hdr.audio_channels as usize;
@@ -155,7 +155,10 @@ fn decode_wav(data: &[u8]) -> Result<Arc<Frames<[f32; 2]>>, DecodeError> {
     match spec.sample_format {
         hound::SampleFormat::Int => {
             let bits = spec.bits_per_sample;
-            let samples: Vec<i32> = reader.into_samples::<i32>().filter_map(|s| s.ok()).collect();
+            let samples: Vec<i32> = reader
+                .into_samples::<i32>()
+                .filter_map(|s| s.ok())
+                .collect();
             let max_val = (1i64 << (bits - 1)) as f32;
             for chunk in samples.chunks(channels) {
                 let left = if chunk.len() > 0 {
@@ -172,7 +175,10 @@ fn decode_wav(data: &[u8]) -> Result<Arc<Frames<[f32; 2]>>, DecodeError> {
             }
         }
         hound::SampleFormat::Float => {
-            let samples: Vec<f32> = reader.into_samples::<f32>().filter_map(|s| s.ok()).collect();
+            let samples: Vec<f32> = reader
+                .into_samples::<f32>()
+                .filter_map(|s| s.ok())
+                .collect();
             for chunk in samples.chunks(channels) {
                 let left = if chunk.len() > 0 { chunk[0] } else { 0.0 };
                 let right = if chunk.len() > 1 { chunk[1] } else { left };

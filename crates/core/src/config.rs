@@ -31,7 +31,8 @@ impl Config {
     /// Load config from a JSON file. Returns default config if file not found.
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let data = std::fs::read_to_string(path)?;
-        serde_json::from_str(&data).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        serde_json::from_str(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
     /// Save config to a JSON file. Creates parent directories if needed.

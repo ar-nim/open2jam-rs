@@ -209,26 +209,39 @@ impl SpriteRenderer {
         let br = [x + w, y + h];
 
         // Triangle 1: tl -> tr -> bl
-        self.vertices.push(SpriteVertex { position: tl, color });
-        self.vertices.push(SpriteVertex { position: tr, color });
-        self.vertices.push(SpriteVertex { position: bl, color });
+        self.vertices.push(SpriteVertex {
+            position: tl,
+            color,
+        });
+        self.vertices.push(SpriteVertex {
+            position: tr,
+            color,
+        });
+        self.vertices.push(SpriteVertex {
+            position: bl,
+            color,
+        });
 
         // Triangle 2: tl -> bl -> br
-        self.vertices.push(SpriteVertex { position: tl, color });
-        self.vertices.push(SpriteVertex { position: bl, color });
-        self.vertices.push(SpriteVertex { position: br, color });
+        self.vertices.push(SpriteVertex {
+            position: tl,
+            color,
+        });
+        self.vertices.push(SpriteVertex {
+            position: bl,
+            color,
+        });
+        self.vertices.push(SpriteVertex {
+            position: br,
+            color,
+        });
     }
 
     /// Upload vertex data and issue draw calls.
     ///
     /// Creates a command encoder, begins a render pass targeting `view`,
     /// sets the pipeline and bind group, and draws all queued quads.
-    pub fn end(
-        &mut self,
-        view: &wgpu::TextureView,
-        queue: &wgpu::Queue,
-        device: &wgpu::Device,
-    ) {
+    pub fn end(&mut self, view: &wgpu::TextureView, queue: &wgpu::Queue, device: &wgpu::Device) {
         if self.vertices.is_empty() {
             return;
         }
@@ -236,11 +249,7 @@ impl SpriteRenderer {
         let vertex_count = self.vertices.len();
 
         // Upload vertex data.
-        queue.write_buffer(
-            &self.vertex_buffer,
-            0,
-            bytemuck::cast_slice(&self.vertices),
-        );
+        queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Sprite Render Encoder"),
