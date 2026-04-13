@@ -68,15 +68,10 @@ pub fn ui_display_config(
                     } else {
                         format!("{}×{}", w, h)
                     };
-                    if ui
-                        .selectable_value(
-                            &mut (opts.display_width, opts.display_height),
-                            (*w, *h),
-                            label,
-                        )
-                        .clicked()
-                    {
-                        // Selection updated
+                    let is_selected = opts.display_width == *w && opts.display_height == *h;
+                    if ui.selectable_label(is_selected, label).clicked() {
+                        opts.display_width = *w;
+                        opts.display_height = *h;
                     }
                 }
             });

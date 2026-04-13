@@ -1461,20 +1461,15 @@ impl MenuApp {
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.label("Buffer Size:");
-                        let prev = self.config.game_options.buffer_size;
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.game_options.buffer_size)
-                                .range(1..=4096),
-                        );
-                        // Enforce power-of-two: clamp to nearest valid value
-                        if self.config.game_options.buffer_size != prev {
-                            self.config.game_options.buffer_size = clamp_to_power_of_two(
-                                self.config.game_options.buffer_size,
-                                1,
-                                4096,
-                            );
+                        // Slider over exponent (0..=12 → 2^0..=2^12 = 1..=4096)
+                        let mut exp = buffer_size_to_exp(self.config.game_options.buffer_size);
+                        let slider = egui::Slider::new(&mut exp, 0..=12)
+                            .suffix(" (power of two)")
+                            .show_value(false);
+                        if ui.add(slider).changed() {
+                            self.config.game_options.buffer_size = exp_to_buffer_size(exp);
                         }
-                        ui.label("(power of two, 1–4096 samples)");
+                        ui.label(format!("{} samples", self.config.game_options.buffer_size));
                     });
                 });
                 self.mark_dirty();
@@ -1486,21 +1481,14 @@ impl MenuApp {
 // Standalone functions
 // ---------------------------------------------------------------------------
 
-/// Clamp a value to the nearest power of two within [min, max].
-fn clamp_to_power_of_two(value: u32, min: u32, max: u32) -> u32 {
-    if value <= min {
-        return min;
-    }
-    if value >= max {
-        return max;
-    }
-    // Round up to the next power of two
-    let mut p: u32 = 1;
-    while p < value {
-        p = p.saturating_mul(2);
-    }
-    // Clamp to range
-    p.clamp(min, max)
+/// Convert a buffer size to its power-of-two exponent (e.g. 128 → 7 for 2^7).
+fn buffer_size_to_exp(size: u32) -> u32 {
+    size.next_power_of_two().trailing_zeros()
+}
+
+/// Convert an exponent back to the buffer size (e.g. 7 → 128 for 2^7).
+fn exp_to_buffer_size(exp: u32) -> u32 {
+    1u32 << exp
 }
 
 /// Walk a directory tree, parse OJN headers, report progress via channel.
