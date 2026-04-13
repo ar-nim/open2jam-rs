@@ -190,6 +190,10 @@ pub struct App {
     display_vsync: bool,
     /// Key name → lane index mapping (built from config)
     key_to_lane: HashMap<String, usize>,
+    /// Frame counter for FPS tracking (atomic for safe access from any thread).
+    frame_count: std::sync::atomic::AtomicU64,
+    /// Last time we logged FPS/CPU stats.
+    last_fps_log: Instant,
 }
 
 impl App {
@@ -232,6 +236,8 @@ impl App {
             difficulty: opts.difficulty,
             display_vsync: opts.display_vsync,
             key_to_lane: build_key_mapping(&config.key_bindings.k7.lanes),
+            frame_count: std::sync::atomic::AtomicU64::new(0),
+            last_fps_log: Instant::now(),
         })
     }
 
@@ -864,6 +870,32 @@ impl App {
     }
 
     fn render_frame(&mut self) -> bool {
+        use std::sync::atomic::Ordering;
+
+        // Increment frame counter
+        self.frame_count.fetch_add(1, Ordering::Relaxed);
+
+        // Periodic FPS/CPU stats logging (every 5 seconds)
+        if self.last_fps_log.elapsed().as_secs() >= 5 {
+            let frames = self.frame_count.swap(0, Ordering::Relaxed);
+            let elapsed = self.last_fps_log.elapsed().as_secs_f64();
+            let fps = frames as f64 / elapsed;
+            let frame_ms = 1000.0 / fps.max(1.0);
+            self.last_fps_log = Instant::now();
+
+            if let Some(audio) = &self.audio {
+                let state = audio.state();
+                let avg_cpu = state.avg_callback_us.load(Ordering::Relaxed);
+                let max_cpu = state.max_callback_us.load(Ordering::Relaxed);
+                info!(
+                    "[FPS] {:.0} fps | Frame: {:.1}ms | CPU: avg={}µs max={}µs",
+                    fps, frame_ms, avg_cpu, max_cpu
+                );
+            } else {
+                info!("[FPS] {:.0} fps | Frame: {:.1}ms", fps, frame_ms);
+            }
+        }
+
         let Some(render) = &mut self.render else {
             warn!("render_frame: render state is None");
             return false;
