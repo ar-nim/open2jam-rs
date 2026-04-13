@@ -6,6 +6,11 @@ use std::path::{Path, PathBuf};
 use crate::game_options::GameOptions;
 use crate::key_bindings::KeyBindings;
 
+/// Default visible columns: Name, Level, Duration.
+fn default_visible_columns() -> [bool; 6] {
+    [true, false, true, false, true, false]
+}
+
 /// Top-level configuration, persisted to `config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -15,6 +20,9 @@ pub struct Config {
     pub game_options: GameOptions,
     /// Last opened library (SQLite database ID).
     pub last_opened_library_id: Option<u64>,
+    /// Visible columns in the song table: [Name, Artist, Level, Bpm, Duration, Genre].
+    #[serde(default = "default_visible_columns")]
+    pub visible_columns: [bool; 6],
 }
 
 impl Default for Config {
@@ -23,6 +31,7 @@ impl Default for Config {
             key_bindings: KeyBindings::default(),
             game_options: GameOptions::default(),
             last_opened_library_id: None,
+            visible_columns: default_visible_columns(),
         }
     }
 }

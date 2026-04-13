@@ -331,6 +331,9 @@ impl MenuApp {
             }
         });
 
+        // Extract visible columns before config is moved into Self
+        let visible_columns = config.visible_columns;
+
         Ok(Self {
             config,
             songs: Vec::new(),
@@ -352,8 +355,8 @@ impl MenuApp {
             last_save_time: Instant::now(),
             sort_column: SongSortColumn::default(),
             sort_ascending: true,
-            // Default visible columns: Name, Level, BPM
-            visible_columns: [true, false, true, true, false, false],
+            // Load visible columns from config (default: Name, Level, Duration)
+            visible_columns,
             genre_filter: None,
             cached_sorted: Vec::new(),
             cached_sort_col: SongSortColumn::default(),
@@ -653,13 +656,14 @@ impl MenuApp {
         });
     }
 
-    #[allow(dead_code)]
-    fn load_library_songs(&mut self, library_id: i64) {
+    /// Load songs from the database for a specific library.
+    fn load_library_songs_from_path(&mut self, library_id: i64, lib_root: &str) {
         let Some(ref pool) = self.db_pool else {
             return;
         };
         let pool = pool.clone();
         let tx = self.msg_tx.clone();
+        let lib_root = lib_root.to_string();
 
         std::thread::spawn(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
@@ -676,16 +680,6 @@ impl MenuApp {
 
             match rt.block_on(db::get_charts_for_library(&pool, library_id)) {
                 Ok(charts) => {
-                    // Look up the library root path
-                    let lib_root = if let Ok(libs) = rt.block_on(db::get_all_libraries(&pool)) {
-                        libs.iter()
-                            .find(|l| l.id == library_id)
-                            .map(|l| l.root_path.as_str())
-                            .unwrap_or("")
-                            .to_string()
-                    } else {
-                        String::new()
-                    };
                     let songs = group_charts_into_songs(&charts, &lib_root);
                     tx.send(AppMessage::SongsLoaded(songs)).ok();
                 }
@@ -694,6 +688,19 @@ impl MenuApp {
                 }
             }
         });
+    }
+
+    /// Load songs from the database for a specific library (looks up path internally).
+    #[allow(dead_code)]
+    fn load_library_songs(&mut self, library_id: i64) {
+        // Get the root path from the libraries list
+        let lib_root = self
+            .libraries
+            .iter()
+            .find(|l| l.id == library_id)
+            .map(|l| l.root_path.clone())
+            .unwrap_or_default();
+        self.load_library_songs_from_path(library_id, &lib_root);
     }
 
     fn rescan_library(&mut self) {
@@ -880,10 +887,21 @@ impl MenuApp {
                             None
                         };
                         if let Some(idx) = self.selected_library {
-                            if let Some(lib) = self.libraries.get(idx) {
-                                self.config.last_opened_library_id = Some(lib.id as u64);
-                                self.mark_dirty();
-                            }
+                            // Extract library info before mutable borrow
+                            let (lib_id, lib_root) = if let Some(lib) = self.libraries.get(idx) {
+                                (lib.id, lib.root_path.clone())
+                            } else {
+                                return;
+                            };
+                            self.config.last_opened_library_id = Some(lib_id as u64);
+                            self.mark_dirty();
+                            // Reload songs from the newly selected library
+                            self.load_library_songs_from_path(lib_id, &lib_root);
+                            self.loading = true;
+                        } else {
+                            // No library selected — clear songs
+                            self.songs.clear();
+                            self.selected_song = None;
                         }
                     }
                 });
@@ -999,6 +1017,9 @@ impl MenuApp {
                             if !self.visible_columns.iter().any(|v| *v) {
                                 self.visible_columns[idx] = true;
                             }
+                            // Sync to config for persistence
+                            self.config.visible_columns = self.visible_columns;
+                            self.mark_dirty();
                         }
                     }
                 });
