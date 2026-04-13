@@ -2,8 +2,9 @@
 //!
 //! Run with: `cargo run -p open2jam-rs-menu`
 //!
-//! **Font Setup**: Before first run, download bundled fonts:
-//!   `./download_fonts.sh` (installs Inter + Noto Sans SC into `assets/`)
+//! **Fonts**: Inter (Latin) and Noto Sans SC (CJK) are automatically
+//! downloaded at build time by `build.rs` if not already present in
+//! `crates/menu/assets/`. No manual setup required.
 
 use anyhow::Result;
 
@@ -21,36 +22,38 @@ fn main() -> Result<()> {
     eframe::run_native(
         "open2jam-rs — Music Select",
         native_options,
-        Box::new(|cc| -> std::result::Result<
-            Box<dyn eframe::App>,
-            Box<dyn std::error::Error + Send + Sync>,
-        > {
-            // Configure bundled fonts: Inter (Latin) + Noto Sans SC (CJK)
-            configure_fonts(&cc.egui_ctx);
-            Ok(Box::new(app))
-        }),
+        Box::new(
+            |cc| -> std::result::Result<
+                Box<dyn eframe::App>,
+                Box<dyn std::error::Error + Send + Sync>,
+            > {
+                // Configure bundled fonts: Inter (Latin) + Noto Sans SC (CJK)
+                configure_fonts(&cc.egui_ctx);
+                Ok(Box::new(app))
+            },
+        ),
     )
     .map_err(|e| anyhow::anyhow!("eframe error: {:?}", e))?;
     Ok(())
 }
 
-/// Try loading a font file from the `assets/` directory relative to the executable.
-/// Returns the loaded bytes on success.
+/// Try loading a font file from the `assets/` directory.
+/// Checks multiple locations to support both `cargo run` and deployed binaries.
 fn load_bundled_font(filename: &str) -> Option<Vec<u8>> {
     use std::path::PathBuf;
 
     // Try multiple locations relative to different bases
     let candidates = [
+        // Relative to crate root (for `cargo run`)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(filename),
         // Relative to current working directory
         PathBuf::from("assets").join(filename),
         // Relative to executable directory
         std::env::current_exe()
             .ok()?
             .parent()?
-            .join("assets")
-            .join(filename),
-        // Relative to crate root (for `cargo run`)
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("assets")
             .join(filename),
     ];
@@ -75,9 +78,10 @@ fn configure_fonts(ctx: &egui::Context) {
 
     // Load Inter font (Latin/Western text)
     if let Some(data) = load_bundled_font("Inter-Regular.ttf") {
-        fonts
-            .font_data
-            .insert("inter".to_string(), std::sync::Arc::new(egui::FontData::from_owned(data)));
+        fonts.font_data.insert(
+            "inter".to_string(),
+            std::sync::Arc::new(egui::FontData::from_owned(data)),
+        );
         // Set as primary proportional font
         let family = fonts
             .families
@@ -86,10 +90,14 @@ fn configure_fonts(ctx: &egui::Context) {
         family.insert(0, "inter".to_string());
         log::info!("Inter font loaded as primary Latin font");
     } else {
-        log::warn!("Inter font not found — using egui default for Latin text. Run download_fonts.sh");
+        log::warn!(
+            "Inter font not found — using egui default for Latin text. \
+             The font will be automatically downloaded on next build."
+        );
     }
 
     // Load Noto Sans SC (CJK fallback)
+    // This file is automatically downloaded by build.rs if missing
     if let Some(data) = load_bundled_font("NotoSansSC-Regular.ttf") {
         fonts.font_data.insert(
             "noto-sans-sc".to_string(),
@@ -111,7 +119,8 @@ fn configure_fonts(ctx: &egui::Context) {
         log::info!("Noto Sans SC loaded as CJK fallback");
     } else {
         log::warn!(
-            "Noto Sans SC not found — CJK characters may not render correctly. Run download_fonts.sh"
+            "Noto Sans SC not found — CJK characters may not render correctly. \
+             The font will be automatically downloaded on next build."
         );
     }
 
