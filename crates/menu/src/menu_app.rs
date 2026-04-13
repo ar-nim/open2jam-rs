@@ -1676,6 +1676,7 @@ pub fn group_charts_into_songs(charts: &[CachedChart], library_root: &str) -> Ve
             // (one per difficulty level that has content)
             let mut chart_entries: Vec<ChartEntry> = Vec::new();
             for c in &charts_in_group {
+                let full_path = PathBuf::from(library_root).join(&c.relative_path);
                 let level_arr = [c.level_easy, c.level_normal, c.level_hard];
                 let notes_arr = [c.note_count_easy, c.note_count_normal, c.note_count_hard];
                 let dur_arr = [c.duration_easy, c.duration_normal, c.duration_hard];
@@ -1688,7 +1689,7 @@ pub fn group_charts_into_songs(charts: &[CachedChart], library_root: &str) -> Ve
                     }
                     let diff_label = diff_names[i];
                     chart_entries.push(ChartEntry {
-                        path: PathBuf::new(),
+                        path: full_path.clone(),
                         title: format!("{} [{}]", c.title, diff_label),
                         artist: c.artist.clone(),
                         noter: c.noter.clone(),
