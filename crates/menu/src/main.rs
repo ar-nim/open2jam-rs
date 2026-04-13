@@ -2,16 +2,13 @@
 //!
 //! Run with: `cargo run -p open2jam-rs-menu`
 
-mod menu_app;
-mod panels;
-
 use anyhow::Result;
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     log::info!("open2jam-rs-menu starting");
 
-    let app = menu_app::MenuApp::new()?;
+    let app = open2jam_rs_menu::menu_app::MenuApp::new()?;
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("open2jam-rs — Music Select")
@@ -21,9 +18,13 @@ fn main() -> Result<()> {
     eframe::run_native(
         "open2jam-rs — Music Select",
         native_options,
-        Box::new(|_cc| -> std::result::Result<Box<dyn eframe::App>, Box<dyn std::error::Error + Send + Sync>> {
-            Ok(Box::new(app))
-        }),
-    ).map_err(|e| anyhow::anyhow!("eframe error: {:?}", e))?;
+        Box::new(
+            |_cc| -> std::result::Result<
+                Box<dyn eframe::App>,
+                Box<dyn std::error::Error + Send + Sync>,
+            > { Ok(Box::new(app)) },
+        ),
+    )
+    .map_err(|e| anyhow::anyhow!("eframe error: {:?}", e))?;
     Ok(())
 }
