@@ -21,9 +21,6 @@ const PRESET_RESOLUTIONS: &[(u32, u32)] = &[
     (3840, 2160),
 ];
 
-/// Common refresh rates (in Hz).
-const COMMON_REFRESH_RATES: &[u32] = &[60, 75, 120, 144, 165, 240];
-
 pub fn ui_display_config(
     ui: &mut egui::Ui,
     opts: &mut GameOptions,
@@ -34,92 +31,95 @@ pub fn ui_display_config(
     // ── Resolution ──
     ui.label(egui::RichText::new("Resolution").strong().size(13.0));
 
-    // Show native resolution prominently
-    if let Some((w, h)) = native_res {
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Native:").weak());
-            ui.label(format!("{}×{}", w, h));
-        });
-        ui.add_space(4.0);
+    // Build resolution list: presets filtered by native max, with native marked
+    let max_h = native_res.map(|(_, nh)| nh).unwrap_or(2160);
+    let max_w = native_res.map(|(nw, _)| nw).unwrap_or(3840);
+
+    let mut presets: Vec<(u32, u32)> = PRESET_RESOLUTIONS
+        .iter()
+        .filter(|(w, h)| *w <= max_w && *h <= max_h)
+        .copied()
+        .collect();
+
+    // If native resolution isn't already in the list, insert it at the top
+    if let Some((nw, nh)) = native_res {
+        if !presets.iter().any(|(w, h)| *w == nw && *h == nh) {
+            presets.insert(0, (nw, nh));
+        }
     }
 
-    // Resolution selector: common presets filtered by native height
-    let available_resolutions: Vec<(u32, u32)> = {
-        let max_h = native_res.map(|(_, nh)| nh).unwrap_or(2160);
-        let max_w = native_res.map(|(nw, _)| nw).unwrap_or(3840);
-        PRESET_RESOLUTIONS
-            .iter()
-            .filter(|(w, h)| *w <= max_w && *h <= max_h)
-            .copied()
-            .collect()
-    };
+    // Sort descending by height so native (highest) appears first
+    presets.sort_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
 
-    // Current resolution picker
-    let current_text = format!("{}×{}", opts.display_width, opts.display_height);
-    egui::ComboBox::from_id_salt("resolution_select")
-        .selected_text(&current_text)
-        .show_ui(ui, |ui| {
-            for (w, h) in &available_resolutions {
-                let text = format!("{}×{}", w, h);
-                if ui
-                    .selectable_value(
-                        &mut (opts.display_width, opts.display_height),
-                        (*w, *h),
-                        text,
-                    )
-                    .clicked()
-                {
-                    // Selection updated
+    // Custom resolution checkbox
+    ui.checkbox(&mut opts.use_custom_resolution, "Use Custom Resolution");
+
+    // Preset dropdown — disabled when custom is active
+    let preset_enabled = !opts.use_custom_resolution;
+    ui.add_enabled_ui(preset_enabled, |ui| {
+        let current_text = format!("{}×{}", opts.display_width, opts.display_height);
+        egui::ComboBox::from_id_salt("resolution_select")
+            .selected_text(&current_text)
+            .show_ui(ui, |ui| {
+                for (w, h) in &presets {
+                    let is_native = native_res == Some((*w, *h));
+                    let label = if is_native {
+                        format!("{}×{} (native)", w, h)
+                    } else {
+                        format!("{}×{}", w, h)
+                    };
+                    if ui
+                        .selectable_value(
+                            &mut (opts.display_width, opts.display_height),
+                            (*w, *h),
+                            label,
+                        )
+                        .clicked()
+                    {
+                        // Selection updated
+                    }
                 }
-            }
-        });
+            });
+    });
 
-    // Manual override with drag values (collapsed by default)
-    ui.collapsing("Custom resolution", |ui| {
+    // Custom resolution fields — only active when checkbox is checked
+    ui.add_enabled_ui(opts.use_custom_resolution, |ui| {
         ui.horizontal(|ui| {
             ui.label("Width:");
-            ui.add(egui::DragValue::new(&mut opts.display_width).range(640..=3840));
+            ui.add(egui::DragValue::new(&mut opts.custom_width).range(640..=3840));
             ui.label("Height:");
-            ui.add(egui::DragValue::new(&mut opts.display_height).range(480..=2160));
+            ui.add(egui::DragValue::new(&mut opts.custom_height).range(480..=2160));
         });
     });
 
     ui.separator();
 
-    // ── Refresh Rate ──
-    ui.label(egui::RichText::new("Refresh Rate").strong().size(13.0));
+    // ── Display Mode (horizontal with separator) ──
     ui.horizontal(|ui| {
-        for &rate in COMMON_REFRESH_RATES {
-            let text = format!("{} Hz", rate);
-            let is_selected = opts.display_refresh_rate == rate;
-            if ui.selectable_label(is_selected, text).clicked() {
-                opts.display_refresh_rate = rate;
-            }
-        }
+        ui.checkbox(&mut opts.menu_fullscreen, "Menu Fullscreen");
+        ui.separator();
+        ui.checkbox(&mut opts.display_fullscreen, "Game Fullscreen");
     });
-
-    ui.separator();
-
-    // ── Display Mode ──
-    ui.checkbox(&mut opts.menu_fullscreen, "Menu Fullscreen");
-    ui.checkbox(&mut opts.display_fullscreen, "Game Fullscreen");
 
     ui.separator();
 
     // ── Sync & Limiting ──
     ui.checkbox(&mut opts.display_vsync, "Use VSync");
 
-    ui.horizontal(|ui| {
-        ui.label("FPS Limiter:");
-        egui::ComboBox::from_id_salt("fps_limiter")
-            .selected_text(opts.fps_limiter.to_string())
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut opts.fps_limiter, FpsLimiter::Unlimited, "Unlimited");
-                ui.selectable_value(&mut opts.fps_limiter, FpsLimiter::X1, "1x Refresh Rate");
-                ui.selectable_value(&mut opts.fps_limiter, FpsLimiter::X2, "2x");
-                ui.selectable_value(&mut opts.fps_limiter, FpsLimiter::X4, "4x");
-                ui.selectable_value(&mut opts.fps_limiter, FpsLimiter::X8, "8x");
-            });
+    // FPS limiter — greyed out when VSync is on
+    ui.add_enabled_ui(!opts.display_vsync, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("FPS Limiter:");
+            egui::ComboBox::from_id_salt("fps_limiter")
+                .selected_text(opts.fps_limiter.to_string())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut opts.fps_limiter, FpsLimiter::Unlimited, "Unlimited");
+                    ui.selectable_value(&mut opts.fps_limiter, FpsLimiter::X1, "1x Refresh Rate");
+                    ui.selectable_value(&mut opts.fps_limiter, FpsLimiter::X2, "2x");
+                    ui.selectable_value(&mut opts.fps_limiter, FpsLimiter::X4, "4x");
+                    ui.selectable_value(&mut opts.fps_limiter, FpsLimiter::X8, "8x");
+                });
+        });
     });
 
     ui.separator();

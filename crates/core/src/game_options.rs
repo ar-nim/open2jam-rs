@@ -219,9 +219,17 @@ pub struct GameOptions {
     #[serde(default = "default_height")]
     pub display_height: u32,
 
-    /// Display refresh rate in Hz (0 = use monitor default).
+    /// Use custom resolution instead of presets.
     #[serde(default)]
-    pub display_refresh_rate: u32,
+    pub use_custom_resolution: bool,
+
+    /// Custom resolution width (used when use_custom_resolution is true).
+    #[serde(default = "default_width")]
+    pub custom_width: u32,
+
+    /// Custom resolution height (used when use_custom_resolution is true).
+    #[serde(default = "default_height")]
+    pub custom_height: u32,
 
     /// Audio buffer size (1–4096).
     #[serde(default = "default_buffer")]
@@ -290,7 +298,9 @@ impl Default for GameOptions {
             fps_limiter: FpsLimiter::X1,
             display_width: 1280,
             display_height: 720,
-            display_refresh_rate: 0,
+            use_custom_resolution: false,
+            custom_width: 1280,
+            custom_height: 720,
             buffer_size: 128,
             display_lag: 0.0,
             audio_latency: 0.0,

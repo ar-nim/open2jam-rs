@@ -1461,11 +1461,20 @@ impl MenuApp {
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.label("Buffer Size:");
+                        let prev = self.config.game_options.buffer_size;
                         ui.add(
                             egui::DragValue::new(&mut self.config.game_options.buffer_size)
-                                .clamp_range(1..=4096),
+                                .range(1..=4096),
                         );
-                        ui.label("(1–4096 samples)");
+                        // Enforce power-of-two: clamp to nearest valid value
+                        if self.config.game_options.buffer_size != prev {
+                            self.config.game_options.buffer_size = clamp_to_power_of_two(
+                                self.config.game_options.buffer_size,
+                                1,
+                                4096,
+                            );
+                        }
+                        ui.label("(power of two, 1–4096 samples)");
                     });
                 });
                 self.mark_dirty();
@@ -1476,6 +1485,23 @@ impl MenuApp {
 // ---------------------------------------------------------------------------
 // Standalone functions
 // ---------------------------------------------------------------------------
+
+/// Clamp a value to the nearest power of two within [min, max].
+fn clamp_to_power_of_two(value: u32, min: u32, max: u32) -> u32 {
+    if value <= min {
+        return min;
+    }
+    if value >= max {
+        return max;
+    }
+    // Round up to the next power of two
+    let mut p: u32 = 1;
+    while p < value {
+        p = p.saturating_mul(2);
+    }
+    // Clamp to range
+    p.clamp(min, max)
+}
 
 /// Walk a directory tree, parse OJN headers, report progress via channel.
 fn walk_directory_for_ojn(root: &str, tx: &mpsc::Sender<AppMessage>) -> Vec<ChartScanEntry> {
