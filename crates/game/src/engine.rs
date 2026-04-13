@@ -195,8 +195,53 @@ pub struct App {
     frame_count: std::sync::atomic::AtomicU64,
     /// Last time we logged FPS/CPU stats.
     last_fps_log: Instant,
-    /// Hybrid spin-sleep frame limiter for precise frame pacing.
-    frame_limiter: Option<spin_sleep::LoopHelper>,
+    /// Hybrid spin-sleep frame limiter state.
+    frame_limiter: Option<FrameLimiter>,
+}
+
+/// Hybrid spin-sleep frame limiter (same approach as open2jam-modern Java).
+///
+/// Sleep in 1ms increments, stop 1ms early, then spin-wait for nanosecond
+/// precision. Uses absolute target time to prevent drift.
+struct FrameLimiter {
+    target_frame_duration_ns: u64,
+    next_frame_time_ns: std::time::Duration,
+}
+
+impl FrameLimiter {
+    fn new(target_fps: f64) -> Self {
+        let target_frame_duration_ns = (1_000_000_000.0 / target_fps) as u64;
+        let now = std::time::Instant::now();
+        let next = now + std::time::Duration::from_nanos(target_frame_duration_ns);
+        Self {
+            target_frame_duration_ns,
+            next_frame_time_ns: next.duration_since(now),
+        }
+    }
+
+    /// Wait until the next frame boundary using hybrid sleep + spin-wait.
+    fn wait(&mut self) {
+        let start = std::time::Instant::now();
+        let target_ns = self.next_frame_time_ns.as_nanos() as u64;
+
+        // Phase 1: Sleep in 1ms increments, stopping 1ms early
+        let threshold = target_ns.saturating_sub(1_000_000);
+        loop {
+            let elapsed = start.elapsed().as_nanos() as u64;
+            if elapsed >= threshold {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        // Phase 2: Spin-wait for final <1ms (nanosecond precision)
+        while (start.elapsed().as_nanos() as u64) < target_ns {
+            std::hint::spin_loop();
+        }
+
+        // Phase 3: Advance target time (accumulates to prevent drift)
+        self.next_frame_time_ns += std::time::Duration::from_nanos(self.target_frame_duration_ns);
+    }
 }
 
 impl App {
@@ -307,8 +352,7 @@ impl App {
         };
 
         let target_fps = base_hz * multiplier;
-        self.frame_limiter =
-            Some(spin_sleep::LoopHelper::builder().build_with_target_rate(target_fps));
+        self.frame_limiter = Some(FrameLimiter::new(target_fps));
         info!(
             "Frame limiter: {:.0} Hz × {:.0} = {:.0} fps",
             base_hz, multiplier, target_fps
@@ -355,10 +399,9 @@ impl ApplicationHandler for App {
         if let Some(render) = &self.render {
             render.window.request_redraw();
         }
-        // Frame limiter sleep (hybrid spin-sleep)
+        // Frame limiter: hybrid sleep + spin-wait
         if let Some(ref mut limiter) = self.frame_limiter {
-            limiter.loop_start();
-            limiter.loop_sleep();
+            limiter.wait();
         }
     }
 
