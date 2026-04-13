@@ -1112,39 +1112,38 @@ impl MenuApp {
                         ui.separator();
                         if let Some(song) = &selected_song_data {
                             let dn = ["Easy", "Normal", "Hard"];
-                            for i in 0..3usize {
-                                let level = song.levels[i];
-                                let notes = song.note_counts[i];
-                                if level == 0 && notes == 0 {
-                                    continue;
+                            egui::Grid::new("diff_grid").striped(true).show(ui, |ui| {
+                                for i in 0..3usize {
+                                    let level = song.levels[i];
+                                    let notes = song.note_counts[i];
+                                    if level == 0 && notes == 0 {
+                                        continue;
+                                    }
+                                    let is_selected = self.selected_difficulty == i;
+                                    if ui
+                                        .selectable_label(is_selected, format!("{} [{}]", dn[i], level))
+                                        .clicked()
+                                    {
+                                        self.selected_difficulty = i;
+                                        self.config.game_options.difficulty = match i {
+                                            0 => open2jam_rs_core::Difficulty::Easy,
+                                            1 => open2jam_rs_core::Difficulty::Normal,
+                                            _ => open2jam_rs_core::Difficulty::Hard,
+                                        };
+                                        self.mark_dirty();
+                                    }
+                                    ui.label(format!("Total Notes: {}", notes));
+                                    ui.end_row();
                                 }
-                                let is_selected = self.selected_difficulty == i;
-                                let left_text = format!("{} [{}]", dn[i], level);
-                                let right_text = format!("Total Notes: {}", notes);
-                                let lb = format!("{left_text:<28}{right_text}");
-                                if ui.selectable_label(is_selected, lb).clicked() {
-                                    self.selected_difficulty = i;
-                                    self.config.game_options.difficulty = match i {
-                                        0 => open2jam_rs_core::Difficulty::Easy,
-                                        1 => open2jam_rs_core::Difficulty::Normal,
-                                        _ => open2jam_rs_core::Difficulty::Hard,
-                                    };
-                                    self.mark_dirty();
-                                }
-                            }
+                            });
                         } else {
-                            let _ = ui.selectable_label(
-                                false,
-                                "Easy [-]                       Total Notes: -",
-                            );
-                            let _ = ui.selectable_label(
-                                false,
-                                "Normal [-]                     Total Notes: -",
-                            );
-                            let _ = ui.selectable_label(
-                                false,
-                                "Hard [-]                       Total Notes: -",
-                            );
+                            egui::Grid::new("diff_grid").striped(true).show(ui, |ui| {
+                                for diff in ["Easy", "Normal", "Hard"] {
+                                    let _ = ui.selectable_label(false, format!("{} [-]", diff));
+                                    ui.label("Total Notes: -");
+                                    ui.end_row();
+                                }
+                            });
                         }
 
                         // ── Game Options ──
