@@ -1,15 +1,83 @@
 //! Menu application using eframe (handles wgpu+winit automatically).
+//!
+//! Uses SQLite as a song metadata cache. On startup, songs are loaded from the
+//! database on a background thread. Scanning a library directory runs in a
+//! separate thread and reports progress via an `mpsc` channel.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Instant;
 
 use anyhow::Result;
-use open2jam_rs_core::Config;
 use open2jam_rs_core::game_options::{ChannelMod, VisibilityMod};
-use open2jam_rs_ojn::{OjnHeader, parse_metadata_bytes, extract_cover_image};
-use crate::panels::modifiers::ui_modifiers;
+use open2jam_rs_core::Config;
+use open2jam_rs_ojn::parse_metadata_bytes;
+use sha2::{Digest, Sha256};
+
+use crate::db::{self, CachedChart, ChartScanEntry, LibraryEntry};
 use crate::panels::display_config::ui_display_config;
 use crate::panels::key_bind_editor::ui_key_bind_editor;
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// How often to report scan progress (number of files between reports).
+const SCAN_PROGRESS_INTERVAL: usize = 100;
+
+/// OJN genre codes mapped to human-readable names.
+const OJN_GENRE_NAMES: [&str; 11] = [
+    "Ballad",      // 0
+    "Rock",        // 1
+    "Dance",       // 2
+    "Techno",      // 3
+    "Hip-hop",     // 4
+    "Soul/R&B",    // 5
+    "Jazz",        // 6
+    "Funk",        // 7
+    "Classical",   // 8
+    "Traditional", // 9
+    "Etc",         // 10
+];
+
+/// Convert an OJN genre ID to a display name.
+fn genre_name(genre_id: u32) -> &'static str {
+    OJN_GENRE_NAMES
+        .get(genre_id as usize)
+        .copied()
+        .unwrap_or("Etc")
+}
+
+// ---------------------------------------------------------------------------
+// Message types
+// ---------------------------------------------------------------------------
+
+/// Messages sent from background threads to the egui main thread.
+#[allow(dead_code)]
+enum AppMessage {
+    /// Initial song load completed.
+    SongsLoaded(Vec<SongEntry>),
+    /// Libraries loaded from the database.
+    LibrariesLoaded(Vec<LibraryEntry>),
+    /// Database pool is ready.
+    PoolReady(sqlx::SqlitePool),
+    /// Scan progress update.
+    ScanProgress { scanned: usize },
+    /// Scan completed with results.
+    ScanComplete(Vec<SongEntry>),
+    /// Cover image extracted on background thread (width, height, RGBA pixels).
+    CoverLoaded {
+        song_index: usize,
+        cover: Option<(usize, usize, Vec<u8>)>,
+    },
+    /// An error occurred during scan or load.
+    Error(String),
+}
+
+// ---------------------------------------------------------------------------
+// Domain types
+// ---------------------------------------------------------------------------
 
 /// Metadata for a single chart (one difficulty of one song).
 #[derive(Debug, Clone)]
@@ -18,7 +86,7 @@ pub struct ChartEntry {
     pub title: String,
     pub artist: String,
     pub noter: String,
-    pub genre: String,
+    pub genre: u32,
     pub bpm: f32,
     pub duration_sec: f32,
     pub note_counts: [u32; 3],
@@ -27,18 +95,27 @@ pub struct ChartEntry {
 }
 
 /// A song group: one logical song with multiple difficulties.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SongEntry {
     pub title: String,
     pub artist: String,
     pub noter: String,
-    pub genre: String,
+    pub genre: u32,
     pub bpm: f32,
-    pub duration_sec: f32,
     pub keys: u8,
+    /// One ChartEntry per difficulty/arrangement that has content.
     pub charts: Vec<ChartEntry>,
-    pub cover: Option<Vec<u8>>,
-    pub max_level: u16,
+    pub cover: Option<egui::TextureHandle>,
+    /// Level for each difficulty: [Easy, Normal, Hard].
+    pub levels: [u16; 3],
+    /// Duration in seconds for each difficulty: [Easy, Normal, Hard].
+    pub durations_sec: [f32; 3],
+    /// Note counts for each difficulty: [Easy, Normal, Hard].
+    pub note_counts: [u32; 3],
+    /// Relative path to the .ojn file (for lazy cover extraction).
+    pub relative_path: String,
+    /// Library root path (combined with relative_path for cover extraction).
+    pub library_root: String,
 }
 
 /// Tab index for the menu.
@@ -52,13 +129,55 @@ enum MenuTab {
 
 /// Sort column for the song list table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)]
 enum SongSortColumn {
     #[default]
     Name,
+    Artist,
     Level,
     Bpm,
     Genre,
+    Duration,
 }
+
+/// A column in the song list table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SongColumn {
+    Name,
+    Artist,
+    Level,
+    Bpm,
+    Duration,
+    Genre,
+}
+
+impl SongColumn {
+    fn header_label(&self) -> &'static str {
+        match self {
+            SongColumn::Name => "Name",
+            SongColumn::Artist => "Artist",
+            SongColumn::Level => "Level",
+            SongColumn::Bpm => "BPM",
+            SongColumn::Duration => "Length",
+            SongColumn::Genre => "Genre",
+        }
+    }
+
+    fn to_sort_column(&self) -> Option<SongSortColumn> {
+        match self {
+            SongColumn::Name => Some(SongSortColumn::Name),
+            SongColumn::Artist => Some(SongSortColumn::Artist),
+            SongColumn::Level => Some(SongSortColumn::Level),
+            SongColumn::Bpm => Some(SongSortColumn::Bpm),
+            SongColumn::Duration => Some(SongSortColumn::Duration),
+            SongColumn::Genre => Some(SongSortColumn::Genre),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MenuApp
+// ---------------------------------------------------------------------------
 
 /// The main menu application, implementing eframe::App.
 pub struct MenuApp {
@@ -67,40 +186,170 @@ pub struct MenuApp {
     selected_song: Option<usize>,
     selected_difficulty: usize,
     search_query: String,
-    scan_dirs: Vec<String>,
+
+    // Library system
+    db_pool: Option<sqlx::SqlitePool>,
+    libraries: Vec<LibraryEntry>,
+    selected_library: Option<usize>,
+
+    // Async state
+    loading: bool,
+    scan_in_progress: bool,
+    scan_progress_count: usize,
+    scan_error: Option<String>,
+
+    // Channel receiver (checked every frame)
+    msg_rx: mpsc::Receiver<AppMessage>,
+    // Channel sender (cloned into background threads)
+    msg_tx: mpsc::Sender<AppMessage>,
+
+    // Cover extraction: avoid spawning duplicate threads for the same song
+    last_cover_requested_idx: Option<usize>,
+
+    /// If set, only show songs with this genre ID.
+    genre_filter: Option<u32>,
+
     active_tab: MenuTab,
     config_dirty: bool,
-    last_save_time: std::time::Instant,
+    last_save_time: Instant,
     sort_column: SongSortColumn,
     sort_ascending: bool,
+
+    // Column visibility: defaults to Name, Level, BPM
+    visible_columns: [bool; 6], // indexed by SongColumn discriminant
 }
 
 impl MenuApp {
     pub fn new() -> Result<Self> {
         let config_path = Config::default_path();
-        let config = Config::load(&config_path)
-            .unwrap_or_else(|e| {
-                log::info!("No config found at {:?}, using defaults: {}", config_path, e);
-                Config::default()
-            });
+        let config = Config::load(&config_path).unwrap_or_else(|e| {
+            log::info!(
+                "No config found at {:?}, using defaults: {}",
+                config_path,
+                e
+            );
+            Config::default()
+        });
+
+        let (tx, rx) = mpsc::channel();
+
+        // Open DB pool and load songs on a background thread.
+        // This keeps new() fast (<1ms) — egui shows "Loading..." on first frame.
+        let load_tx = tx.clone();
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    load_tx
+                        .send(AppMessage::Error(format!("tokio runtime: {e}")))
+                        .ok();
+                    return;
+                }
+            };
+
+            let db_path = Config::default_path()
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("songcache.db");
+
+            match rt.block_on(db::open_pool(&db_path)) {
+                Ok(pool) => {
+                    // Clone pool for the UI thread (it's Arc-backed)
+                    let ui_pool = pool.clone();
+                    load_tx.send(AppMessage::PoolReady(pool)).ok();
+
+                    // Load libraries
+                    match rt.block_on(db::get_all_libraries(&ui_pool)) {
+                        Ok(libs) => {
+                            load_tx.send(AppMessage::LibrariesLoaded(libs)).ok();
+                        }
+                        Err(e) => {
+                            load_tx
+                                .send(AppMessage::Error(format!("load libraries: {e}")))
+                                .ok();
+                        }
+                    }
+
+                    // Load songs for last-opened library.
+                    // If no library was previously opened, pick the most
+                    // recently added one (highest id).
+                    let libs = rt
+                        .block_on(db::get_all_libraries(&ui_pool))
+                        .unwrap_or_default();
+                    let lib_id = config
+                        .last_opened_library_id
+                        .or_else(|| libs.last().map(|l| l.id as u64));
+
+                    if let Some(id) = lib_id {
+                        let lib_root = libs
+                            .iter()
+                            .find(|l| l.id == id as i64)
+                            .map(|l| l.root_path.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        match rt.block_on(db::get_charts_for_library(&ui_pool, id as i64)) {
+                            Ok(charts) => {
+                                let entries = group_charts_into_songs(&charts, &lib_root);
+                                load_tx.send(AppMessage::SongsLoaded(entries)).ok();
+                            }
+                            Err(e) => {
+                                load_tx
+                                    .send(AppMessage::Error(format!("load charts: {e}")))
+                                    .ok();
+                            }
+                        }
+                    } else {
+                        load_tx.send(AppMessage::SongsLoaded(Vec::new())).ok();
+                    }
+
+                    // Drop pool in background thread (no need to keep it alive here)
+                    drop(ui_pool);
+                }
+                Err(e) => {
+                    load_tx
+                        .send(AppMessage::Error(format!("DB open failed: {e}")))
+                        .ok();
+                }
+            }
+        });
+
         Ok(Self {
             config,
             songs: Vec::new(),
             selected_song: None,
             selected_difficulty: 0,
             search_query: String::new(),
-            scan_dirs: Vec::new(),
+            db_pool: None,
+            libraries: Vec::new(),
+            selected_library: None,
+            loading: true,
+            scan_in_progress: false,
+            scan_progress_count: 0,
+            scan_error: None,
+            msg_rx: rx,
+            msg_tx: tx,
+            last_cover_requested_idx: None,
             active_tab: MenuTab::MusicSelect,
             config_dirty: false,
-            last_save_time: std::time::Instant::now(),
+            last_save_time: Instant::now(),
             sort_column: SongSortColumn::default(),
             sort_ascending: true,
+            // Default visible columns: Name, Level, BPM
+            visible_columns: [true, false, true, true, false, false],
+            genre_filter: None,
         })
     }
 
     fn maybe_save_config(&mut self) {
-        if !self.config_dirty { return; }
-        if self.last_save_time.elapsed().as_millis() < 500 { return; }
+        if !self.config_dirty {
+            return;
+        }
+        if self.last_save_time.elapsed().as_millis() < 500 {
+            return;
+        }
         let config_path = Config::default_path();
         if let Err(e) = self.config.save(&config_path) {
             log::warn!("Failed to save config to {:?}: {}", config_path, e);
@@ -108,32 +357,60 @@ impl MenuApp {
             log::info!("Config saved to {:?}", config_path);
         }
         self.config_dirty = false;
-        self.last_save_time = std::time::Instant::now();
+        self.last_save_time = Instant::now();
     }
 
     fn mark_dirty(&mut self) {
         self.config_dirty = true;
-        self.last_save_time = std::time::Instant::now();
+        self.last_save_time = Instant::now();
     }
 
     fn sorted_songs(&self) -> Vec<(usize, &SongEntry)> {
-        let mut filtered: Vec<(usize, &SongEntry)> = self.songs.iter().enumerate()
+        let mut filtered: Vec<(usize, &SongEntry)> = self
+            .songs
+            .iter()
+            .enumerate()
             .filter(|(_, s)| {
+                // Genre filter
+                if let Some(genre_id) = self.genre_filter {
+                    if s.genre != genre_id {
+                        return false;
+                    }
+                }
+                // Text search
                 self.search_query.is_empty()
-                    || s.title.to_lowercase().contains(&self.search_query.to_lowercase())
-                    || s.artist.to_lowercase().contains(&self.search_query.to_lowercase())
+                    || s.title
+                        .to_lowercase()
+                        .contains(&self.search_query.to_lowercase())
+                    || s.artist
+                        .to_lowercase()
+                        .contains(&self.search_query.to_lowercase())
             })
             .collect();
         let col = self.sort_column;
         let asc = self.sort_ascending;
+        // Use the selected difficulty index for level/duration sorting
+        let diff_idx = self.selected_difficulty.min(2);
         filtered.sort_by(|a, b| {
             let ord = match col {
                 SongSortColumn::Name => a.1.title.to_lowercase().cmp(&b.1.title.to_lowercase()),
-                SongSortColumn::Level => a.1.max_level.cmp(&b.1.max_level),
-                SongSortColumn::Bpm => a.1.bpm.partial_cmp(&b.1.bpm).unwrap_or(std::cmp::Ordering::Equal),
+                SongSortColumn::Artist => a.1.artist.to_lowercase().cmp(&b.1.artist.to_lowercase()),
+                SongSortColumn::Level => a.1.levels[diff_idx].cmp(&b.1.levels[diff_idx]),
+                SongSortColumn::Bpm => {
+                    a.1.bpm
+                        .partial_cmp(&b.1.bpm)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }
                 SongSortColumn::Genre => a.1.genre.cmp(&b.1.genre),
+                SongSortColumn::Duration => a.1.durations_sec[diff_idx]
+                    .partial_cmp(&b.1.durations_sec[diff_idx])
+                    .unwrap_or(std::cmp::Ordering::Equal),
             };
-            if asc { ord } else { ord.reverse() }
+            if asc {
+                ord
+            } else {
+                ord.reverse()
+            }
         });
         filtered
     }
@@ -148,16 +425,301 @@ impl MenuApp {
             }
         }
     }
+
+    // ------------------------------------------------------------------
+    // Scan flow
+    // ------------------------------------------------------------------
+
+    fn start_scan(&mut self, library_id: i64, root_path: String) {
+        if self.scan_in_progress {
+            return;
+        }
+
+        let Some(ref pool) = self.db_pool else {
+            self.scan_error = Some("Database not yet initialised".to_string());
+            return;
+        };
+        let pool = pool.clone();
+
+        let tx = self.msg_tx.clone();
+        self.scan_in_progress = true;
+        self.scan_progress_count = 0;
+        self.scan_error = None;
+
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tx.send(AppMessage::Error(format!("tokio runtime: {e}")))
+                        .ok();
+                    return;
+                }
+            };
+
+            // Step 1: clear old cache
+            if let Err(e) = rt.block_on(db::clear_cache(&pool, library_id)) {
+                tx.send(AppMessage::Error(format!("clear cache: {e}"))).ok();
+                return;
+            }
+
+            // Step 2: walk directory, collect scan entries
+            let entries = walk_directory_for_ojn(&root_path, &tx);
+
+            // Step 3: bulk insert
+            if let Err(e) = rt.block_on(db::bulk_insert_charts(&pool, library_id, &entries)) {
+                tx.send(AppMessage::Error(format!("bulk insert: {e}"))).ok();
+                return;
+            }
+
+            // Step 4: update scan time
+            if let Err(e) = rt.block_on(db::update_scan_time(&pool, library_id)) {
+                tx.send(AppMessage::Error(format!("update scan time: {e}")))
+                    .ok();
+                return;
+            }
+
+            // Step 5: reload and send results
+            match rt.block_on(db::get_charts_for_library(&pool, library_id)) {
+                Ok(charts) => {
+                    let songs = group_charts_into_songs(&charts, &root_path);
+                    tx.send(AppMessage::ScanComplete(songs)).ok();
+                }
+                Err(e) => {
+                    tx.send(AppMessage::Error(format!("reload charts: {e}")))
+                        .ok();
+                }
+            }
+        });
+    }
+
+    fn add_library_and_scan(&mut self, root_path: String) {
+        let Some(ref pool) = self.db_pool else {
+            return;
+        };
+        let pool = pool.clone();
+        let tx = self.msg_tx.clone();
+
+        self.scan_in_progress = true;
+        self.scan_progress_count = 0;
+        self.scan_error = None;
+
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tx.send(AppMessage::Error(format!("tokio runtime: {e}")))
+                        .ok();
+                    return;
+                }
+            };
+
+            match rt.block_on(db::add_library(&pool, &root_path)) {
+                Ok(lib) => {
+                    let lib_id = lib.id;
+                    // Reload libraries list
+                    if let Ok(libs) = rt.block_on(db::get_all_libraries(&pool)) {
+                        tx.send(AppMessage::LibrariesLoaded(libs)).ok();
+                    }
+                    // Clear old cache
+                    if let Err(e) = rt.block_on(db::clear_cache(&pool, lib_id)) {
+                        tx.send(AppMessage::Error(format!("clear cache: {e}"))).ok();
+                        return;
+                    }
+                    // Walk directory and insert
+                    let entries = walk_directory_for_ojn(&root_path, &tx);
+                    if let Err(e) = rt.block_on(db::bulk_insert_charts(&pool, lib_id, &entries)) {
+                        tx.send(AppMessage::Error(format!("bulk insert: {e}"))).ok();
+                        return;
+                    }
+                    rt.block_on(db::update_scan_time(&pool, lib_id)).ok();
+                    // Reload and send results
+                    if let Ok(charts) = rt.block_on(db::get_charts_for_library(&pool, lib_id)) {
+                        let songs = group_charts_into_songs(&charts, &root_path);
+                        tx.send(AppMessage::ScanComplete(songs)).ok();
+                    }
+                }
+                Err(e) => {
+                    tx.send(AppMessage::Error(format!("add library: {e}"))).ok();
+                }
+            }
+        });
+    }
+
+    fn remove_library(&mut self, library_id: i64) {
+        let Some(ref pool) = self.db_pool else {
+            return;
+        };
+        let pool = pool.clone();
+        let tx = self.msg_tx.clone();
+
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tx.send(AppMessage::Error(format!("tokio runtime: {e}")))
+                        .ok();
+                    return;
+                }
+            };
+
+            if let Err(e) = rt.block_on(db::delete_library(&pool, library_id)) {
+                tx.send(AppMessage::Error(format!("delete library: {e}")))
+                    .ok();
+                return;
+            }
+
+            if let Ok(libs) = rt.block_on(db::get_all_libraries(&pool)) {
+                tx.send(AppMessage::LibrariesLoaded(libs)).ok();
+            }
+            tx.send(AppMessage::SongsLoaded(Vec::new())).ok();
+        });
+    }
+
+    #[allow(dead_code)]
+    fn load_library_songs(&mut self, library_id: i64) {
+        let Some(ref pool) = self.db_pool else {
+            return;
+        };
+        let pool = pool.clone();
+        let tx = self.msg_tx.clone();
+
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tx.send(AppMessage::Error(format!("tokio runtime: {e}")))
+                        .ok();
+                    return;
+                }
+            };
+
+            match rt.block_on(db::get_charts_for_library(&pool, library_id)) {
+                Ok(charts) => {
+                    // Look up the library root path
+                    let lib_root = if let Ok(libs) = rt.block_on(db::get_all_libraries(&pool)) {
+                        libs.iter()
+                            .find(|l| l.id == library_id)
+                            .map(|l| l.root_path.as_str())
+                            .unwrap_or("")
+                            .to_string()
+                    } else {
+                        String::new()
+                    };
+                    let songs = group_charts_into_songs(&charts, &lib_root);
+                    tx.send(AppMessage::SongsLoaded(songs)).ok();
+                }
+                Err(e) => {
+                    tx.send(AppMessage::Error(format!("load charts: {e}"))).ok();
+                }
+            }
+        });
+    }
+
+    fn rescan_library(&mut self) {
+        if let Some(idx) = self.selected_library {
+            if let Some(lib) = self.libraries.get(idx) {
+                self.start_scan(lib.id, lib.root_path.clone());
+            }
+        }
+    }
 }
 
 impl eframe::App for MenuApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.maybe_save_config();
 
+        // Drain messages from background threads (non-blocking)
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            match msg {
+                AppMessage::SongsLoaded(entries) => {
+                    self.songs = entries;
+                    self.loading = false;
+                    ctx.request_repaint();
+                }
+                AppMessage::LibrariesLoaded(libs) => {
+                    let was_empty = self.libraries.is_empty();
+                    self.libraries = libs;
+                    // Auto-select the newest library when adding
+                    if was_empty && !self.libraries.is_empty() {
+                        self.selected_library = Some(self.libraries.len() - 1);
+                    } else if self.scan_in_progress && !self.libraries.is_empty() {
+                        // During add-library flow, select the last (newest) library
+                        self.selected_library = Some(self.libraries.len() - 1);
+                    }
+                    ctx.request_repaint();
+                }
+                AppMessage::PoolReady(pool) => {
+                    self.db_pool = Some(pool);
+                    ctx.request_repaint();
+                }
+                AppMessage::ScanProgress { scanned } => {
+                    self.scan_progress_count = scanned;
+                    ctx.request_repaint();
+                }
+                AppMessage::ScanComplete(entries) => {
+                    self.songs = entries;
+                    self.scan_in_progress = false;
+                    // Clear cover request tracker since songs list changed
+                    self.last_cover_requested_idx = None;
+                    // Reload library list to update last_scan
+                    if let Some(ref pool) = self.db_pool {
+                        let pool = pool.clone();
+                        let tx = self.msg_tx.clone();
+                        std::thread::spawn(move || {
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build();
+                            if let Ok(rt) = rt {
+                                if let Ok(libs) = rt.block_on(db::get_all_libraries(&pool)) {
+                                    tx.send(AppMessage::LibrariesLoaded(libs)).ok();
+                                }
+                            }
+                        });
+                    }
+                    ctx.request_repaint();
+                }
+                AppMessage::CoverLoaded { song_index, cover } => {
+                    if let (Some((w, h, pixels)), Some(song)) =
+                        (cover, self.songs.get_mut(song_index))
+                    {
+                        song.cover = Some(ctx.load_texture(
+                            "song_cover",
+                            egui::ColorImage::from_rgba_unmultiplied([w, h], &pixels),
+                            egui::TextureOptions::LINEAR,
+                        ));
+                        ctx.request_repaint();
+                    }
+                }
+                AppMessage::Error(err) => {
+                    self.scan_error = Some(err.clone());
+                    self.loading = false;
+                    self.scan_in_progress = false;
+                    log::error!("Background error: {err}");
+                    ctx.request_repaint();
+                }
+            }
+        }
+
         egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.active_tab, MenuTab::MusicSelect, "Music Select");
-                ui.selectable_value(&mut self.active_tab, MenuTab::Configuration, "Configuration");
+                ui.selectable_value(
+                    &mut self.active_tab,
+                    MenuTab::Configuration,
+                    "Configuration",
+                );
                 ui.selectable_value(&mut self.active_tab, MenuTab::Advanced, "Advanced");
             });
         });
@@ -169,27 +731,24 @@ impl eframe::App for MenuApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("💾 Save Config").clicked() {
                         self.config_dirty = true;
-                        self.last_save_time = std::time::Instant::now() - std::time::Duration::from_millis(600);
+                        self.last_save_time =
+                            Instant::now() - std::time::Duration::from_millis(600);
                         self.maybe_save_config();
                     }
                 });
             });
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            match self.active_tab {
-                MenuTab::MusicSelect => self.ui_music_select(ui),
-                MenuTab::Configuration => self.ui_configuration(ui),
-                MenuTab::Advanced => self.ui_advanced(ui),
-            }
+        egui::CentralPanel::default().show(ctx, |ui| match self.active_tab {
+            MenuTab::MusicSelect => self.ui_music_select(ui),
+            MenuTab::Configuration => self.ui_configuration(ui),
+            MenuTab::Advanced => self.ui_advanced(ui),
         });
     }
 }
 
 impl MenuApp {
     fn ui_music_select(&mut self, ui: &mut egui::Ui) {
-        let selected_song_data = self.selected_song.and_then(|idx| self.songs.get(idx).cloned());
-
         // Split the screen in half: left = song list, right = song info
         let col_width = ui.available_width() / 2.0;
         ui.columns(2, |cols| {
@@ -198,387 +757,845 @@ impl MenuApp {
                 ui.label(egui::RichText::new("Select Music").strong().heading());
                 ui.separator();
                 ui.add_space(10.0);
+
+                // Library selector
                 ui.horizontal(|ui| {
-                    if ui.button("📁 Choose dir").clicked() { log::info!("Choose directory clicked"); }
-                    if ui.button("🔄 Scan").clicked() && !self.scan_dirs.is_empty() {
-                        scan_directories(&mut self.songs, &self.scan_dirs);
+                    ui.label("Library:");
+                    let lib_names: Vec<&str> =
+                        self.libraries.iter().map(|l| l.name.as_str()).collect();
+                    let current_sel = self.selected_library.map(|i| i as i32).unwrap_or(-1);
+                    let mut new_sel = current_sel;
+                    egui::ComboBox::from_id_salt("library_select")
+                        .selected_text(if new_sel >= 0 {
+                            lib_names.get(new_sel as usize).unwrap_or(&"")
+                        } else {
+                            "(none)"
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut new_sel, -1, "(none)");
+                            for (i, name) in lib_names.iter().enumerate() {
+                                ui.selectable_value(&mut new_sel, i as i32, *name);
+                            }
+                        });
+                    if new_sel != current_sel {
+                        self.selected_library = if new_sel >= 0 {
+                            Some(new_sel as usize)
+                        } else {
+                            None
+                        };
+                        if let Some(idx) = self.selected_library {
+                            if let Some(lib) = self.libraries.get(idx) {
+                                self.config.last_opened_library_id = Some(lib.id as u64);
+                                self.mark_dirty();
+                            }
+                        }
                     }
                 });
-                ui.label(&format!("� {} songs", self.songs.len()));
+
+                ui.horizontal(|ui| {
+                    if ui.button("📁 Add Library").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            if let Some(path_str) = path.to_str() {
+                                self.add_library_and_scan(path_str.to_string());
+                            }
+                        }
+                    }
+                    if ui.button("🗑 Remove").clicked() {
+                        if let Some(idx) = self.selected_library {
+                            if let Some(lib) = self.libraries.get(idx) {
+                                let lib_id = lib.id;
+                                self.remove_library(lib_id);
+                            }
+                        }
+                    }
+                    if ui.button("🔄 Rescan").clicked() && self.selected_library.is_some() {
+                        self.rescan_library();
+                    }
+                });
+
+                if self.loading {
+                    ui.spinner();
+                    ui.label("Loading song library...");
+                } else if let Some(idx) = self.selected_library {
+                    if let Some(lib) = self.libraries.get(idx) {
+                        if let Some(last) = lib.last_scan {
+                            let ago = format_timestamp_age(last);
+                            ui.label(format!("📚 {} — last scan: {}", lib.name, ago));
+                        } else {
+                            ui.label(format!("📚 {} — never scanned", lib.name));
+                        }
+                    }
+                } else {
+                    ui.label("No library selected");
+                }
+
+                if self.scan_in_progress {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(format!(
+                            "Scanning... {} files processed",
+                            self.scan_progress_count
+                        ));
+                    });
+                }
+
+                if let Some(ref err) = self.scan_error {
+                    ui.label(egui::RichText::new(format!("⚠ {err}")).color(egui::Color32::RED));
+                }
+
+                ui.label(format!("🎵 {} songs", self.songs.len()));
                 ui.horizontal(|ui| {
                     ui.label("🔍");
                     ui.text_edit_singleline(&mut self.search_query);
-                    if !self.search_query.is_empty() && ui.small_button("✖").clicked() { self.search_query.clear(); }
+                    if !self.search_query.is_empty() && ui.small_button("✖").clicked() {
+                        self.search_query.clear();
+                    }
                 });
-                ui.separator();
 
+                // Genre filter dropdown
+                let genre_label = self
+                    .genre_filter
+                    .map(|id| genre_name(id))
+                    .unwrap_or("All genres");
                 ui.horizontal(|ui| {
-                    let mut col_btn = |ui: &mut egui::Ui, col: SongSortColumn, label: &str| {
-                        let is_active = self.sort_column == col;
-                        let arrow = if is_active {
-                            if self.sort_ascending { " ▲" } else { " ▼" }
-                        } else { "" };
-                        if ui.selectable_label(is_active, format!("{}{}", label, arrow)).clicked() {
-                            if self.sort_column == col { self.sort_ascending = !self.sort_ascending; }
-                            else { self.sort_column = col; self.sort_ascending = true; }
-                        }
-                    };
-                    col_btn(ui, SongSortColumn::Name, "Name");
-                    ui.separator();
-                    col_btn(ui, SongSortColumn::Level, "Level");
-                    ui.separator();
-                    col_btn(ui, SongSortColumn::Bpm, "BPM");
+                    ui.label("Genre:");
+                    egui::ComboBox::from_id_salt("genre_filter")
+                        .selected_text(genre_label)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(self.genre_filter.is_none(), "All genres")
+                                .clicked()
+                            {
+                                self.genre_filter = None;
+                            }
+                            for gid in 0..=10u32 {
+                                let name = genre_name(gid);
+                                if ui
+                                    .selectable_label(self.genre_filter == Some(gid), name)
+                                    .clicked()
+                                {
+                                    self.genre_filter = Some(gid);
+                                }
+                            }
+                        });
+                    if self.genre_filter.is_some() && ui.small_button("✖").clicked() {
+                        self.genre_filter = None;
+                    }
                 });
                 ui.separator();
 
-                egui::ScrollArea::vertical().id_salt("song_list_scroll").show(ui, |ui| {
-                    ui.set_max_width(col_width - 16.0);
-                    let sorted = self.sorted_songs();
-                    let mut sel = self.selected_song;
-                    let mut sd = self.selected_difficulty;
-                    egui::Grid::new("song_grid").striped(true).show(ui, |ui| {
-                        for (orig_idx, song) in sorted {
-                            if ui.selectable_label(sel == Some(orig_idx), &song.title).clicked() {
-                                sel = Some(orig_idx); sd = 0;
+                // Column visibility toggle
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Columns:").size(10.0));
+                    let all_cols = [
+                        SongColumn::Name,
+                        SongColumn::Artist,
+                        SongColumn::Level,
+                        SongColumn::Bpm,
+                        SongColumn::Duration,
+                        SongColumn::Genre,
+                    ];
+                    for col in &all_cols {
+                        let idx = *col as usize;
+                        let vis = &mut self.visible_columns[idx];
+                        if ui.selectable_label(*vis, col.header_label()).clicked() {
+                            *vis = !*vis;
+                            if !self.visible_columns.iter().any(|v| *v) {
+                                self.visible_columns[idx] = true;
                             }
-                            ui.label(song.max_level.to_string());
-                            ui.label(format!("{:.1}", song.bpm));
-                            ui.end_row();
                         }
-                    });
-                    self.selected_song = sel;
-                    self.selected_difficulty = sd;
+                    }
                 });
+                ui.separator();
+
+                egui::ScrollArea::both()
+                    .id_salt("song_list_scroll")
+                    .show(ui, |ui| {
+                        let sorted = self.sorted_songs();
+                        let mut sel = self.selected_song;
+                        let mut sd = self.selected_difficulty;
+                        let di = self.selected_difficulty.min(2);
+
+                        let all_cols = [
+                            SongColumn::Name,
+                            SongColumn::Artist,
+                            SongColumn::Level,
+                            SongColumn::Bpm,
+                            SongColumn::Duration,
+                            SongColumn::Genre,
+                        ];
+                        let vc = self.visible_columns;
+                        let visible: Vec<_> =
+                            all_cols.into_iter().filter(|c| vc[*c as usize]).collect();
+
+                        let cur_col = self.sort_column;
+                        let cur_asc = self.sort_ascending;
+                        let mut clicked_sort: Option<SongSortColumn> = None;
+
+                        egui::Grid::new("song_grid").striped(true).show(ui, |ui| {
+                            // Header row
+                            for col in &visible {
+                                if let Some(sort_col) = col.to_sort_column() {
+                                    let is_active = cur_col == sort_col;
+                                    let arrow = if is_active {
+                                        if cur_asc {
+                                            " ▲"
+                                        } else {
+                                            " ▼"
+                                        }
+                                    } else {
+                                        ""
+                                    };
+                                    if ui
+                                        .selectable_label(
+                                            is_active,
+                                            format!("{}{}", col.header_label(), arrow),
+                                        )
+                                        .clicked()
+                                    {
+                                        clicked_sort = Some(sort_col);
+                                    }
+                                } else {
+                                    ui.label(col.header_label());
+                                }
+                            }
+                            ui.end_row();
+
+                            // Data rows
+                            for (orig_idx, song) in sorted {
+                                let is_sel = sel == Some(orig_idx);
+                                for col in &visible {
+                                    let text = match col {
+                                        SongColumn::Name => &song.title,
+                                        SongColumn::Artist => &song.artist,
+                                        SongColumn::Level => &song.levels[di].to_string(),
+                                        SongColumn::Bpm => {
+                                            let s = format!("{:.1}", song.bpm);
+                                            ui.label(s);
+                                            continue;
+                                        }
+                                        SongColumn::Duration => {
+                                            let d = song.durations_sec[di];
+                                            let s =
+                                                format!("{}:{:02}", d as u32 / 60, d as u32 % 60);
+                                            ui.label(s);
+                                            continue;
+                                        }
+                                        SongColumn::Genre => {
+                                            if song.genre == 0 {
+                                                ui.label("");
+                                            } else {
+                                                ui.label(genre_name(song.genre));
+                                            }
+                                            continue;
+                                        }
+                                    };
+                                    if ui.selectable_label(is_sel, text).clicked() {
+                                        sel = Some(orig_idx);
+                                        sd = 0;
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+                        // Apply sort click after Grid (avoids mutable borrow during Grid)
+                        if let Some(sc) = clicked_sort {
+                            if cur_col == sc {
+                                self.sort_ascending = !cur_asc;
+                            } else {
+                                self.sort_column = sc;
+                                self.sort_ascending = true;
+                            }
+                        }
+                        self.selected_song = sel;
+                        self.selected_difficulty = sd;
+                    });
+
+                // Lazy cover extraction on background thread when selection changes
+                if let Some(idx) = self.selected_song {
+                    if self.last_cover_requested_idx == Some(idx) {
+                        // Already requested extraction for this song
+                    } else if let Some(song) = self.songs.get(idx) {
+                        if song.cover.is_none()
+                            && !song.library_root.is_empty()
+                            && !song.relative_path.is_empty()
+                        {
+                            self.last_cover_requested_idx = Some(idx);
+                            let root = song.library_root.clone();
+                            let rel = song.relative_path.clone();
+                            let tx = self.msg_tx.clone();
+                            std::thread::spawn(move || {
+                                let cover = std::fs::read(Path::new(&root).join(&rel))
+                                    .ok()
+                                    .and_then(|data| open2jam_rs_ojn::decode_bmp_thumbnail(&data));
+                                tx.send(AppMessage::CoverLoaded {
+                                    song_index: idx,
+                                    cover,
+                                })
+                                .ok();
+                            });
+                        }
+                    }
+                }
             });
 
             // ── Right: Song Info + Options ──
             cols[1].vertical(|ui| {
-                egui::ScrollArea::vertical().id_salt("song_info_scroll").show(ui, |ui| {
-                    ui.set_max_width(col_width - 16.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("song_info_scroll")
+                    .show(ui, |ui| {
+                        ui.set_max_width(col_width - 16.0);
 
-                    // ── Song Info ──
-                    ui.label(egui::RichText::new("Song Info").strong().heading());
-                    ui.separator();
-                    ui.add_space(10.0);
-                    if let Some(song) = &selected_song_data {
-                        ui.horizontal(|ui| {
-                            ui.vertical(|ui| { ui.group(|ui| {
-                                ui.label(if song.cover.is_some() { "🖼 Cover" } else { "[No cover]" });
-                                ui.allocate_space(egui::vec2(100.0, 100.0));
-                            });});
-                            ui.vertical(|ui| {
-                                ui.heading(&song.title);
-                                ui.label(format!("Artist: {}", song.artist));
-                                ui.label(format!("Noter: {}", song.noter));
-                                ui.label(format!("BPM: {:.1}", song.bpm));
-                                let dur = song.duration_sec;
-                                ui.label(format!("⏱ {}:{:02}", dur as u32 / 60, dur as u32 % 60));
-                                if !song.genre.is_empty() && song.genre != "0" {
-                                    ui.label(format!("Genre: {}", song.genre));
+                        // Compute selected song data here (inside the right column)
+                        // to avoid borrow conflicts with the Grid in the left column.
+                        let selected_song_data: Option<SongEntry> = match self.selected_song {
+                            Some(idx) => self.songs.get(idx).cloned(),
+                            None => None,
+                        };
+
+                        // ── Song Info ──
+                        ui.label(egui::RichText::new("Song Info").strong().heading());
+                        ui.separator();
+                        ui.add_space(10.0);
+                        if let Some(song) = &selected_song_data {
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.group(|ui| {
+                                        if let Some(ref texture) = song.cover {
+                                            ui.image(egui::load::SizedTexture::new(
+                                                texture,
+                                                egui::vec2(100.0, 100.0),
+                                            ));
+                                        } else {
+                                            ui.label("[No cover]");
+                                            ui.allocate_space(egui::vec2(100.0, 100.0));
+                                        }
+                                    });
+                                });
+                                ui.vertical(|ui| {
+                                    ui.heading(&song.title);
+                                    ui.label(format!("Artist: {}", song.artist));
+                                    ui.label(format!("Notecharter: {}", song.noter));
+                                    ui.label(format!("BPM: {:.1}", song.bpm));
+                                    let dur = song.durations_sec[self.selected_difficulty.min(2)];
+                                    ui.label(format!(
+                                        "Length: {}:{:02}",
+                                        dur as u32 / 60,
+                                        dur as u32 % 60
+                                    ));
+                                    if song.genre != 0 {
+                                        ui.label(format!("Genre: {}", genre_name(song.genre)));
+                                    }
+                                });
+                            });
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.group(|ui| {
+                                        ui.label("[No cover]");
+                                        ui.allocate_space(egui::vec2(100.0, 100.0));
+                                    });
+                                });
+                                ui.vertical(|ui| {
+                                    ui.heading("No song selected");
+                                    ui.label("Artist: ");
+                                    ui.label("Notecharter: ");
+                                    ui.label("BPM: -");
+                                    ui.label("Length: -:--");
+                                    ui.label("");
+                                });
+                            });
+                        }
+                        ui.add_space(10.0);
+                        // ── Difficulty ──
+                        ui.label(egui::RichText::new("Difficulty").strong().heading());
+                        ui.separator();
+                        if let Some(song) = &selected_song_data {
+                            let dn = ["Easy", "Normal", "Hard"];
+                            for i in 0..3usize {
+                                let level = song.levels[i];
+                                let notes = song.note_counts[i];
+                                if level == 0 && notes == 0 {
+                                    continue;
                                 }
-                            });
-                        });
-                    } else {
+                                let is_selected = self.selected_difficulty == i;
+                                let left_text = format!("{} [{}]", dn[i], level);
+                                let right_text = format!("Total Notes: {}", notes);
+                                let lb = format!("{left_text:<28}{right_text}");
+                                if ui.selectable_label(is_selected, lb).clicked() {
+                                    self.selected_difficulty = i;
+                                    self.config.game_options.difficulty = match i {
+                                        0 => open2jam_rs_core::Difficulty::Easy,
+                                        1 => open2jam_rs_core::Difficulty::Normal,
+                                        _ => open2jam_rs_core::Difficulty::Hard,
+                                    };
+                                    self.mark_dirty();
+                                }
+                            }
+                        } else {
+                            let _ = ui.selectable_label(
+                                false,
+                                "Easy [-]                       Total Notes: -",
+                            );
+                            let _ = ui.selectable_label(
+                                false,
+                                "Normal [-]                     Total Notes: -",
+                            );
+                            let _ = ui.selectable_label(
+                                false,
+                                "Hard [-]                       Total Notes: -",
+                            );
+                        }
+
+                        // ── Game Options ──
+                        ui.add_space(10.0);
+                        ui.label(egui::RichText::new("Game Options").strong().heading());
+                        ui.separator();
+
+                        // Speed
+                        ui.label(egui::RichText::new("Speed").strong().size(14.0));
+                        ui.add_space(5.0);
                         ui.horizontal(|ui| {
-                            ui.vertical(|ui| { ui.group(|ui| {
-                                ui.label("[No cover]");
-                                ui.allocate_space(egui::vec2(100.0, 100.0));
-                            });});
-                            ui.vertical(|ui| {
-                                ui.heading("No song selected");
-                                ui.label("Artist: ");
-                                ui.label("Noter: ");
-                                ui.label("BPM: -");
-                                ui.label("⏱ -:--");
-                                ui.label("");
-                            });
-                        });
-                    }
-                     ui.add_space(10.0);  
-                    // ── Difficulty ──
-                    ui.label(egui::RichText::new("Difficulty").strong().heading());
-                    ui.separator();
-                    if let Some(song) = &selected_song_data {
-                        for (i, chart) in song.charts.iter().enumerate() {
-                            if chart.note_counts[i] == 0 && chart.levels[i] == 0 { continue; }
-                            let dn = ["Easy", "Normal", "Hard"][i.min(2)];
-                            let is_selected = self.selected_difficulty == i;
-                            let lb = format!("{} [{}] | Total Notes: [{}]", dn, chart.levels[i], chart.note_counts[i]);
-                            if ui.selectable_label(is_selected, lb).clicked() {
-                                self.selected_difficulty = i;
-                                self.config.game_options.difficulty = match i {
-                                    0 => open2jam_rs_core::Difficulty::Easy,
-                                    1 => open2jam_rs_core::Difficulty::Normal,
-                                    _ => open2jam_rs_core::Difficulty::Hard,
-                                };
+                            if ui.button("−").clicked() {
+                                self.config.game_options.speed_multiplier =
+                                    (self.config.game_options.speed_multiplier - 0.5).max(0.5);
                                 self.mark_dirty();
                             }
-                        }
-                    } else {
-                        ui.selectable_label(false, "Easy [-] | Total Notes: [-]");
-                        ui.selectable_label(false, "Normal [-] | Total Notes: [-]");
-                        ui.selectable_label(false, "Hard [-] | Total Notes: [-]");
-                    }
-
-                    // ── Game Options ──
-                    ui.add_space(10.0);
-                    ui.label(egui::RichText::new("Game Options").strong().heading());
-                    ui.separator();
-
-                    // Speed
-                    ui.label(egui::RichText::new("Speed").strong().size(14.0));
-                    ui.add_space(5.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("−").clicked() {
-                            self.config.game_options.speed_multiplier = (self.config.game_options.speed_multiplier - 0.5).max(0.5);
-                            self.mark_dirty();
-                        }
-                        ui.add(egui::DragValue::new(&mut self.config.game_options.speed_multiplier)
-                            .speed(0.5)
-                            .clamp_range(0.5..=10.0)
-                            .custom_formatter(|n, _| format!("{:.1}", n))
-                            .custom_parser(|s| s.parse::<f64>().ok()));
-                        if ui.button("+").clicked() {
-                            self.config.game_options.speed_multiplier = (self.config.game_options.speed_multiplier + 0.5).min(10.0);
-                            self.mark_dirty();
-                        }
-                    });
-
-                    ui.add_space(5.0);
-                    
-                    // Arrangement Mods
-                    ui.label(egui::RichText::new("Arrangement Mods").strong().size(14.0));
-                    ui.add_space(5.0);
-                    ui.horizontal(|ui| {
-                        let mut clicked = false;
-                        for mod_val in [ChannelMod::None, ChannelMod::Random, ChannelMod::Panic, ChannelMod::Mirror] {
-                            let is_selected = self.config.game_options.channel_modifier == mod_val;
-                            if ui.selectable_label(is_selected, mod_val.to_string()).clicked() {
-                                self.config.game_options.channel_modifier = mod_val;
-                                clicked = true;
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut self.config.game_options.speed_multiplier,
+                                )
+                                .speed(0.5)
+                                .clamp_range(0.5..=10.0)
+                                .custom_formatter(|n, _| format!("{:.1}", n))
+                                .custom_parser(|s| s.parse::<f64>().ok()),
+                            );
+                            if ui.button("+").clicked() {
+                                self.config.game_options.speed_multiplier =
+                                    (self.config.game_options.speed_multiplier + 0.5).min(10.0);
+                                self.mark_dirty();
                             }
-                        }
-                        if clicked { self.mark_dirty(); }
-                    });
-                    ui.add_space(5.0);
+                        });
 
-                    // Visibility Mods
-                    ui.label(egui::RichText::new("Visibility Mods").strong().size(14.0));
-                    ui.add_space(5.0);
-                    ui.horizontal(|ui| {
-                        let mut clicked = false;
-                        for mod_val in [VisibilityMod::None, VisibilityMod::Hidden, VisibilityMod::Sudden, VisibilityMod::Dark] {
-                            let is_selected = self.config.game_options.visibility_modifier == mod_val;
-                            if ui.selectable_label(is_selected, mod_val.to_string()).clicked() {
-                                self.config.game_options.visibility_modifier = mod_val;
-                                clicked = true;
+                        ui.add_space(5.0);
+
+                        // Arrangement Mods
+                        ui.label(egui::RichText::new("Arrangement Mods").strong().size(14.0));
+                        ui.add_space(5.0);
+                        ui.horizontal(|ui| {
+                            let mut clicked = false;
+                            for mod_val in [
+                                ChannelMod::None,
+                                ChannelMod::Random,
+                                ChannelMod::Panic,
+                                ChannelMod::Mirror,
+                            ] {
+                                let is_selected =
+                                    self.config.game_options.channel_modifier == mod_val;
+                                if ui
+                                    .selectable_label(is_selected, mod_val.to_string())
+                                    .clicked()
+                                {
+                                    self.config.game_options.channel_modifier = mod_val;
+                                    clicked = true;
+                                }
                             }
+                            if clicked {
+                                self.mark_dirty();
+                            }
+                        });
+                        ui.add_space(5.0);
+
+                        // Visibility Mods
+                        ui.label(egui::RichText::new("Visibility Mods").strong().size(14.0));
+                        ui.add_space(5.0);
+                        ui.horizontal(|ui| {
+                            let mut clicked = false;
+                            for mod_val in [
+                                VisibilityMod::None,
+                                VisibilityMod::Hidden,
+                                VisibilityMod::Sudden,
+                                VisibilityMod::Dark,
+                            ] {
+                                let is_selected =
+                                    self.config.game_options.visibility_modifier == mod_val;
+                                if ui
+                                    .selectable_label(is_selected, mod_val.to_string())
+                                    .clicked()
+                                {
+                                    self.config.game_options.visibility_modifier = mod_val;
+                                    clicked = true;
+                                }
+                            }
+                            if clicked {
+                                self.mark_dirty();
+                            }
+                        });
+                        ui.add_space(10.0);
+                        // Play Button — fills full width, larger text, centered
+                        let can_play =
+                            self.active_tab == MenuTab::MusicSelect && self.selected_song.is_some();
+                        let mut btn_rect = ui.available_rect_before_wrap();
+                        btn_rect.max.y = btn_rect.min.y + 40.0;
+                        let btn_id = ui.make_persistent_id("start_btn");
+                        let btn_response = ui.interact(btn_rect, btn_id, egui::Sense::click());
+                        let is_hovered = btn_response.hovered() && can_play;
+                        let fill_color = if can_play {
+                            if is_hovered {
+                                egui::Color32::from_rgb(100, 150, 255)
+                            } else {
+                                egui::Color32::BLUE
+                            }
+                        } else {
+                            ui.style().visuals.widgets.inactive.bg_fill
+                        };
+                        let text_color = if can_play {
+                            egui::Color32::WHITE
+                        } else {
+                            ui.style().visuals.text_color()
+                        };
+                        ui.painter().rect_filled(btn_rect, 4.0, fill_color);
+                        ui.painter().text(
+                            btn_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "▶ START GAME",
+                            egui::TextStyle::Button.resolve(ui.style()),
+                            text_color,
+                        );
+                        if btn_response.clicked() && can_play {
+                            self.play_selected_song();
                         }
-                        if clicked { self.mark_dirty(); }
                     });
-                    ui.add_space(10.0);
-                    // Play Button — fills full width, larger text, centered
-                    let can_play = self.active_tab == MenuTab::MusicSelect && self.selected_song.is_some();
-                    let mut btn_rect = ui.available_rect_before_wrap();
-                    btn_rect.max.y = btn_rect.min.y + 40.0;
-                    let btn_id = ui.make_persistent_id("start_btn");
-                    let btn_response = ui.interact(btn_rect, btn_id, egui::Sense::click());
-                    let is_hovered = btn_response.hovered() && can_play;
-                    let fill_color = if can_play {
-                        if is_hovered { egui::Color32::from_rgb(100, 150, 255) } else { egui::Color32::BLUE }
-                    } else {
-                        ui.style().visuals.widgets.inactive.bg_fill
-                    };
-                    let text_color = if can_play { egui::Color32::WHITE } else { ui.style().visuals.text_color() };
-                    ui.painter().rect_filled(btn_rect, 4.0, fill_color);
-                    ui.painter().text(
-                        btn_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "▶ START GAME",
-                        egui::TextStyle::Button.resolve(ui.style()),
-                        text_color,
-                    );
-                    if btn_response.clicked() && can_play { self.play_selected_song(); }
-                });
             });
         });
     }
 
     fn ui_configuration(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().id_salt("config_scroll").show(ui, |ui| {
-            ui.group(|ui| { ui_key_bind_editor(ui, &mut self.config); });
-            self.mark_dirty();
-            ui.separator();
-            ui.group(|ui| { ui_display_config(ui, &mut self.config.game_options); });
-            self.mark_dirty();
-            ui.separator();
-            ui.group(|ui| {
-                ui.label(egui::RichText::new("GUI Settings").strong());
-                ui.horizontal(|ui| {
-                    ui.label("Theme:");
-                    egui::ComboBox::from_id_salt("ui_theme")
-                        .selected_text(self.config.game_options.ui_theme.to_string())
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.config.game_options.ui_theme, open2jam_rs_core::UiTheme::Automatic, "Automatic");
-                            ui.selectable_value(&mut self.config.game_options.ui_theme, open2jam_rs_core::UiTheme::Light, "Light");
-                            ui.selectable_value(&mut self.config.game_options.ui_theme, open2jam_rs_core::UiTheme::Dark, "Dark");
-                        });
+        egui::ScrollArea::vertical()
+            .id_salt("config_scroll")
+            .show(ui, |ui| {
+                ui.group(|ui| {
+                    ui_key_bind_editor(ui, &mut self.config);
                 });
+                self.mark_dirty();
+                ui.separator();
+                ui.group(|ui| {
+                    ui_display_config(ui, &mut self.config.game_options);
+                });
+                self.mark_dirty();
+                ui.separator();
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("GUI Settings").strong());
+                    ui.horizontal(|ui| {
+                        ui.label("Theme:");
+                        egui::ComboBox::from_id_salt("ui_theme")
+                            .selected_text(self.config.game_options.ui_theme.to_string())
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.config.game_options.ui_theme,
+                                    open2jam_rs_core::UiTheme::Automatic,
+                                    "Automatic",
+                                );
+                                ui.selectable_value(
+                                    &mut self.config.game_options.ui_theme,
+                                    open2jam_rs_core::UiTheme::Light,
+                                    "Light",
+                                );
+                                ui.selectable_value(
+                                    &mut self.config.game_options.ui_theme,
+                                    open2jam_rs_core::UiTheme::Dark,
+                                    "Dark",
+                                );
+                            });
+                    });
+                });
+                self.mark_dirty();
             });
-            self.mark_dirty();
-        });
     }
 
     fn ui_advanced(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().id_salt("advanced_scroll").show(ui, |ui| {
-            ui.group(|ui| {
-                ui.label(egui::RichText::new("Advanced Options").strong());
-                ui.checkbox(&mut self.config.game_options.haste_mode, "Haste Mode");
-                ui.add_enabled(self.config.game_options.haste_mode, |ui: &mut egui::Ui| {
-                    ui.checkbox(&mut self.config.game_options.haste_mode_normalize_speed, "Normalize Speed")
+        egui::ScrollArea::vertical()
+            .id_salt("advanced_scroll")
+            .show(ui, |ui| {
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Advanced Options").strong());
+                    ui.checkbox(&mut self.config.game_options.haste_mode, "Haste Mode");
+                    ui.add_enabled(self.config.game_options.haste_mode, |ui: &mut egui::Ui| {
+                        ui.checkbox(
+                            &mut self.config.game_options.haste_mode_normalize_speed,
+                            "Normalize Speed",
+                        )
+                    });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Buffer Size:");
+                        ui.add(
+                            egui::DragValue::new(&mut self.config.game_options.buffer_size)
+                                .clamp_range(1..=4096),
+                        );
+                        ui.label("(1–4096 samples)");
+                    });
                 });
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("Buffer Size:");
-                    ui.add(egui::DragValue::new(&mut self.config.game_options.buffer_size).clamp_range(1..=4096));
-                    ui.label("(1–4096 samples)");
-                });
+                self.mark_dirty();
             });
-            self.mark_dirty();
-        });
     }
 }
 
-fn scan_directories(songs: &mut Vec<SongEntry>, dirs: &[String]) {
-    let mut charts: Vec<(PathBuf, OjnHeader)> = Vec::new();
+// ---------------------------------------------------------------------------
+// Standalone functions
+// ---------------------------------------------------------------------------
 
-    for dir in dirs {
-        let dir_path = Path::new(dir);
-        if !dir_path.exists() {
-            log::warn!("Scan directory does not exist: {}", dir);
+/// Walk a directory tree, parse OJN headers, report progress via channel.
+fn walk_directory_for_ojn(root: &str, tx: &mpsc::Sender<AppMessage>) -> Vec<ChartScanEntry> {
+    let mut entries = Vec::new();
+    let root_path = Path::new(root);
+
+    for entry in walkdir::WalkDir::new(root_path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let Some(ext) = entry.path().extension() else {
+            continue;
+        };
+        if !ext.eq_ignore_ascii_case("ojn") {
             continue;
         }
-        for entry in walkdir::WalkDir::new(dir_path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if let Some(ext) = entry.path().extension() {
-                if ext.eq_ignore_ascii_case("ojn") {
-                    match std::fs::read(entry.path()) {
-                        Ok(data) => match parse_metadata_bytes(&data) {
-                            Ok(header) => {
-                                charts.push((entry.path().to_path_buf(), header));
-                            }
-                            Err(e) => {
-                                log::warn!("Failed to parse OJN header: {}: {}", entry.path().display(), e);
-                            }
-                        },
-                        Err(e) => {
-                            log::warn!("Failed to read OJN file: {}: {}", entry.path().display(), e);
-                        }
-                    }
-                }
+
+        let Ok(data) = std::fs::read(entry.path()) else {
+            continue;
+        };
+        let Ok(header) = parse_metadata_bytes(&data) else {
+            continue;
+        };
+
+        let metadata = entry.metadata().ok();
+        let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+        let file_modified = metadata
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let relative_path = entry
+            .path()
+            .strip_prefix(root_path)
+            .unwrap_or(entry.path())
+            .to_string_lossy()
+            .into_owned();
+
+        let song_group_id = {
+            let mut hasher = Sha256::new();
+            hasher.update(relative_path.as_bytes());
+            let result = hasher.finalize();
+            let mut hex_str = String::with_capacity(16);
+            for byte in &result[..8] {
+                hex_str.push_str(&format!("{byte:02x}"));
             }
+            hex_str
+        };
+
+        entries.push(ChartScanEntry {
+            relative_path,
+            song_group_id,
+            header,
+            file_size,
+            file_modified,
+        });
+
+        if entries.len() % SCAN_PROGRESS_INTERVAL == 0 {
+            tx.send(AppMessage::ScanProgress {
+                scanned: entries.len(),
+            })
+            .ok();
         }
     }
 
-    // Group by title + artist + keys (default 7)
-    let mut groups: HashMap<String, Vec<(PathBuf, OjnHeader)>> = HashMap::new();
-    for (path, header) in charts {
-        let key = format!("{}|{}|{}", header.title, header.artist, 7);
-        groups.entry(key).or_default().push((path, header));
+    tx.send(AppMessage::ScanProgress {
+        scanned: entries.len(),
+    })
+    .ok();
+    entries
+}
+
+/// Group cached chart rows into display-ready SongEntry structs.
+///
+/// Each `CachedChart` row contains all 3 difficulty levels
+/// (level_easy/normal/hard, note_count_easy/normal/hard, duration_easy/normal/hard).
+/// This function emits per-difficulty `levels` and `durations_sec` arrays on
+/// the `SongEntry` so the UI can show the selected difficulty's metadata.
+pub fn group_charts_into_songs(charts: &[CachedChart], library_root: &str) -> Vec<SongEntry> {
+    let mut groups: HashMap<String, Vec<&CachedChart>> = HashMap::new();
+    for chart in charts {
+        groups
+            .entry(chart.song_group_id.clone())
+            .or_default()
+            .push(chart);
     }
 
-    *songs = groups
+    groups
         .into_values()
-        .map(|mut entries| {
-            entries.sort_by_key(|(_, h)| {
-                [h.level_easy, h.level_normal, h.level_hard]
+        .map(|mut charts_in_group| {
+            charts_in_group.sort_by_key(|c| {
+                [c.level_easy, c.level_normal, c.level_hard]
                     .into_iter()
                     .find(|&l| l > 0)
                     .unwrap_or(0)
             });
 
-            let first = entries.first().cloned().unwrap_or_else(|| {
-                (PathBuf::new(), OjnHeader {
-                    song_id: 0, encode_version: 0.0, genre: 0, bpm: 0.0,
-                    level_easy: 0, level_normal: 0, level_hard: 0,
-                    event_count_easy: 0, event_count_normal: 0, event_count_hard: 0,
-                    note_count_easy: 0, note_count_normal: 0, note_count_hard: 0,
-                    measure_count_easy: 0, measure_count_normal: 0, measure_count_hard: 0,
-                    title: String::new(), artist: String::new(), noter: String::new(),
-                    ojm_filename: String::new(), cover_size: 0,
-                    duration_easy: 0, duration_normal: 0, duration_hard: 0,
-                    note_offset_easy: 0, note_offset_normal: 0, note_offset_hard: 0,
-                    cover_offset: 0,
-                })
-            });
+            let first = charts_in_group
+                .first()
+                .copied()
+                .expect("group has at least one chart");
 
-            let cover = entries.iter().find_map(|(path, header)| {
-                if header.cover_offset > 0 && header.cover_size > 0 {
-                    let data = std::fs::read(path).ok()?;
-                    extract_cover_image(&data).ok()
-                } else {
-                    None
+            // Per-difficulty level: take the max across all charts in the group
+            let levels: [u16; 3] = [
+                charts_in_group
+                    .iter()
+                    .map(|c| c.level_easy as u16)
+                    .max()
+                    .unwrap_or(0),
+                charts_in_group
+                    .iter()
+                    .map(|c| c.level_normal as u16)
+                    .max()
+                    .unwrap_or(0),
+                charts_in_group
+                    .iter()
+                    .map(|c| c.level_hard as u16)
+                    .max()
+                    .unwrap_or(0),
+            ];
+
+            // Per-difficulty duration: take the first non-zero value (already in seconds)
+            let durations_sec: [f32; 3] = [
+                charts_in_group
+                    .iter()
+                    .find(|c| c.duration_easy > 0)
+                    .map(|c| c.duration_easy as f32)
+                    .unwrap_or(0.0),
+                charts_in_group
+                    .iter()
+                    .find(|c| c.duration_normal > 0)
+                    .map(|c| c.duration_normal as f32)
+                    .unwrap_or(0.0),
+                charts_in_group
+                    .iter()
+                    .find(|c| c.duration_hard > 0)
+                    .map(|c| c.duration_hard as f32)
+                    .unwrap_or(0.0),
+            ];
+
+            // Per-difficulty note counts: take the max across all charts
+            let note_counts: [u32; 3] = [
+                charts_in_group
+                    .iter()
+                    .map(|c| c.note_count_easy as u32)
+                    .max()
+                    .unwrap_or(0),
+                charts_in_group
+                    .iter()
+                    .map(|c| c.note_count_normal as u32)
+                    .max()
+                    .unwrap_or(0),
+                charts_in_group
+                    .iter()
+                    .map(|c| c.note_count_hard as u32)
+                    .max()
+                    .unwrap_or(0),
+            ];
+
+            // Expand each CachedChart row into up to 3 ChartEntries
+            // (one per difficulty level that has content)
+            let mut chart_entries: Vec<ChartEntry> = Vec::new();
+            for c in &charts_in_group {
+                let level_arr = [c.level_easy, c.level_normal, c.level_hard];
+                let notes_arr = [c.note_count_easy, c.note_count_normal, c.note_count_hard];
+                let dur_arr = [c.duration_easy, c.duration_normal, c.duration_hard];
+                let diff_names = ["Easy", "Normal", "Hard"];
+
+                for (i, &level) in level_arr.iter().enumerate() {
+                    let notes = notes_arr[i] as u32;
+                    if level == 0 && notes == 0 {
+                        continue; // skip empty difficulty
+                    }
+                    let diff_label = diff_names[i];
+                    chart_entries.push(ChartEntry {
+                        path: PathBuf::new(),
+                        title: format!("{} [{}]", c.title, diff_label),
+                        artist: c.artist.clone(),
+                        noter: c.noter.clone(),
+                        genre: c.genre as u32,
+                        bpm: c.bpm as f32,
+                        duration_sec: dur_arr[i] as f32,
+                        note_counts: [notes, 0, 0],
+                        levels: [level as u16, 0, 0],
+                        keys: c.keys as u8,
+                    });
                 }
-            });
-
-            let max_level = entries.iter()
-                .flat_map(|(_, h)| [h.level_easy, h.level_normal, h.level_hard])
-                .max()
-                .unwrap_or(0);
+            }
 
             SongEntry {
-                title: first.1.title.clone(),
-                artist: first.1.artist.clone(),
-                noter: first.1.noter.clone(),
-                genre: first.1.genre.to_string(),
-                bpm: first.1.bpm,
-                duration_sec: (first.1.duration_hard as f32) / 1000.0,
-                keys: 7,
-                charts: entries.iter().map(|(path, header)| ChartEntry {
-                    path: path.clone(),
-                    title: header.title.clone(),
-                    artist: header.artist.clone(),
-                    noter: header.noter.clone(),
-                    genre: header.genre.to_string(),
-                    bpm: header.bpm,
-                    duration_sec: (header.duration_hard as f32) / 1000.0,
-                    note_counts: [header.note_count_easy, header.note_count_normal, header.note_count_hard],
-                    levels: [header.level_easy, header.level_normal, header.level_hard],
-                    keys: 7,
-                }).collect(),
-                cover,
-                max_level,
+                title: first.title.clone(),
+                artist: first.artist.clone(),
+                noter: first.noter.clone(),
+                genre: first.genre as u32,
+                bpm: first.bpm as f32,
+                keys: first.keys as u8,
+                charts: chart_entries,
+                cover: None,
+                levels,
+                durations_sec,
+                note_counts,
+                relative_path: first.relative_path.clone(),
+                library_root: library_root.to_string(),
             }
         })
-        .collect();
-
-    log::info!("Scanned {} songs from {} directories", songs.len(), dirs.len());
+        .collect()
 }
 
 fn spawn_game(chart_path: &std::path::Path, config: &Config) {
     if let Ok(exe) = std::env::current_exe() {
         let game_bin = exe.with_file_name("open2jam-rs");
-        let project_root = exe.parent()
+        let project_root = exe
+            .parent()
             .and_then(|p| p.parent())
-            .map(|p| p.to_path_buf());
-        log::info!("Game binary: {} (exists: {})", game_bin.display(), game_bin.exists());
-        log::info!("Project root: {:?}", project_root);
+            .and_then(|p| p.parent());
+
         let mut cmd = std::process::Command::new(&game_bin);
         cmd.arg(chart_path);
-        if config.game_options.autoplay { cmd.arg("--autoplay"); }
-        cmd.stdin(std::process::Stdio::null());
-        cmd.stdout(std::process::Stdio::inherit());
-        cmd.stderr(std::process::Stdio::inherit());
-        if let Some(ref dir) = project_root { cmd.current_dir(dir); }
-        #[cfg(unix)] {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
+        if config.game_options.autoplay {
+            cmd.arg("--autoplay");
         }
+
+        if let Some(root) = project_root {
+            cmd.current_dir(root);
+        }
+
         match cmd.spawn() {
-            Ok(child) => log::info!("Game spawned: PID={}", child.id()),
-            Err(e) => log::error!("Failed to spawn game: {} (binary: {})", e, game_bin.display()),
+            Ok(_) => log::info!("Launched game for: {}", chart_path.display()),
+            Err(e) => log::error!("Failed to launch game: {}", e),
         }
+    }
+}
+
+/// Format a unix epoch timestamp as a human-readable "X ago" string.
+fn format_timestamp_age(ts: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let diff = (now - ts).max(0) as u64;
+
+    if diff < 60 {
+        "just now".to_string()
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h ago", diff / 3600)
+    } else if diff < 604800 {
+        format!("{}d ago", diff / 86400)
+    } else {
+        format!("{}w ago", diff / 604800)
     }
 }
