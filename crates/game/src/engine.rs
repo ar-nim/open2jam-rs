@@ -2006,46 +2006,63 @@ impl App {
     }
 }
 
-/// Configure egui fonts with Noto Sans CJK SC as the sole font.
-/// This font covers both Latin and CJK characters.
+/// Configure egui fonts with Inter (Latin) + Noto Sans CJK (CJK fallback).
+/// Keeps egui's default emoji font intact.
 fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
-    // Remove default fonts (Inter, emoji fonts, etc.)
-    fonts.font_data.clear();
-    fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap().clear();
-    fonts.families.get_mut(&egui::FontFamily::Monospace).unwrap().clear();
+    // Try to load Inter as the primary Latin font
+    if let Some(data) = load_font_data("Inter-Regular.ttf") {
+        fonts.font_data.insert(
+            "inter".to_string(),
+            std::sync::Arc::new(egui::FontData::from_owned(data)),
+        );
+        // Insert at the FRONT of the proportional family (highest priority)
+        fonts
+            .families
+            .get_mut(&egui::FontFamily::Proportional)
+            .unwrap()
+            .insert(0, "inter".to_string());
+        fonts
+            .families
+            .get_mut(&egui::FontFamily::Monospace)
+            .unwrap()
+            .insert(0, "inter".to_string());
+        log::info!("Loaded Inter font");
+    } else {
+        log::warn!("Inter font not found — using egui default for Latin text");
+    }
 
-    // Try to load Noto Sans CJK from the assets directory
-    let font_path = load_font_path("NotoSansCJKsc-Regular.otf");
-    if let Some(path) = font_path {
-        if let Ok(data) = std::fs::read(&path) {
-            fonts.font_data.insert(
-                "noto-sans-cjk".to_string(),
-                std::sync::Arc::new(egui::FontData::from_owned(data)),
-            );
-            fonts
-                .families
-                .get_mut(&egui::FontFamily::Proportional)
-                .unwrap()
-                .push("noto-sans-cjk".to_string());
-            fonts
-                .families
-                .get_mut(&egui::FontFamily::Monospace)
-                .unwrap()
-                .push("noto-sans-cjk".to_string());
-            log::info!("Loaded Noto Sans CJK font from {}", path.display());
-        } else {
-            log::warn!("Failed to read Noto Sans CJK font file");
-        }
+    // Try to load Noto Sans CJK as CJK fallback
+    if let Some(data) = load_font_data("NotoSansCJKsc-Regular.otf") {
+        fonts.font_data.insert(
+            "noto-sans-cjk".to_string(),
+            std::sync::Arc::new(egui::FontData::from_owned(data)),
+        );
+        // Append at the END of both families (fallback after Latin/emoji)
+        fonts
+            .families
+            .get_mut(&egui::FontFamily::Proportional)
+            .unwrap()
+            .push("noto-sans-cjk".to_string());
+        fonts
+            .families
+            .get_mut(&egui::FontFamily::Monospace)
+            .unwrap()
+            .push("noto-sans-cjk".to_string());
+        log::info!("Loaded Noto Sans CJK font");
     } else {
         log::warn!(
-            "Noto Sans CJK font not found — CJK characters may not render correctly. \
-             Run `cargo build` to download the font automatically."
+            "Noto Sans CJK font not found — CJK characters may not render correctly"
         );
     }
 
     ctx.set_fonts(fonts);
+}
+
+/// Load font file bytes from the assets directory.
+fn load_font_data(filename: &str) -> Option<Vec<u8>> {
+    load_font_path(filename).and_then(|p| std::fs::read(p).ok())
 }
 
 /// Find a font file in the assets directory relative to various locations.
