@@ -219,10 +219,6 @@ pub struct App {
     fps_limiter: open2jam_rs_core::game_options::FpsLimiter,
     /// Key name → lane index mapping (built from config)
     key_to_lane: HashMap<String, usize>,
-    /// Frame counter for FPS tracking (atomic for safe access from any thread).
-    frame_count: std::sync::atomic::AtomicU64,
-    /// Last time we logged FPS/CPU stats.
-    last_fps_log: Instant,
     /// Hybrid spin-sleep frame limiter state.
     frame_limiter: Option<FrameLimiter>,
 }
@@ -233,42 +229,47 @@ pub struct App {
 /// precision. Uses absolute target time to prevent drift.
 struct FrameLimiter {
     target_frame_duration_ns: u64,
-    next_frame_time_ns: std::time::Duration,
+    next_frame_deadline: std::time::Instant,
 }
 
 impl FrameLimiter {
     fn new(target_fps: f64) -> Self {
         let target_frame_duration_ns = (1_000_000_000.0 / target_fps) as u64;
-        let now = std::time::Instant::now();
-        let next = now + std::time::Duration::from_nanos(target_frame_duration_ns);
         Self {
             target_frame_duration_ns,
-            next_frame_time_ns: next.duration_since(now),
+            next_frame_deadline: std::time::Instant::now()
+                + std::time::Duration::from_nanos(target_frame_duration_ns),
         }
     }
 
     /// Wait until the next frame boundary using hybrid sleep + spin-wait.
     fn wait(&mut self) {
-        let start = std::time::Instant::now();
-        let target_ns = self.next_frame_time_ns.as_nanos() as u64;
+        let target_ns = self.next_frame_deadline.elapsed().as_nanos() as i64;
+        if target_ns >= 0 {
+            // Already past deadline — reset to now + duration (no wait)
+            self.next_frame_deadline =
+                std::time::Instant::now() + std::time::Duration::from_nanos(self.target_frame_duration_ns);
+            return;
+        }
+        // time_remaining_ns = -target_ns (positive)
+        let time_remaining_ns = (-target_ns) as u64;
 
         // Phase 1: Sleep in 1ms increments, stopping 1ms early
-        let threshold = target_ns.saturating_sub(1_000_000);
-        loop {
-            let elapsed = start.elapsed().as_nanos() as u64;
-            if elapsed >= threshold {
-                break;
+        let sleep_until_ns = time_remaining_ns.saturating_sub(1_000_000);
+        if sleep_until_ns > 0 {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_nanos(sleep_until_ns);
+            while std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(1));
             }
-            std::thread::sleep(std::time::Duration::from_millis(1));
         }
 
         // Phase 2: Spin-wait for final <1ms (nanosecond precision)
-        while (start.elapsed().as_nanos() as u64) < target_ns {
+        while std::time::Instant::now() < self.next_frame_deadline {
             std::hint::spin_loop();
         }
 
-        // Phase 3: Advance target time (accumulates to prevent drift)
-        self.next_frame_time_ns += std::time::Duration::from_nanos(self.target_frame_duration_ns);
+        // Phase 3: Advance deadline (accumulates to prevent drift)
+        self.next_frame_deadline += std::time::Duration::from_nanos(self.target_frame_duration_ns);
     }
 }
 
@@ -333,8 +334,6 @@ impl App {
             vsync_mode: opts.vsync_mode,
             fps_limiter: opts.fps_limiter,
             key_to_lane: build_key_mapping(&config.key_bindings.k7.lanes),
-            frame_count: std::sync::atomic::AtomicU64::new(0),
-            last_fps_log: Instant::now(),
             frame_limiter: None,
         })
     }
@@ -342,8 +341,12 @@ impl App {
     pub fn run(mut self) -> Result<()> {
         info!("Initialising winit event loop...");
         let event_loop = EventLoop::new()?;
-        // Wait: only wake for events or redraw requests (not continuous polling)
-        event_loop.set_control_flow(ControlFlow::Wait);
+        // Poll: continuously process events. VSync present() or the frame
+        // limiter already throttle the frame rate — we need the event loop
+        // to deliver RedrawRequested events immediately, not after a delay.
+        // ControlFlow::Wait caused RedrawRequested delivery to be delayed on
+        // some platforms, resulting in sluggish FPS.
+        event_loop.set_control_flow(ControlFlow::Poll);
         self.event_loop = Some(event_loop);
 
         info!("Initialising audio backend (oddio + cpal)...");
@@ -370,18 +373,26 @@ impl App {
     fn cleanup(&mut self) {
         // 1. Drop egui renderer first (uses wgpu device/queue)
         self.egui_renderer.take();
-        // 2. Drop game GPU resources (textures, atlases, pipelines)
+        // 2. Drop egui_winit state (may hold clipboard/OS resources)
+        self.egui_winit.take();
+        // 3. Drop egui context (may hold font textures)
+        self.egui_ctx = egui::Context::default();
+        // 4. Drop game GPU resources (textures, atlases, pipelines)
         if let Some(render) = &mut self.render {
-            if let Some(gpu) = render.gpu.take() {
-                drop(gpu);
-            }
+            render.gpu.take();
         }
-        // 3. Shutdown render state (drops surface)
+        // 5. Shutdown render state (drops surface — child of device)
         if let Some(render) = &mut self.render {
             render.shutdown();
         }
-        // 4. Drop menu app (SQLite pool, background threads)
+        // 6. Drop game state (may hold audio triggers, sound cache)
+        self.game_state.take();
+        // 7. Drop audio manager (stops cpal stream)
+        self.audio.take();
+        // 8. Drop menu app (SQLite pool, background threads)
         self.menu_app.take();
+        // 9. Drop render state (drops device/queue — parent of everything)
+        self.render.take();
         info!("All resources cleaned up in correct order.");
     }
 
@@ -469,6 +480,9 @@ impl ApplicationHandler for App {
                 info!("egui-winit state initialised");
             }
 
+            // Configure Noto Sans CJK as the sole font (covers Latin + CJK)
+            configure_fonts(&self.egui_ctx);
+
             // Set up frame limiter based on monitor refresh rate
             self.setup_frame_limiter();
 
@@ -477,6 +491,12 @@ impl ApplicationHandler for App {
             }
 
             self.last_frame_time = Some(Instant::now());
+
+            // CRITICAL: Request the first redraw. Without this, ControlFlow::Wait
+            // will never wake up and no frames will be rendered.
+            if let Some(render) = &self.render {
+                render.window.request_redraw();
+            }
         }
     }
 
@@ -1090,30 +1110,6 @@ impl App {
     fn render_frame(&mut self) -> bool {
         use std::sync::atomic::Ordering;
 
-        // Increment frame counter
-        self.frame_count.fetch_add(1, Ordering::Relaxed);
-
-        // Periodic FPS/CPU stats logging (every 5 seconds)
-        if self.last_fps_log.elapsed().as_secs() >= 5 {
-            let frames = self.frame_count.swap(0, Ordering::Relaxed);
-            let elapsed = self.last_fps_log.elapsed().as_secs_f64();
-            let fps = frames as f64 / elapsed;
-            let frame_ms = 1000.0 / fps.max(1.0);
-            self.last_fps_log = Instant::now();
-
-            if let Some(audio) = &self.audio {
-                let state = audio.state();
-                let avg_cpu = state.avg_callback_us.load(Ordering::Relaxed);
-                let max_cpu = state.max_callback_us.load(Ordering::Relaxed);
-                info!(
-                    "[FPS] {:.0} fps | Frame: {:.1}ms | CPU: avg={}µs max={}µs",
-                    fps, frame_ms, avg_cpu, max_cpu
-                );
-            } else {
-                info!("[FPS] {:.0} fps | Frame: {:.1}ms", fps, frame_ms);
-            }
-        }
-
         let Some(render) = &mut self.render else {
             warn!("render_frame: render state is None");
             return false;
@@ -1122,25 +1118,21 @@ impl App {
         // ── Menu mode: render egui ──
         if self.mode == AppMode::Menu {
             if let Some(menu) = &mut self.menu_app {
-                // 1. Build egui input from winit events
                 let raw_input = self
                     .egui_winit
                     .as_mut()
                     .unwrap()
                     .take_egui_input(&render.window);
 
-                // 2. Run egui to produce output
                 let full_output = self.egui_ctx.run(raw_input, |ctx| {
                     menu.ui(ctx);
                 });
 
-                // 3. Tessellate into draw commands
                 let pixels_per_point = self.egui_ctx.pixels_per_point();
                 let clipped_primitives = self
                     .egui_ctx
                     .tessellate(full_output.shapes, pixels_per_point);
 
-                // 4. Acquire surface texture
                 if let Some(surface) = &render.surface {
                     let surface_texture = match surface.get_current_texture() {
                         wgpu::CurrentSurfaceTexture::Success(st) => st,
@@ -1152,7 +1144,6 @@ impl App {
                         .texture
                         .create_view(&wgpu::TextureViewDescriptor::default());
 
-                    // 5. Create encoder and upload egui data
                     let mut encoder =
                         render
                             .device
@@ -1174,23 +1165,12 @@ impl App {
                             &screen_descriptor,
                         );
 
-                        // Upload pending egui textures (fonts, etc.)
                         for (id, image_delta) in &full_output.textures_delta.set {
-                            renderer.update_texture(
-                                &render.device,
-                                &render.queue,
-                                *id,
-                                image_delta,
-                            );
+                            renderer.update_texture(&render.device, &render.queue, *id, image_delta);
                         }
                     }
 
-                    // 6. Execute egui render pass
                     if let Some(renderer) = &mut self.egui_renderer {
-                        // SAFETY: The render pass borrows the encoder and view for
-                        // the duration of this block only. We know the encoder and
-                        // view outlive the render pass, so extending to 'static is
-                        // sound in practice (same pattern used by egui examples).
                         let mut render_pass =
                             encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                                 label: Some("egui_pass"),
@@ -1210,14 +1190,11 @@ impl App {
                                 })],
                                 ..Default::default()
                             });
-                        // SAFETY: extending lifetime is safe because render_pass
-                        // is dropped before encoder is submitted.
                         let render_pass: &mut wgpu::RenderPass<'static> =
                             unsafe { std::mem::transmute(&mut render_pass) };
                         renderer.render(render_pass, &clipped_primitives, &screen_descriptor);
                     }
 
-                    // 7. Free egui textures that are no longer needed
                     if let Some(renderer) = &mut self.egui_renderer {
                         for id in &full_output.textures_delta.free {
                             renderer.free_texture(id);
@@ -1231,30 +1208,10 @@ impl App {
             return false;
         }
 
-        // Log first time we enter render_frame
-        static FIRST_FRAME: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-
+        // ── Game mode ──
         // If game state is None and not already loading, schedule game load for next redraw
         if self.game_state.is_none() && self.loading_state.is_none() && self.ojn_path.is_some() {
             self.start_load_game_state = true;
-        }
-        if !FIRST_FRAME.load(std::sync::atomic::Ordering::Relaxed) {
-            FIRST_FRAME.store(true, std::sync::atomic::Ordering::Relaxed);
-            info!("=== First render_frame call ===");
-            info!(
-                "gpu state: atlas={}, skin={}",
-                render
-                    .gpu
-                    .as_ref()
-                    .map(|g| g.atlas.is_some())
-                    .unwrap_or(false),
-                render
-                    .gpu
-                    .as_ref()
-                    .map(|g| g.skin.is_some())
-                    .unwrap_or(false)
-            );
         }
 
         // 1. Absolute time — no delta accumulation drift
@@ -2047,4 +2004,71 @@ impl App {
             .as_ref()
             .map_or(false, |gs| gs.is_song_ended())
     }
+}
+
+/// Configure egui fonts with Noto Sans CJK SC as the sole font.
+/// This font covers both Latin and CJK characters.
+fn configure_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    // Remove default fonts (Inter, emoji fonts, etc.)
+    fonts.font_data.clear();
+    fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap().clear();
+    fonts.families.get_mut(&egui::FontFamily::Monospace).unwrap().clear();
+
+    // Try to load Noto Sans CJK from the assets directory
+    let font_path = load_font_path("NotoSansCJKsc-Regular.otf");
+    if let Some(path) = font_path {
+        if let Ok(data) = std::fs::read(&path) {
+            fonts.font_data.insert(
+                "noto-sans-cjk".to_string(),
+                std::sync::Arc::new(egui::FontData::from_owned(data)),
+            );
+            fonts
+                .families
+                .get_mut(&egui::FontFamily::Proportional)
+                .unwrap()
+                .push("noto-sans-cjk".to_string());
+            fonts
+                .families
+                .get_mut(&egui::FontFamily::Monospace)
+                .unwrap()
+                .push("noto-sans-cjk".to_string());
+            log::info!("Loaded Noto Sans CJK font from {}", path.display());
+        } else {
+            log::warn!("Failed to read Noto Sans CJK font file");
+        }
+    } else {
+        log::warn!(
+            "Noto Sans CJK font not found — CJK characters may not render correctly. \
+             Run `cargo build` to download the font automatically."
+        );
+    }
+
+    ctx.set_fonts(fonts);
+}
+
+/// Find a font file in the assets directory relative to various locations.
+fn load_font_path(filename: &str) -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let candidates = [
+        // Relative to crate root (for `cargo run`)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(filename),
+        // Relative to current working directory
+        PathBuf::from("assets").join(filename),
+        // Relative to executable directory
+        std::env::current_exe()
+            .ok()?
+            .parent()?
+            .join("assets")
+            .join(filename),
+    ];
+    for path in &candidates {
+        if path.exists() {
+            return Some(path.clone());
+        }
+    }
+    None
 }
