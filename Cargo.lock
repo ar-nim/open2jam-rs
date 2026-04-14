@@ -3024,6 +3024,9 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "cpal",
+ "eframe",
+ "egui",
+ "egui_extras",
  "encoding_rs",
  "env_logger",
  "hound",
@@ -3037,8 +3040,15 @@ dependencies = [
  "pollster 0.3.0",
  "quick-xml 0.38.4",
  "raw-window-handle",
+ "rfd",
  "rtrb",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
  "thiserror 1.0.69",
+ "tokio",
+ "walkdir",
  "wgpu 29.0.1",
  "winit",
 ]
@@ -3052,28 +3062,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "open2jam-rs-menu"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "eframe",
- "egui",
- "egui_extras",
- "env_logger",
- "image",
- "log",
- "open2jam-rs-core",
- "open2jam-rs-ojn",
- "rfd",
- "serde",
- "serde_json",
- "sha2",
- "sqlx",
- "tokio",
- "walkdir",
 ]
 
 [[package]]

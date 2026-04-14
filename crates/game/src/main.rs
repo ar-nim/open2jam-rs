@@ -1,6 +1,4 @@
-//! open2jam-rs — O2Jam rhythm game port in Rust.
-//!
-//! Preview mode: Loads a chart and plays it with auto-play enabled.
+//! open2jam-rs — O2Jam rhythm game engine.
 //!
 //! # Run
 //!
@@ -10,21 +8,9 @@
 
 #![warn(missing_docs)]
 
-pub mod audio;
-pub mod engine;
-pub mod game_state;
-pub mod gameplay;
-pub mod parsing;
-pub mod render;
-pub mod resources;
-pub mod skin;
-pub mod test_harness;
-
-use std::path::PathBuf;
-
 use anyhow::Result;
-use engine::App;
 use log::{info, warn};
+use open2jam_rs::engine::App;
 use open2jam_rs_core::Config;
 
 fn main() -> Result<()> {
@@ -41,24 +27,25 @@ fn main() -> Result<()> {
         Config::default()
     });
     info!(
-        "Config loaded: {}x{}, fullscreen={}, difficulty={:?}, speed={:.1}x",
+        "Config loaded: {}x{}, fullscreen={}, vsync={:?}, difficulty={:?}, speed={:.1}x",
         config.game_options.display_width,
         config.game_options.display_height,
         config.game_options.display_fullscreen,
+        config.game_options.vsync_mode,
         config.game_options.difficulty,
         config.game_options.speed_multiplier,
     );
 
     // Parse command line args: <path-to-ojn-file> [--autoplay]
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut ojn_path: Option<PathBuf> = None;
+    let mut ojn_path: Option<std::path::PathBuf> = None;
     let mut auto_play = config.game_options.autoplay;
 
     for arg in &args {
         if arg == "--autoplay" {
             auto_play = true;
         } else if ojn_path.is_none() {
-            ojn_path = Some(PathBuf::from(arg));
+            ojn_path = Some(std::path::PathBuf::from(arg));
         }
     }
 

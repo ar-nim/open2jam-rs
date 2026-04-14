@@ -15,9 +15,11 @@ use open2jam_rs_core::Config;
 use open2jam_rs_ojn::parse_metadata_bytes;
 use sha2::{Digest, Sha256};
 
-use crate::db::{self, CachedChart, ChartScanEntry, LibraryEntry};
-use crate::panels::display_config::ui_display_config;
-use crate::panels::key_bind_editor::{handle_key_capture, ui_key_bind_editor, KeyCaptureState};
+use crate::menu::db::{self, CachedChart, ChartScanEntry, LibraryEntry};
+use crate::menu::panels::display_config::ui_display_config;
+use crate::menu::panels::key_bind_editor::{
+    handle_key_capture, ui_key_bind_editor, KeyCaptureState,
+};
 
 // ---------------------------------------------------------------------------
 // Constants

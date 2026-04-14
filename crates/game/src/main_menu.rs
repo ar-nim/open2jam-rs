@@ -1,18 +1,21 @@
 //! Menu GUI for open2jam-rs — eframe (egui + winit + wgpu).
 //!
-//! Run with: `cargo run -p open2jam-rs-menu`
+//! Run with: `cargo run -p open2jam-rs --bin open2jam-rs-menu`
+//! or: `cargo run --bin open2jam-rs-menu`
 //!
 //! **Fonts**: Inter (Latin) and Noto Sans SC (CJK) are automatically
 //! downloaded at build time by `build.rs` if not already present in
-//! `crates/menu/assets/`. No manual setup required.
+//! `crates/game/assets/`. No manual setup required.
 
 use anyhow::Result;
+
+use open2jam_rs::menu::menu_app::MenuApp;
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     log::info!("open2jam-rs-menu starting");
 
-    let app = open2jam_rs_menu::menu_app::MenuApp::new()?;
+    let app = MenuApp::new()?;
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("open2jam-rs — Music Select")
@@ -27,7 +30,6 @@ fn main() -> Result<()> {
                 Box<dyn eframe::App>,
                 Box<dyn std::error::Error + Send + Sync>,
             > {
-                // Configure bundled fonts: Inter (Latin) + Noto Sans SC (CJK)
                 configure_fonts(&cc.egui_ctx);
                 Ok(Box::new(app))
             },
@@ -42,7 +44,6 @@ fn main() -> Result<()> {
 fn load_bundled_font(filename: &str) -> Option<Vec<u8>> {
     use std::path::PathBuf;
 
-    // Try multiple locations relative to different bases
     let candidates = [
         // Relative to crate root (for `cargo run`)
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -70,19 +71,14 @@ fn load_bundled_font(filename: &str) -> Option<Vec<u8>> {
 }
 
 /// Configure egui fonts with bundled Inter (Latin) and Noto Sans SC (CJK).
-///
-/// This ensures consistent, high-quality typography across all platforms
-/// with full CJK character support.
 fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
-    // Load Inter font (Latin/Western text)
     if let Some(data) = load_bundled_font("Inter-Regular.ttf") {
         fonts.font_data.insert(
             "inter".to_string(),
             std::sync::Arc::new(egui::FontData::from_owned(data)),
         );
-        // Set as primary proportional font
         let family = fonts
             .families
             .get_mut(&egui::FontFamily::Proportional)
@@ -96,14 +92,11 @@ fn configure_fonts(ctx: &egui::Context) {
         );
     }
 
-    // Load Noto Sans SC (CJK fallback)
-    // This file is automatically downloaded by build.rs if missing
     if let Some(data) = load_bundled_font("NotoSansSC-Regular.ttf") {
         fonts.font_data.insert(
             "noto-sans-sc".to_string(),
             std::sync::Arc::new(egui::FontData::from_owned(data)),
         );
-        // Add to both proportional and monospace families as fallback
         let family = fonts
             .families
             .get_mut(&egui::FontFamily::Proportional)

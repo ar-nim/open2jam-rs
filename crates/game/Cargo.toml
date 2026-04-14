@@ -3,6 +3,7 @@ name = "open2jam-rs"
 version = "0.1.0"
 edition = "2021"
 description = "O2Jam rhythm game port in Rust with wgpu + oddio"
+build = "build.rs"
 
 [dependencies]
 open2jam-rs-core = { path = "../core" }
@@ -25,6 +26,26 @@ log = "0.4"
 env_logger = "0.11"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 rtrb = "0.3"
+
+# Menu GUI dependencies
+eframe = "0.30"
+egui = "0.30"
+egui_extras = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
+sha2 = "0.10"
+rfd = "0.15"
+
+[[bin]]
+name = "open2jam-rs"
+path = "src/main.rs"
+
+[[bin]]
+name = "open2jam-rs-menu"
+path = "src/main_menu.rs"
 
 [profile.release]
 opt-level = 3
