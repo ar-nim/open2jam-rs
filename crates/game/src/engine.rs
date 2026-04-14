@@ -342,7 +342,8 @@ impl App {
     pub fn run(mut self) -> Result<()> {
         info!("Initialising winit event loop...");
         let event_loop = EventLoop::new()?;
-        event_loop.set_control_flow(ControlFlow::Poll);
+        // Wait: only wake for events or redraw requests (not continuous polling)
+        event_loop.set_control_flow(ControlFlow::Wait);
         self.event_loop = Some(event_loop);
 
         info!("Initialising audio backend (oddio + cpal)...");
@@ -357,8 +358,31 @@ impl App {
         let event_loop = self.event_loop.take().unwrap();
         event_loop.run_app(&mut self)?;
 
+        // Explicit cleanup in correct order before App is dropped
+        self.cleanup();
+
         info!("App shutting down.");
         Ok(())
+    }
+
+    /// Explicit resource teardown in correct dependency order.
+    /// This prevents double-panics during Drop when wgpu resources are invalid.
+    fn cleanup(&mut self) {
+        // 1. Drop egui renderer first (uses wgpu device/queue)
+        self.egui_renderer.take();
+        // 2. Drop game GPU resources (textures, atlases, pipelines)
+        if let Some(render) = &mut self.render {
+            if let Some(gpu) = render.gpu.take() {
+                drop(gpu);
+            }
+        }
+        // 3. Shutdown render state (drops surface)
+        if let Some(render) = &mut self.render {
+            render.shutdown();
+        }
+        // 4. Drop menu app (SQLite pool, background threads)
+        self.menu_app.take();
+        info!("All resources cleaned up in correct order.");
     }
 
     /// Set up the hybrid spin-sleep frame limiter based on monitor refresh rate
@@ -457,13 +481,8 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(render) = &self.render {
-            render.window.request_redraw();
-        }
-        // Frame limiter: hybrid sleep + spin-wait
-        if let Some(ref mut limiter) = self.frame_limiter {
-            limiter.wait();
-        }
+        // No-op: we request redraws explicitly when needed, not on every wake.
+        // The frame limiter runs AFTER render_frame() completes.
     }
 
     fn window_event(
@@ -475,67 +494,59 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 info!("Close requested, cleaning up...");
-                if let Some(render) = self.render.as_mut() {
-                    render.shutdown();
-                }
+                self.cleanup();
                 event_loop.exit();
+                return;
             }
             WindowEvent::Resized(size) => {
-                // Reconfigure wgpu surface for new size
                 if let Some(render) = &mut self.render {
-                    render.config.width = size.width.max(1);
-                    render.config.height = size.height.max(1);
-                    render
-                        .surface
-                        .as_ref()
-                        .unwrap()
-                        .configure(&render.device, &render.config);
+                    if size.width > 0 && size.height > 0 {
+                        render.config.width = size.width;
+                        render.config.height = size.height;
+                        if let Some(ref surface) = render.surface {
+                            surface.configure(&render.device, &render.config);
+                        }
+                        if let Some(ref mut gpu) = render.gpu {
+                            gpu.textured_renderer.resize(
+                                &render.device,
+                                &render.queue,
+                                size.width,
+                                size.height,
+                            );
+                        }
+                    }
                 }
             }
-            _ => {
-                // Route input to egui first when in Menu mode
+            WindowEvent::KeyboardInput { event: ref key_event, .. } => {
+                // Route to egui first in Menu mode
                 if self.mode == AppMode::Menu {
-                    if let (Some(render), Some(egui_winit)) = (&self.render, &mut self.egui_winit) {
+                    if let (Some(render), Some(egui_winit)) =
+                        (&self.render, &mut self.egui_winit)
+                    {
                         let response = egui_winit.on_window_event(&render.window, &event);
                         if response.repaint {
-                            if let Some(render) = &self.render {
-                                render.window.request_redraw();
-                            }
+                            render.window.request_redraw();
                         }
                         if response.consumed {
-                            // egui consumed the event — don't pass to game
                             return;
                         }
                     }
                 }
-            }
-        }
 
-        // Process remaining events for game mode
-        match event {
-            WindowEvent::CloseRequested => {
-                info!("Close requested, cleaning up...");
-                if let Some(render) = self.render.as_mut() {
-                    render.shutdown();
+                // Process lane key input for game mode
+                if self.mode != AppMode::Playing {
+                    return;
                 }
-                event_loop.exit();
-            }
-            WindowEvent::KeyboardInput { event, .. } => {
+
                 use winit::event::ElementState;
                 use winit::keyboard::NamedKey;
 
-                // Process lane key input during rendering and startup
-                // Use OS hardware timestamps for frame-quantisation-free input
-                let lane = match &event.logical_key {
-                    // Character keys: convert to config format (e.g. "s" → "KeyS")
+                let lane = match &key_event.logical_key {
                     Key::Character(c) => {
                         let lookup = config_key_for_character(c);
                         self.key_to_lane.get(lookup).copied()
                     }
-                    // Named keys: match by canonical name
                     Key::Named(named) => {
-                        // Only match named keys that winit 0.30 actually has as variants.
-                        // Punctuation keys (comma, semicolon, etc.) are character keys.
                         let name = match named {
                             NamedKey::Space => "Space",
                             NamedKey::Enter => "Enter",
@@ -577,10 +588,8 @@ impl ApplicationHandler for App {
                 if let Some(lane) = lane {
                     if let Some(gs) = &mut self.game_state {
                         let os_timestamp = std::time::Instant::now();
-                        match event.state {
+                        match key_event.state {
                             ElementState::Pressed => {
-                                // Ignore OS key repeat events — if the lane is already
-                                // pressed, this is a repeated press from holding the key.
                                 if !gs.pressed_lanes[lane] {
                                     if let Some(audio_mgr) = &mut self.audio {
                                         gs.handle_key_press(lane, os_timestamp, audio_mgr);
@@ -592,32 +601,11 @@ impl ApplicationHandler for App {
                             }
                         }
                     }
-                } else if event.state == ElementState::Pressed {
-                    if let Key::Named(NamedKey::Escape) = &event.logical_key {
+                } else if key_event.state == ElementState::Pressed {
+                    if let Key::Named(NamedKey::Escape) = &key_event.logical_key {
                         info!("Escape pressed, exiting...");
-                        if let Some(render) = self.render.as_mut() {
-                            render.shutdown();
-                        }
+                        self.cleanup();
                         event_loop.exit();
-                    }
-                }
-            }
-            WindowEvent::Resized(size) => {
-                if let Some(render) = &mut self.render {
-                    if size.width > 0 && size.height > 0 {
-                        render.config.width = size.width;
-                        render.config.height = size.height;
-                        if let Some(ref surface) = render.surface {
-                            surface.configure(&render.device, &render.config);
-                        }
-                        if let Some(ref mut gpu) = render.gpu {
-                            gpu.textured_renderer.resize(
-                                &render.device,
-                                &render.queue,
-                                size.width,
-                                size.height,
-                            );
-                        }
                     }
                 }
             }
@@ -625,24 +613,21 @@ impl ApplicationHandler for App {
                 // Check for messages from background loading thread
                 if let Some(ref loading) = self.loading_state {
                     if let Ok(msg) = loading.receiver.try_recv() {
-                        match msg {
-                            LoadingMessage::GameLoaded(result) => {
-                                match result {
-                                    Ok(gs) => {
-                                        info!(
-                                            "Game loaded: {} ({:.1}ms spawn lead)",
-                                            gs.chart.header.title, gs.spawn_lead_time_ms
-                                        );
-                                        self.game_state = Some(gs);
-                                    }
-                                    Err(e) => {
-                                        info!("Failed to load game state: {e:?}");
-                                    }
+                        if let LoadingMessage::GameLoaded(result) = msg {
+                            match result {
+                                Ok(gs) => {
+                                    info!(
+                                        "Game loaded: {} ({:.1}ms spawn lead)",
+                                        gs.chart.header.title, gs.spawn_lead_time_ms
+                                    );
+                                    self.game_state = Some(gs);
                                 }
-                                self.loading_state.take();
-                                // Reset frame timer so the first game frame doesn't get a huge delta
-                                self.last_frame_time = Some(Instant::now());
+                                Err(e) => {
+                                    info!("Failed to load game state: {e:?}");
+                                }
                             }
+                            self.loading_state.take();
+                            self.last_frame_time = Some(Instant::now());
                         }
                     }
                 }
@@ -651,7 +636,6 @@ impl ApplicationHandler for App {
                 if self.start_load_game_state && self.loading_state.is_none() {
                     self.start_load_game_state = false;
                     if let Some(path) = self.ojn_path.clone() {
-                        let auto_play = self.auto_play;
                         info!(
                             "Starting background game state load from: {}",
                             path.display()
@@ -661,7 +645,6 @@ impl ApplicationHandler for App {
                             .as_ref()
                             .and_then(|r| r.gpu.as_ref())
                             .and_then(|g| g.skin.clone());
-
                         let (tx, rx) = mpsc::channel();
                         let scroll_speed = self.scroll_speed;
                         let auto_play = self.auto_play;
@@ -676,7 +659,6 @@ impl ApplicationHandler for App {
                             );
                             let _ = tx.send(LoadingMessage::GameLoaded(result));
                         });
-
                         self.loading_state = Some(LoadingState {
                             receiver: rx,
                             _thread: thread_handle,
@@ -687,10 +669,32 @@ impl ApplicationHandler for App {
                 let song_ended = self.render_frame();
                 if song_ended {
                     info!("Song ended, exiting game loop");
-                    if let Some(render) = self.render.as_mut() {
-                        render.shutdown();
-                    }
+                    self.cleanup();
                     event_loop.exit();
+                    return;
+                }
+                // Request next frame redraw
+                if let Some(render) = &self.render {
+                    render.window.request_redraw();
+                }
+                // Frame limiter AFTER rendering (controls FPS)
+                if let Some(ref mut limiter) = self.frame_limiter {
+                    limiter.wait();
+                }
+            }
+            WindowEvent::MouseInput { .. }
+            | WindowEvent::CursorMoved { .. }
+            | WindowEvent::MouseWheel { .. } => {
+                // Route mouse events to egui in Menu mode
+                if self.mode == AppMode::Menu {
+                    if let (Some(render), Some(egui_winit)) =
+                        (&self.render, &mut self.egui_winit)
+                    {
+                        let response = egui_winit.on_window_event(&render.window, &event);
+                        if response.repaint {
+                            render.window.request_redraw();
+                        }
+                    }
                 }
             }
             _ => {}
