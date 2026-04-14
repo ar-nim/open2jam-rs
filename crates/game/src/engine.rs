@@ -1,8 +1,13 @@
-//! Frame orchestrator — winit event loop, wgpu device, oddio mixer, game loop.
+//! Frame orchestrator — unified winit event loop, wgpu device, egui + game.
+//!
+//! Both the menu GUI and the game engine run in a single winit event loop
+//! on the main thread (macOS compliant). State transitions between menu and
+//! game happen in-process without spawning a new process.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
@@ -18,6 +23,7 @@ use winit::window::Window;
 use crate::audio::AudioManager;
 use crate::game_state::GameState;
 use crate::gameplay::scroll::note_y_position_bpm_aware;
+use crate::menu::menu_app::MenuApp;
 use crate::parsing::xml::{parse_file as parse_skin_xml, Resources as SkinResources};
 use crate::parsing::TimedEvent;
 use crate::render::atlas::SkinAtlas;
@@ -25,6 +31,15 @@ use crate::render::hud::{render_hud_with_atlas, HudLayout};
 use crate::render::textured_renderer::{BlendMode, TexturedRenderer};
 use open2jam_rs_core::game_options::SpeedType;
 use open2jam_rs_core::Config;
+
+/// Application mode: either showing the menu or playing a game.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppMode {
+    /// Menu GUI: song library, configuration panels.
+    Menu,
+    /// Game engine: chart playback, note rendering, audio.
+    Playing,
+}
 
 /// Base scroll speed — multiplied by user-configured speed multiplier.
 const BASE_SCROLL_SPEED: f64 = 1.0;
@@ -165,7 +180,14 @@ pub struct App {
     event_loop: Option<EventLoop<()>>,
     render: Option<RenderState>,
     audio: Option<AudioManager>,
+    /// Current mode — determines what to render and where to route input.
+    mode: AppMode,
+    /// Menu GUI (active when mode == Menu).
+    menu_app: Option<MenuApp>,
+    /// Game engine state (active when mode == Playing).
     game_state: Option<GameState>,
+    /// Config, shared between menu and game.
+    config: Config,
     last_frame_time: Option<Instant>,
     /// When the gameplay started (for absolute time, no delta accumulation).
     game_start_instant: Option<Instant>,
@@ -263,12 +285,29 @@ impl App {
             scroll_speed, opts.speed_type, opts.speed_multiplier
         );
 
+        // Determine starting mode
+        let mode = if ojn_path.is_some() {
+            AppMode::Playing
+        } else {
+            AppMode::Menu
+        };
+
+        // Create menu app if starting in menu mode
+        let menu_app = if mode == AppMode::Menu {
+            Some(MenuApp::new()?)
+        } else {
+            None
+        };
+
         Ok(Self {
             ojn_path,
             event_loop: None,
             render: None,
             audio: None,
+            mode,
+            menu_app,
             game_state: None,
+            config: config.clone(),
             last_frame_time: None,
             game_start_instant: None,
             start_load_game_state: false,
@@ -411,6 +450,30 @@ impl ApplicationHandler for App {
         _window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
+        match event {
+            WindowEvent::CloseRequested => {
+                info!("Close requested, cleaning up...");
+                if let Some(render) = self.render.as_mut() {
+                    render.shutdown();
+                }
+                event_loop.exit();
+            }
+            WindowEvent::Resized(size) => {
+                // Reconfigure wgpu surface for new size
+                if let Some(render) = &mut self.render {
+                    render.config.width = size.width.max(1);
+                    render.config.height = size.height.max(1);
+                    render
+                        .surface
+                        .as_ref()
+                        .unwrap()
+                        .configure(&render.device, &render.config);
+                }
+            }
+            _ => {}
+        }
+
+        // Process remaining events for game mode
         match event {
             WindowEvent::CloseRequested => {
                 info!("Close requested, cleaning up...");

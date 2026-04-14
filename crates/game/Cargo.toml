@@ -27,9 +27,12 @@ env_logger = "0.11"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 rtrb = "0.3"
 
-# Menu GUI dependencies
-eframe = "0.30"
+# Menu GUI dependencies (Phase 1: separate binary, same crate)
+# Phase 2 (future): shared window with egui-wgpu integration will require
+# aligning wgpu versions between game and egui.
 egui = "0.30"
+egui-wgpu = "0.30"
+egui-winit = "0.30"
 egui_extras = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -42,10 +45,6 @@ rfd = "0.15"
 [[bin]]
 name = "open2jam-rs"
 path = "src/main.rs"
-
-[[bin]]
-name = "open2jam-rs-menu"
-path = "src/main_menu.rs"
 
 [profile.release]
 opt-level = 3

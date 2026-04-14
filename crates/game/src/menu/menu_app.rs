@@ -1,8 +1,11 @@
-//! Menu application using eframe (handles wgpu+winit automatically).
+//! Menu application — song library, selection table, configuration panels.
 //!
 //! Uses SQLite as a song metadata cache. On startup, songs are loaded from the
 //! database on a background thread. Scanning a library directory runs in a
 //! separate thread and reports progress via an `mpsc` channel.
+//!
+//! This module no longer uses eframe. The caller is responsible for providing
+//! an `egui::Context` and rendering the egui output via their own wgpu pipeline.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -719,8 +722,10 @@ impl MenuApp {
     }
 }
 
-impl eframe::App for MenuApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl MenuApp {
+    /// Draw the menu UI using egui.
+    /// Call this from the unified render loop when in Menu state.
+    pub fn ui(&mut self, ctx: &egui::Context) {
         self.maybe_save_config();
         self.ensure_monitor_info(ctx);
 

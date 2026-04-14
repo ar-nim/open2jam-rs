@@ -1,9 +1,12 @@
 //! Open2Jam rhythm game — unified binary crate.
 //!
-//! Contains both the game engine and the menu GUI, compiled from the same crate.
-//! Two binaries are produced:
-//! - `open2jam-rs` — game engine (via `main.rs`)
-//! - `open2jam-rs-menu` — menu GUI (via `main_menu.rs`)
+//! Both the menu GUI and the game engine are compiled from this single crate.
+//! They share the same winit window and wgpu device, running on the main thread
+//! (macOS compliant).
+//!
+//! Single binary: `open2jam-rs`
+//! - No CLI args → launches menu
+//! - `<path.ojn>` → launches game directly
 
 pub mod audio;
 pub mod engine;
@@ -16,7 +19,7 @@ pub mod skin;
 pub mod test_harness;
 
 // Menu GUI module (formerly the open2jam-rs-menu crate)
-pub mod menu {
+pub(crate) mod menu {
     pub mod db;
     pub mod menu_app;
     pub mod panels;
