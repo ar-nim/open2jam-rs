@@ -188,6 +188,12 @@ pub struct App {
     game_state: Option<GameState>,
     /// Config, shared between menu and game.
     config: Config,
+    /// egui context for menu rendering.
+    egui_ctx: egui::Context,
+    /// egui-winit integration for input handling.
+    egui_winit: Option<egui_winit::State>,
+    /// egui-wgpu renderer. Created in resumed() alongside wgpu device.
+    egui_renderer: Option<egui_wgpu::Renderer>,
     last_frame_time: Option<Instant>,
     /// When the gameplay started (for absolute time, no delta accumulation).
     game_start_instant: Option<Instant>,
@@ -308,6 +314,9 @@ impl App {
             menu_app,
             game_state: None,
             config: config.clone(),
+            egui_ctx: egui::Context::default(),
+            egui_winit: None,
+            egui_renderer: None,
             last_frame_time: None,
             game_start_instant: None,
             start_load_game_state: false,
@@ -423,6 +432,19 @@ impl ApplicationHandler for App {
             let window = event_loop.create_window(attrs).unwrap();
             self.init_wgpu(window);
 
+            // Set up egui-winit integration for input handling
+            if let Some(render) = &self.render {
+                self.egui_winit = Some(egui_winit::State::new(
+                    self.egui_ctx.clone(),
+                    egui::ViewportId::ROOT,
+                    &render.window,
+                    None, // native_pixels_per_point
+                    None, // theme
+                    None, // max_texture_side
+                ));
+                info!("egui-winit state initialised");
+            }
+
             // Set up frame limiter based on monitor refresh rate
             self.setup_frame_limiter();
 
@@ -470,7 +492,23 @@ impl ApplicationHandler for App {
                         .configure(&render.device, &render.config);
                 }
             }
-            _ => {}
+            _ => {
+                // Route input to egui first when in Menu mode
+                if self.mode == AppMode::Menu {
+                    if let (Some(render), Some(egui_winit)) = (&self.render, &mut self.egui_winit) {
+                        let response = egui_winit.on_window_event(&render.window, &event);
+                        if response.repaint {
+                            if let Some(render) = &self.render {
+                                render.window.request_redraw();
+                            }
+                        }
+                        if response.consumed {
+                            // egui consumed the event — don't pass to game
+                            return;
+                        }
+                    }
+                }
+            }
         }
 
         // Process remaining events for game mode
@@ -756,6 +794,16 @@ impl App {
             gpu: Some(gpu),
             skin_scale,
         });
+
+        // Create egui-wgpu renderer (shares the same wgpu device/queue)
+        if let Some(render) = &self.render {
+            self.egui_renderer = Some(egui_wgpu::Renderer::new(
+                &render.device,
+                render.config.format,
+                egui_wgpu::RendererOptions::default(),
+            ));
+            info!("egui-wgpu renderer initialised (wgpu 29)");
+        }
     }
 
     /// Load skin XML, parse frames, build texture atlas.
@@ -1066,6 +1114,118 @@ impl App {
             warn!("render_frame: render state is None");
             return false;
         };
+
+        // ── Menu mode: render egui ──
+        if self.mode == AppMode::Menu {
+            if let Some(menu) = &mut self.menu_app {
+                // 1. Build egui input from winit events
+                let raw_input = self
+                    .egui_winit
+                    .as_mut()
+                    .unwrap()
+                    .take_egui_input(&render.window);
+
+                // 2. Run egui to produce output
+                let full_output = self.egui_ctx.run(raw_input, |ctx| {
+                    menu.ui(ctx);
+                });
+
+                // 3. Tessellate into draw commands
+                let pixels_per_point = self.egui_ctx.pixels_per_point();
+                let clipped_primitives = self
+                    .egui_ctx
+                    .tessellate(full_output.shapes, pixels_per_point);
+
+                // 4. Acquire surface texture
+                if let Some(surface) = &render.surface {
+                    let surface_texture = match surface.get_current_texture() {
+                        wgpu::CurrentSurfaceTexture::Success(st) => st,
+                        wgpu::CurrentSurfaceTexture::Suboptimal(st) => st,
+                        _ => return false,
+                    };
+
+                    let view = surface_texture
+                        .texture
+                        .create_view(&wgpu::TextureViewDescriptor::default());
+
+                    // 5. Create encoder and upload egui data
+                    let mut encoder =
+                        render
+                            .device
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("egui_encoder"),
+                            });
+
+                    let screen_descriptor = egui_wgpu::ScreenDescriptor {
+                        size_in_pixels: [render.config.width, render.config.height],
+                        pixels_per_point,
+                    };
+
+                    if let Some(renderer) = &mut self.egui_renderer {
+                        renderer.update_buffers(
+                            &render.device,
+                            &render.queue,
+                            &mut encoder,
+                            &clipped_primitives,
+                            &screen_descriptor,
+                        );
+
+                        // Upload pending egui textures (fonts, etc.)
+                        for (id, image_delta) in &full_output.textures_delta.set {
+                            renderer.update_texture(
+                                &render.device,
+                                &render.queue,
+                                *id,
+                                image_delta,
+                            );
+                        }
+                    }
+
+                    // 6. Execute egui render pass
+                    if let Some(renderer) = &mut self.egui_renderer {
+                        // SAFETY: The render pass borrows the encoder and view for
+                        // the duration of this block only. We know the encoder and
+                        // view outlive the render pass, so extending to 'static is
+                        // sound in practice (same pattern used by egui examples).
+                        let mut render_pass =
+                            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("egui_pass"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                                            r: 0.1,
+                                            g: 0.1,
+                                            b: 0.15,
+                                            a: 1.0,
+                                        }),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                    depth_slice: None,
+                                })],
+                                ..Default::default()
+                            });
+                        // SAFETY: extending lifetime is safe because render_pass
+                        // is dropped before encoder is submitted.
+                        let render_pass: &mut wgpu::RenderPass<'static> =
+                            unsafe { std::mem::transmute(&mut render_pass) };
+                        renderer.render(render_pass, &clipped_primitives, &screen_descriptor);
+                    }
+
+                    // 7. Free egui textures that are no longer needed
+                    if let Some(renderer) = &mut self.egui_renderer {
+                        for id in &full_output.textures_delta.free {
+                            renderer.free_texture(id);
+                        }
+                    }
+
+                    render.queue.submit(Some(encoder.finish()));
+                    surface_texture.present();
+                }
+            }
+            return false;
+        }
 
         // Log first time we enter render_frame
         static FIRST_FRAME: std::sync::atomic::AtomicBool =

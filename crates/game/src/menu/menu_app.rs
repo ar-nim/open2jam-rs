@@ -801,7 +801,7 @@ impl MenuApp {
             }
         }
 
-        egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
+        egui::Panel::top("tab_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.active_tab, MenuTab::MusicSelect, "Music Select");
                 ui.selectable_value(
@@ -813,7 +813,7 @@ impl MenuApp {
             });
         });
 
-        egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
+        egui::Panel::bottom("bottom_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.separator();
                 ui.checkbox(&mut self.config.game_options.autoplay, "Autoplay");
