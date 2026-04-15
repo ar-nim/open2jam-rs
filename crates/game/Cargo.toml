@@ -7,7 +7,8 @@ build = "build.rs"
 
 [dependencies]
 open2jam-rs-core = { path = "../core" }
-open2jam-rs-ojn = { path = "../ojn" }
+open2jam-rs-parsers = { path = "../parsers" }
+open2jam-rs-menu = { path = "../menu" }
 wgpu = "29.0.1"
 winit = { version = "0.30.13", features = ["rwh_06"] }
 raw-window-handle = "0.6"
@@ -26,8 +27,6 @@ log = "0.4"
 env_logger = "0.11"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 rtrb = "0.3"
-
-# Unified GUI: single winit window + shared wgpu device (macOS compliant)
 egui = "0.34"
 egui-wgpu = "0.34"
 egui-winit = "0.34"

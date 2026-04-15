@@ -43,7 +43,7 @@ pub struct CachedChart {
 pub struct ChartScanEntry {
     pub relative_path: String,
     pub song_group_id: String,
-    pub header: open2jam_rs_ojn::OjnHeader,
+    pub header: open2jam_rs_parsers::ojn::OjnHeader,
     pub file_size: u64,
     pub file_modified: u64,
 }
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn chart_scan_entry_from_ojn_header() {
-        use open2jam_rs_ojn::OjnHeader;
+        use open2jam_rs_parsers::ojn::OjnHeader;
 
         let header = OjnHeader {
             song_id: 42,

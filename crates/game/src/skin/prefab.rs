@@ -2,7 +2,7 @@
 //!
 //! Creates note prototypes from skin entity definitions for each of the 7 lanes.
 
-use crate::parsing::xml::{EntityDef, SkinDef};
+use open2jam_rs_parsers::xml::{EntityDef, SkinDef};
 
 /// Lane index (0-based, 7 lanes total).
 pub const NUM_LANES: usize = 7;
@@ -195,7 +195,7 @@ impl NotePrefabs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parsing::xml::parse_str;
+    use open2jam_rs_parsers::xml::parse_str;
     use std::path::Path;
 
     const TEST_SKIN: &str = r#"<?xml version="1.0"?>

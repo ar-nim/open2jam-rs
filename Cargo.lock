@@ -2712,7 +2712,8 @@ dependencies = [
  "mint",
  "oddio",
  "open2jam-rs-core",
- "open2jam-rs-ojn",
+ "open2jam-rs-menu",
+ "open2jam-rs-parsers",
  "pollster 0.3.0",
  "quick-xml 0.38.4",
  "raw-window-handle",
@@ -2741,11 +2742,37 @@ dependencies = [
 ]
 
 [[package]]
-name = "open2jam-rs-ojn"
+name = "open2jam-rs-menu"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "egui",
+ "egui-wgpu",
+ "egui-winit",
+ "egui_extras",
+ "log",
+ "open2jam-rs-core",
+ "open2jam-rs-parsers",
+ "rfd",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "walkdir",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "open2jam-rs-parsers"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "encoding_rs",
  "log",
+ "open2jam-rs-core",
+ "quick-xml 0.38.4",
  "thiserror 1.0.69",
 ]
 

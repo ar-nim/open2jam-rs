@@ -15,10 +15,10 @@ use crate::gameplay::judgment::{
 };
 use crate::gameplay::scroll::scroll_travel_time_ms;
 use crate::gameplay::timing_data::TimingData;
-use crate::parsing::xml::Resources as SkinResources;
-use crate::parsing::{Chart, NoteType, TimedEvent};
 use crate::resources::clock::Clock;
 use crate::skin::prefab::NotePrefabs;
+use open2jam_rs_parsers::xml::Resources as SkinResources;
+use open2jam_rs_parsers::{Chart, NoteType, TimedEvent};
 
 /// A note click effect instance (EFFECT_CLICK sprite, shown for Cool/Good).
 ///
@@ -547,7 +547,7 @@ impl GameState {
 
         // 1. Parse the OJN chart
         info!("Parsing chart: {}", ojn_path.display());
-        let chart = crate::parsing::parse_file(ojn_path)
+        let chart = open2jam_rs_parsers::parse_file(ojn_path)
             .with_context(|| format!("Failed to parse OJN: {}", ojn_path.display()))?;
         info!(
             "Chart loaded: {} - {} ({} events, {} measures)",
@@ -568,7 +568,7 @@ impl GameState {
         let ojm_filename = &chart.header.ojm_filename;
         let ojm_path = dir.join(ojm_filename);
         info!("Loading audio: {}", ojm_path.display());
-        let sample_map = crate::parsing::ojm::parse_file(&ojm_path)
+        let sample_map = open2jam_rs_parsers::ojm::parse_file(&ojm_path)
             .with_context(|| format!("Failed to parse OJM: {}", ojm_path.display()))?;
         info!("OJM loaded: {} samples", sample_map.len());
 
@@ -1136,7 +1136,7 @@ impl GameState {
     /// Lane key sounds (channels 3-7) only play when the player presses the key
     pub fn process_audio(&mut self, audio_manager: &mut AudioManager) -> usize {
         use crate::audio::bgm_signal::BgmCommand;
-        use crate::parsing::{Channel, NoteType, TimedEvent};
+        use open2jam_rs_parsers::{Channel, NoteType, TimedEvent};
 
         // Don't push BGM commands until the audio stream is running.
         if !audio_manager.is_active() {

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use log::{info, warn};
 use oddio::Frames;
 
-use crate::parsing::ojm::{SampleEntry, SampleMap};
+use open2jam_rs_parsers::ojm::{SampleEntry, SampleMap};
 
 // ---------------------------------------------------------------------------
 // Sound cache

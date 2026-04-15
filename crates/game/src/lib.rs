@@ -12,15 +12,11 @@ pub mod audio;
 pub mod engine;
 pub mod game_state;
 pub mod gameplay;
-pub mod parsing;
 pub mod render;
 pub mod resources;
 pub mod skin;
 pub mod test_harness;
 
-// Menu GUI module (formerly the open2jam-rs-menu crate)
-pub(crate) mod menu {
-    pub mod db;
-    pub mod menu_app;
-    pub mod panels;
-}
+pub use open2jam_rs_core as core;
+pub use open2jam_rs_menu as menu;
+pub use open2jam_rs_parsers as parsing;

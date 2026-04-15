@@ -13,22 +13,18 @@
 
 #![warn(missing_docs)]
 
-pub mod audio;
-pub mod engine;
-pub mod game_state;
-pub mod gameplay;
-pub mod parsing;
-pub mod render;
-pub mod resources;
-pub mod skin;
-pub mod test_harness;
+use open2jam_rs::audio;
+use open2jam_rs::engine;
+use open2jam_rs::game_state;
+use open2jam_rs::gameplay;
+use open2jam_rs::render;
+use open2jam_rs::resources;
+use open2jam_rs::skin;
+use open2jam_rs::test_harness;
 
-// Menu GUI module (formerly the open2jam-rs-menu crate)
-pub mod menu {
-    pub mod db;
-    pub mod menu_app;
-    pub mod panels;
-}
+use open2jam_rs::core;
+use open2jam_rs::menu;
+use open2jam_rs::parsing;
 
 use std::path::PathBuf;
 

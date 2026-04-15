@@ -23,14 +23,14 @@ use winit::window::Window;
 use crate::audio::AudioManager;
 use crate::game_state::GameState;
 use crate::gameplay::scroll::note_y_position_bpm_aware;
-use crate::menu::menu_app::MenuApp;
-use crate::parsing::xml::{parse_file as parse_skin_xml, Resources as SkinResources};
-use crate::parsing::TimedEvent;
 use crate::render::atlas::SkinAtlas;
 use crate::render::hud::{render_hud_with_atlas, HudLayout};
 use crate::render::textured_renderer::{BlendMode, TexturedRenderer};
 use open2jam_rs_core::game_options::SpeedType;
 use open2jam_rs_core::Config;
+use open2jam_rs_menu::menu_app::MenuApp;
+use open2jam_rs_parsers::xml::{parse_file as parse_skin_xml, Resources as SkinResources};
+use open2jam_rs_parsers::TimedEvent;
 
 /// Application mode: either showing the menu or playing a game.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -247,8 +247,8 @@ impl FrameLimiter {
         let target_ns = self.next_frame_deadline.elapsed().as_nanos() as i64;
         if target_ns >= 0 {
             // Already past deadline — reset to now + duration (no wait)
-            self.next_frame_deadline =
-                std::time::Instant::now() + std::time::Duration::from_nanos(self.target_frame_duration_ns);
+            self.next_frame_deadline = std::time::Instant::now()
+                + std::time::Duration::from_nanos(self.target_frame_duration_ns);
             return;
         }
         // time_remaining_ns = -target_ns (positive)
@@ -257,7 +257,8 @@ impl FrameLimiter {
         // Phase 1: Sleep in 1ms increments, stopping 1ms early
         let sleep_until_ns = time_remaining_ns.saturating_sub(1_000_000);
         if sleep_until_ns > 0 {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_nanos(sleep_until_ns);
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_nanos(sleep_until_ns);
             while std::time::Instant::now() < deadline {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
@@ -537,12 +538,13 @@ impl ApplicationHandler for App {
                     }
                 }
             }
-            WindowEvent::KeyboardInput { event: ref key_event, .. } => {
+            WindowEvent::KeyboardInput {
+                event: ref key_event,
+                ..
+            } => {
                 // Route to egui first in Menu mode
                 if self.mode == AppMode::Menu {
-                    if let (Some(render), Some(egui_winit)) =
-                        (&self.render, &mut self.egui_winit)
-                    {
+                    if let (Some(render), Some(egui_winit)) = (&self.render, &mut self.egui_winit) {
                         let response = egui_winit.on_window_event(&render.window, &event);
                         if response.repaint {
                             render.window.request_redraw();
@@ -707,9 +709,7 @@ impl ApplicationHandler for App {
             | WindowEvent::MouseWheel { .. } => {
                 // Route mouse events to egui in Menu mode
                 if self.mode == AppMode::Menu {
-                    if let (Some(render), Some(egui_winit)) =
-                        (&self.render, &mut self.egui_winit)
-                    {
+                    if let (Some(render), Some(egui_winit)) = (&self.render, &mut self.egui_winit) {
                         let response = egui_winit.on_window_event(&render.window, &event);
                         if response.repaint {
                             render.window.request_redraw();
@@ -953,7 +953,7 @@ impl App {
             }
         };
 
-        let jpeg_bytes = match crate::parsing::extract_cover_image(&data) {
+        let jpeg_bytes = match open2jam_rs_parsers::extract_cover_image(&data) {
             Ok(b) => b,
             Err(e) => {
                 warn!("No cover image in OJN: {e}");
@@ -1166,7 +1166,12 @@ impl App {
                         );
 
                         for (id, image_delta) in &full_output.textures_delta.set {
-                            renderer.update_texture(&render.device, &render.queue, *id, image_delta);
+                            renderer.update_texture(
+                                &render.device,
+                                &render.queue,
+                                *id,
+                                image_delta,
+                            );
                         }
                     }
 
@@ -2052,9 +2057,7 @@ fn configure_fonts(ctx: &egui::Context) {
             .push("noto-sans-cjk".to_string());
         log::info!("Loaded Noto Sans CJK font");
     } else {
-        log::warn!(
-            "Noto Sans CJK font not found — CJK characters may not render correctly"
-        );
+        log::warn!("Noto Sans CJK font not found — CJK characters may not render correctly");
     }
 
     ctx.set_fonts(fonts);

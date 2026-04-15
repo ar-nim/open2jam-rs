@@ -245,7 +245,8 @@ fn decode_bmp(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
 
     let data_offset = u32::from_le_bytes([data[10], data[11], data[12], data[13]]) as usize;
     let width = i32::from_le_bytes([data[18], data[19], data[20], data[21]]) as usize;
-    let height_abs = (i32::from_le_bytes([data[22], data[23], data[24], data[25]])).unsigned_abs() as usize;
+    let height_abs =
+        (i32::from_le_bytes([data[22], data[23], data[24], data[25]])).unsigned_abs() as usize;
     let bpp = u16::from_le_bytes([data[28], data[29]]) as u32;
 
     if width == 0 || height_abs == 0 || data_offset >= data.len() {
@@ -276,14 +277,14 @@ fn decode_bmp(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
                         // BGR
                         rgba.push(pixel_data[px + 2]); // R
                         rgba.push(pixel_data[px + 1]); // G
-                        rgba.push(pixel_data[px]);     // B
-                        rgba.push(255);                // A
+                        rgba.push(pixel_data[px]); // B
+                        rgba.push(255); // A
                     }
                     32 => {
                         // BGRA
                         rgba.push(pixel_data[px + 2]); // R
                         rgba.push(pixel_data[px + 1]); // G
-                        rgba.push(pixel_data[px]);     // B
+                        rgba.push(pixel_data[px]); // B
                         rgba.push(pixel_data[px + 3]); // A
                     }
                     _ => return None,

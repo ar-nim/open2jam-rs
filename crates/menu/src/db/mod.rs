@@ -296,7 +296,7 @@ fn unix_epoch_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use open2jam_rs_ojn::OjnHeader;
+    use open2jam_rs_parsers::ojn::OjnHeader;
 
     /// Helper: create an in-memory pool with schema initialised.
     async fn test_pool() -> sqlx::SqlitePool {

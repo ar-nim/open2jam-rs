@@ -1,0 +1,24 @@
+[package]
+name = "open2jam-rs-menu"
+version = "0.1.0"
+edition = "2021"
+description = "Menu GUI for open2jam-rs"
+
+[dependencies]
+open2jam-rs-core = { path = "../core" }
+open2jam-rs-parsers = { path = "../parsers" }
+egui = "0.34"
+egui-wgpu = "0.34"
+egui-winit = "0.34"
+egui_extras = "0.34"
+winit = { version = "0.30.13", features = ["rwh_06"] }
+wgpu = "29.0.1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"
+sha2 = "0.10"
+rfd = "0.15"
+log = "0.4"
+anyhow = "1"
