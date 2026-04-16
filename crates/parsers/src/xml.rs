@@ -372,7 +372,7 @@ mod tests {
     #[test]
     fn test_parse_real_skin() {
         let resources =
-            parse_file("/home/arnim/projects/o2jam/open2jam-modern/src/resources/resources.xml")
+            parse_file("resources/resources.xml")
                 .expect("Failed to parse skin XML");
 
         // Check sprites are loaded
@@ -411,7 +411,7 @@ mod tests {
     #[test]
     fn test_parse_sprites() {
         let resources =
-            parse_file("/home/arnim/projects/o2jam/open2jam-modern/src/resources/resources.xml")
+            parse_file("resources/resources.xml")
                 .expect("Failed to parse skin XML");
 
         let head_white = resources
