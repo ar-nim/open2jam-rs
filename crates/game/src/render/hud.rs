@@ -323,9 +323,6 @@ pub fn draw_max_combo(
     skin_scale: (f32, f32),
     offset: (f32, f32),
 ) {
-    if max_combo == 0 {
-        return;
-    }
 
     let (sx, sy) = skin_scale;
     let (ox, oy) = offset;
