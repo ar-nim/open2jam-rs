@@ -484,8 +484,6 @@ pub struct GameState {
     pub combo_counter: ComboCounterState,
     /// Jam counter visibility timer (ms remaining, 0 = hidden)
     pub jam_counter_visible_ms: f64,
-    /// Max combo counter visibility timer (ms remaining, 0 = hidden)
-    pub max_combo_counter_visible_ms: f64,
     /// Combo title visibility timer (ms remaining, 0 = hidden)
     pub combo_title_visible_ms: f64,
     /// Startup delay: time before gameplay begins (2000ms for lifebar fill animation)
@@ -785,7 +783,6 @@ impl GameState {
             pending_judgments: Vec::new(),
             combo_counter: ComboCounterState::new(210.0), // COMBO_COUNTER y="210"
             jam_counter_visible_ms: 0.0,
-            max_combo_counter_visible_ms: 0.0,
             combo_title_visible_ms: 0.0,
             startup_delay_ms: 2000.0, // 2 second startup delay
             is_rendering: false,
@@ -941,12 +938,6 @@ impl GameState {
                 self.jam_counter_visible_ms = 0.0;
             }
         }
-        if self.max_combo_counter_visible_ms > 0.0 {
-            self.max_combo_counter_visible_ms -= delta;
-            if self.max_combo_counter_visible_ms < 0.0 {
-                self.max_combo_counter_visible_ms = 0.0;
-            }
-        }
         if self.combo_title_visible_ms > 0.0 {
             self.combo_title_visible_ms -= delta;
             if self.combo_title_visible_ms < 0.0 {
@@ -1003,11 +994,6 @@ impl GameState {
         self.jam_counter_visible_ms = 750.0;
     }
 
-    /// Show max combo counter for 750ms.
-    pub fn show_max_combo_counter(&mut self) {
-        self.max_combo_counter_visible_ms = 750.0;
-    }
-
     /// Show combo title for 750ms.
     pub fn show_combo_title(&mut self) {
         self.combo_title_visible_ms = 750.0;
@@ -1016,11 +1002,6 @@ impl GameState {
     /// Check if jam counter is visible.
     pub fn is_jam_counter_visible(&self) -> bool {
         self.jam_counter_visible_ms > 0.0
-    }
-
-    /// Check if max combo counter is visible.
-    pub fn is_max_combo_counter_visible(&self) -> bool {
-        self.max_combo_counter_visible_ms > 0.0
     }
 
     /// Check if combo title is visible.

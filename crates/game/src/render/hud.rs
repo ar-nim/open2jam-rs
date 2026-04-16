@@ -7,6 +7,7 @@ use crate::game_state::{GameState, PendingJudgment};
 use crate::gameplay::judgment::JudgmentType;
 use crate::render::atlas::{AtlasFrame, SkinAtlas};
 use crate::render::textured_renderer::TexturedRenderer;
+use open2jam_rs_parsers::xml::SkinDef;
 
 /// HUD skin entity positions extracted from skin XML.
 /// All values match the entity positions in resources.xml exactly.
@@ -60,63 +61,71 @@ pub struct HudLayout {
 
 impl HudLayout {
     /// Create HUD layout from skin XML entity positions.
-    /// Values match resources.xml o2jam skin exactly.
-    pub fn from_skin() -> Self {
+    pub fn from_skin(skin: &SkinDef) -> Self {
+        let get_pos = |id: &str| {
+            skin.entities.iter()
+                .find(|e| e.id.as_deref() == Some(id))
+                .map(|e| (e.x as f32, e.y as f32))
+                .unwrap_or_else(|| {
+                    log::warn!("HUD entity {} not found in skin, defaulting to (0,0)", id);
+                    (0.0, 0.0)
+                })
+        };
+
+        let (score_x, score_y) = get_pos("SCORE_COUNTER");
+        let (combo_x, combo_y) = get_pos("COMBO_COUNTER");
+        let (jam_x, jam_y) = get_pos("JAM_COUNTER");
+        let (minute_x, minute_y) = get_pos("MINUTE_COUNTER");
+        let (second_x, second_y) = get_pos("SECOND_COUNTER");
+        let (max_combo_x, max_combo_y) = get_pos("MAXCOMBO_COUNTER");
+        let (judgment_perfect_x, judgment_perfect_y) = get_pos("COUNTER_JUDGMENT_PERFECT");
+        let (judgment_cool_x, judgment_cool_y) = get_pos("COUNTER_JUDGMENT_COOL");
+        let (judgment_good_x, judgment_good_y) = get_pos("COUNTER_JUDGMENT_GOOD");
+        let (judgment_bad_x, judgment_bad_y) = get_pos("COUNTER_JUDGMENT_BAD");
+        let (judgment_miss_x, judgment_miss_y) = get_pos("COUNTER_JUDGMENT_MISS");
+        let (judgment_popup_x, judgment_popup_y) = get_pos("EFFECT_JUDGMENT_COOL");
+        let (lifebar_x, lifebar_y) = get_pos("LIFE_BAR");
+        let (jam_bar_x, jam_bar_y) = get_pos("JAM_BAR");
+        let (timebar_x, timebar_y) = get_pos("TIME_BAR");
+
+        let mut pill_positions = Vec::new();
+        for i in 1..=5 {
+            pill_positions.push(get_pos(&format!("PILL_{}", i)));
+        }
+
         Self {
-            // SCORE_COUNTER: x="192" y="567"
-            score_x: 192.0,
-            score_y: 567.0,
-            // COMBO_COUNTER: x="99" y="210"
-            combo_x: 99.0,
-            combo_y: 210.0,
-            // JAM_COUNTER: x="99" y="80"
-            jam_x: 99.0,
-            jam_y: 80.0,
-            // MINUTE_COUNTER: x="346" y="569"
-            minute_x: 346.0,
-            minute_y: 569.0,
-            // SECOND_COUNTER: x="410" y="569"
-            second_x: 410.0,
-            second_y: 569.0,
-            // MAXCOMBO_COUNTER: x="671" y="557"
-            max_combo_x: 671.0,
-            max_combo_y: 557.0,
-            // COUNTER_JUDGMENT_PERFECT: x="658" y="500"
-            judgment_perfect_x: 658.0,
-            judgment_perfect_y: 500.0,
-            // COUNTER_JUDGMENT_COOL: x="658" y="572"
-            judgment_cool_x: 658.0,
-            judgment_cool_y: 572.0,
-            // COUNTER_JUDGMENT_GOOD: x="728" y="572"
-            judgment_good_x: 728.0,
-            judgment_good_y: 572.0,
-            // COUNTER_JUDGMENT_BAD: x="658" y="581"
-            judgment_bad_x: 658.0,
-            judgment_bad_y: 581.0,
-            // COUNTER_JUDGMENT_MISS: x="728" y="581"
-            judgment_miss_x: 728.0,
-            judgment_miss_y: 581.0,
-            // EFFECT_JUDGMENT_COOL: x="30" y="280"
-            judgment_popup_x: 30.0,
-            judgment_popup_y: 280.0,
-            // LIFE_BAR: x="203" y="247"
-            lifebar_x: 203.0,
-            lifebar_y: 247.0,
-            // JAM_BAR: x="4" y="536"
-            jam_bar_x: 4.0,
-            jam_bar_y: 536.0,
-            // PILL_1 through PILL_5
-            pill_positions: vec![
-                (200.0, 127.0), // PILL_1
-                (200.0, 95.0),  // PILL_2
-                (200.0, 64.0),  // PILL_3
-                (200.0, 33.0),  // PILL_4
-                (200.0, 2.0),   // PILL_5
-            ],
-            // TIME_BAR: x="226" y="515", 288x9 pixels
-            timebar_x: 226.0,
-            timebar_y: 515.0,
-            timebar_width: 288.0,
+            score_x,
+            score_y,
+            combo_x,
+            combo_y,
+            jam_x,
+            jam_y,
+            minute_x,
+            minute_y,
+            second_x,
+            second_y,
+            max_combo_x,
+            max_combo_y,
+            judgment_perfect_x,
+            judgment_perfect_y,
+            judgment_cool_x,
+            judgment_cool_y,
+            judgment_good_x,
+            judgment_good_y,
+            judgment_bad_x,
+            judgment_bad_y,
+            judgment_miss_x,
+            judgment_miss_y,
+            judgment_popup_x,
+            judgment_popup_y,
+            lifebar_x,
+            lifebar_y,
+            jam_bar_x,
+            jam_bar_y,
+            pill_positions,
+            timebar_x,
+            timebar_y,
+            timebar_width: 288.0, // These might also be in XML but were hardcoded as dimensions
             timebar_height: 9.0,
         }
     }
@@ -1001,17 +1010,15 @@ pub fn render_hud_with_atlas(
             offset,
         );
     }
-    // Max combo: only visible for 2 seconds after max combo increases
-    if game_state.is_max_combo_counter_visible() {
-        draw_max_combo(
-            renderer,
-            &get_frame,
-            stats.max_combo,
-            layout,
-            skin_scale,
-            offset,
-        );
-    }
+    // Max combo: always visible once achieved
+    draw_max_combo(
+        renderer,
+        &get_frame,
+        stats.max_combo,
+        layout,
+        skin_scale,
+        offset,
+    );
     draw_judgment_counts(
         renderer,
         &get_frame,

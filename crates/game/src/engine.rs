@@ -138,6 +138,7 @@ struct GpuResources {
     textured_renderer: TexturedRenderer,
     atlas: Option<SkinAtlas>,
     skin: Option<SkinResources>,
+    hud_layout: Option<crate::render::hud::HudLayout>,
     cover_texture: Option<wgpu::Texture>,
     cover_bind_group: Option<wgpu::BindGroup>,
     cover_pipeline: Option<wgpu::RenderPipeline>,
@@ -795,10 +796,15 @@ impl App {
                 (None, None, None, None)
             };
 
+        let hud_layout = skin.as_ref().and_then(|res| {
+            res.get_skin("o2jam").map(|s| crate::render::hud::HudLayout::from_skin(s))
+        });
+
         let gpu = GpuResources {
             textured_renderer,
             atlas,
             skin,
+            hud_layout,
             cover_texture,
             cover_bind_group,
             cover_pipeline,
@@ -1267,10 +1273,9 @@ impl App {
                 // the winit event handler BEFORE the render frame starts.
                 if gs.stats.combo > gs.prev_frame_combo {
                     gs.combo_counter.increment();
-                    // Only show combo title/max combo when starting a new combo streak (combo was 0)
+                    // Only show combo title when starting a new combo streak (combo was 0)
                     if gs.prev_frame_combo == 0 {
                         gs.show_combo_title();
-                        gs.show_max_combo_counter();
                     }
                 } else if gs.stats.combo == 0 && gs.prev_frame_combo > 0 {
                     gs.combo_counter.reset();
@@ -1281,9 +1286,8 @@ impl App {
                     gs.show_jam_counter();
                 }
 
-                // Show max combo when max combo increases (new high score)
+                // Show combo title when max combo increases (new high score)
                 if gs.stats.max_combo > prev_max_combo {
-                    gs.show_max_combo_counter();
                     gs.show_combo_title();
                 }
 
@@ -1977,21 +1981,23 @@ impl App {
         }
 
         // 9. Draw HUD elements (score, combo, lifebar, judgment popups)
-        // Use separate borrows to avoid conflicting borrows
-        let hud_layout = HudLayout::from_skin();
         if let Some(gs) = &self.game_state {
             let render_time = gs.clock.render_time();
             if let Some(ref mut gpu) = render.gpu {
-                let atlas_ref = gpu.atlas.as_ref();
-                render_hud_with_atlas(
-                    &mut gpu.textured_renderer,
-                    atlas_ref,
-                    gs,
-                    &hud_layout,
-                    (skin_scale_x, skin_scale_y),
-                    (offset_x, offset_y),
-                    render_time as f64,
-                );
+                if let Some(ref layout) = gpu.hud_layout {
+                    let atlas_ref = gpu.atlas.as_ref();
+                    render_hud_with_atlas(
+                        &mut gpu.textured_renderer,
+                        atlas_ref,
+                        gs,
+                        layout,
+                        (skin_scale_x, skin_scale_y),
+                        (offset_x, offset_y),
+                        render_time as f64,
+                    );
+                } else {
+                    log::warn!("HUD layout not loaded, skipping HUD render");
+                }
             }
         }
 

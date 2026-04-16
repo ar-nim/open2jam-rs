@@ -413,7 +413,7 @@ Main Thread (rendering):
 - [ ] Stop channels (chart events that pause audio)
 - [ ] Hi-Speed modifier (UI + scroll adjustment)
 - [ ] Note judgment text popups (COOL/GOOD/BAD/MISS text from skin — sprites only, no text yet)
-- [ ] Max combo counter display
+- [x] Max combo counter display
 
 ## How to Run
 

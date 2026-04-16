@@ -76,6 +76,9 @@ test_assets/*.zip
 # Minidumps
 *.dmp
 
+# Fonts
+crates/game/assets/*.ttf
+
 
 # Added by cargo
 
