@@ -2022,79 +2022,41 @@ impl App {
 fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
-    // Try to load Inter as the primary Latin font
-    if let Some(data) = load_font_data("Inter-Regular.ttf") {
-        fonts.font_data.insert(
-            "inter".to_string(),
-            std::sync::Arc::new(egui::FontData::from_owned(data)),
-        );
-        // Insert at the FRONT of the proportional family (highest priority)
-        fonts
-            .families
-            .get_mut(&egui::FontFamily::Proportional)
-            .unwrap()
-            .insert(0, "inter".to_string());
-        fonts
-            .families
-            .get_mut(&egui::FontFamily::Monospace)
-            .unwrap()
-            .insert(0, "inter".to_string());
-        log::info!("Loaded Inter font");
-    } else {
-        log::warn!("Inter font not found — using egui default for Latin text");
-    }
+    // Embed fonts directly into the binary
+    let inter_data = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
+    let noto_data = include_bytes!("../../../assets/fonts/NotoSansCJKsc-Regular.otf");
 
-    // Try to load Noto Sans CJK as CJK fallback
-    if let Some(data) = load_font_data("NotoSansCJKsc-Regular.otf") {
-        fonts.font_data.insert(
-            "noto-sans-cjk".to_string(),
-            std::sync::Arc::new(egui::FontData::from_owned(data)),
-        );
-        // Append at the END of both families (fallback after Latin/emoji)
-        fonts
-            .families
-            .get_mut(&egui::FontFamily::Proportional)
-            .unwrap()
-            .push("noto-sans-cjk".to_string());
-        fonts
-            .families
-            .get_mut(&egui::FontFamily::Monospace)
-            .unwrap()
-            .push("noto-sans-cjk".to_string());
-        log::info!("Loaded Noto Sans CJK font");
-    } else {
-        log::warn!("Noto Sans CJK font not found — CJK characters may not render correctly");
-    }
+    fonts.font_data.insert(
+        "inter".to_string(),
+        std::sync::Arc::new(egui::FontData::from_owned(inter_data.to_vec())),
+    );
+    fonts
+        .families
+        .get_mut(&egui::FontFamily::Proportional)
+        .unwrap()
+        .insert(0, "inter".to_string());
+    fonts
+        .families
+        .get_mut(&egui::FontFamily::Monospace)
+        .unwrap()
+        .insert(0, "inter".to_string());
+    log::info!("Bundled Inter font loaded");
+
+    fonts.font_data.insert(
+        "noto-sans-cjk".to_string(),
+        std::sync::Arc::new(egui::FontData::from_owned(noto_data.to_vec())),
+    );
+    fonts
+        .families
+        .get_mut(&egui::FontFamily::Proportional)
+        .unwrap()
+        .push("noto-sans-cjk".to_string());
+    fonts
+        .families
+        .get_mut(&egui::FontFamily::Monospace)
+        .unwrap()
+        .push("noto-sans-cjk".to_string());
+    log::info!("Bundled Noto Sans CJK font loaded");
 
     ctx.set_fonts(fonts);
-}
-
-/// Load font file bytes from the assets directory.
-fn load_font_data(filename: &str) -> Option<Vec<u8>> {
-    load_font_path(filename).and_then(|p| std::fs::read(p).ok())
-}
-
-/// Find a font file in the assets directory relative to various locations.
-fn load_font_path(filename: &str) -> Option<std::path::PathBuf> {
-    use std::path::PathBuf;
-    let candidates = [
-        // Relative to crate root (for `cargo run`)
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("assets")
-            .join(filename),
-        // Relative to current working directory
-        PathBuf::from("assets").join(filename),
-        // Relative to executable directory
-        std::env::current_exe()
-            .ok()?
-            .parent()?
-            .join("assets")
-            .join(filename),
-    ];
-    for path in &candidates {
-        if path.exists() {
-            return Some(path.clone());
-        }
-    }
-    None
 }

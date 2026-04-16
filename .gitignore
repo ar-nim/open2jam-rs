@@ -1,11 +1,10 @@
-# Resources - distributed separately (submodule)
-/resources/
-
-# Runtime-generated Fyrox data (resource registry)
-data/
+# Skins
+assets/skins/*
+!assets/skins/README.md
 
 # Qwen Code settings (user-specific)
 .qwen/
+.cline/
 
 # Temporary documentation (auto-generated, not for version control)
 tmpdocs/
@@ -75,13 +74,7 @@ test_assets/*.zip
 
 # Minidumps
 *.dmp
-
-# Fonts
-crates/game/assets/*.ttf
-
-
-# Added by cargo
-
+# Added by carg
 /target
 *.json.gz
 *.tracy
