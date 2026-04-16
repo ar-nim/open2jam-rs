@@ -128,6 +128,8 @@ pub struct ActiveNote {
     pub lane: usize,
     pub target_time_ms: f64,
     pub sample_id: Option<u32>,
+    pub volume: f32,
+    pub pan: f32,
     pub judged: bool,
     pub missed: bool,
     pub judgment_type: Option<JudgmentType>,
@@ -140,6 +142,8 @@ pub struct ActiveLongNote {
     pub head_time_ms: f64,
     pub tail_time_ms: f64,
     pub sample_id: Option<u32>,
+    pub volume: f32,
+    pub pan: f32,
     pub judged: bool,
     pub missed: bool,
     pub holding: bool,
@@ -1042,6 +1046,8 @@ impl GameState {
                                 lane,
                                 target_time_ms: note_event.time_ms,
                                 sample_id: note_event.sample_id,
+                                volume: note_event.volume,
+                                pan: note_event.pan,
                                 judged: false,
                                 missed: false,
                                 judgment_type: None,
@@ -1062,6 +1068,8 @@ impl GameState {
                                 head_time_ms: note_event.time_ms,
                                 tail_time_ms: end_time,
                                 sample_id: note_event.sample_id,
+                                volume: note_event.volume,
+                                pan: note_event.pan,
                                 judged: false,
                                 missed: false,
                                 holding: false,
@@ -1106,9 +1114,9 @@ impl GameState {
 
         let bad_window_release = crate::gameplay::judgment::bad_window_ms_release(bpm);
         self.active_long_notes.retain(|ln| {
-            // Keep if the note is still "alive" (not yet judged as release or missed)
-            // and hasn't passed the point where it's definitely a miss.
-            !ln.dead && (render_time - ln.tail_time_ms) <= bad_window_release + 100.0
+            // Always keep the note until its tail has passed the judgment line (plus window),
+            // regardless of whether it was judged, missed, or released early.
+            (render_time - ln.tail_time_ms) <= bad_window_release + 100.0
         });
     }
 
@@ -1379,121 +1387,125 @@ impl GameState {
     /// immediately if the press time is within the judgment window.
     /// Keysound is played ONLY when judgment is accepted (matches O2Jam behavior:
     /// pressing too early/late produces no sound).
+    /// Internal helper to trigger a keysound sample.
+    fn play_sample(
+        &self,
+        sample_id: u32,
+        target_time_ms: f64,
+        volume: f32,
+        pan: f32,
+        audio_manager: &mut crate::audio::manager::AudioManager,
+    ) {
+        if let Some(frames) = self.sound_cache.get_sound(sample_id) {
+            // Unique source_id per note event — no voice-steal
+            let source_id = ((sample_id as u64) << 32) | (target_time_ms as u64 & 0xFFFF_FFFF);
+            let command = crate::audio::bgm_signal::BgmCommand {
+                frames: std::sync::Arc::clone(frames),
+                delay_samples: 0,
+                volume,
+                pan,
+                source_id,
+            };
+            if let Err(_) = audio_manager.push_bgm_command(command) {
+                log::warn!(
+                    "[AUDIO] keysound queue full, dropping sample_id={}",
+                    sample_id
+                );
+            }
+        }
+    }
+
+    /// Triggers the next available sound for a lane when no judgment is made.
+    fn trigger_sampler_sound(&self, lane: usize, audio_manager: &mut crate::audio::manager::AudioManager) {
+        // 1. Check active tap notes
+        if let Some(note) = self.active_notes.iter().find(|n| n.lane == lane && !n.judged && !n.missed) {
+            if let Some(sample_id) = note.sample_id {
+                self.play_sample(sample_id, note.target_time_ms, note.volume, note.pan, audio_manager);
+                log::debug!("[SAMPLER] Triggered next active note sample: id={}, lane={}", sample_id, lane);
+                return;
+            }
+        }
+
+        // 2. Check active long notes
+        if let Some(ln) = self.active_long_notes.iter().find(|ln| ln.lane == lane && !ln.judged && !ln.missed) {
+            if let Some(sample_id) = ln.sample_id {
+                self.play_sample(sample_id, ln.head_time_ms, ln.volume, ln.pan, audio_manager);
+                log::debug!("[SAMPLER] Triggered next active long note sample: id={}, lane={}", sample_id, lane);
+                return;
+            }
+        }
+
+        // 3. Look ahead into the chart events
+        if let Some(note_event) = self.chart.events[self.next_event_idx..]
+            .iter()
+            .filter_map(|e| if let TimedEvent::Note(n) = e { Some(n) } else { None })
+            .find(|n| n.channel.lane_index() == Some(lane)) 
+        {
+            if let Some(sample_id) = note_event.sample_id {
+                self.play_sample(sample_id, note_event.time_ms, note_event.volume, note_event.pan, audio_manager);
+                log::debug!("[SAMPLER] Triggered future chart note sample: id={}, lane={}", sample_id, lane);
+            }
+        }
+    }
+
     pub fn handle_key_press(
         &mut self,
         lane: usize,
         _os_timestamp: std::time::Instant,
         audio_manager: &mut crate::audio::manager::AudioManager,
     ) -> Option<JudgmentType> {
-        if lane < 7 {
-            self.pressed_lanes[lane] = true;
+        if lane >= 7 {
+            return None;
+        }
+        
+        self.pressed_lanes[lane] = true;
 
-            let press_time_ms = self.clock.game_time() as f64;
-            let bpm = self.clock.bpm() as f64;
-            let base_bad_window_ms = crate::gameplay::judgment::bad_window_ms_tap(bpm);
+        let press_time_ms = self.clock.game_time() as f64;
+        let bpm = self.clock.bpm() as f64;
+        let base_bad_window_ms = crate::gameplay::judgment::bad_window_ms_tap(bpm);
 
-            // Find the next unjudged tap note in this lane and judge if in range
-            for note in &mut self.active_notes {
-                if note.lane != lane || note.judged || note.missed {
-                    continue;
-                }
+        let mut judgment_result = None;
+        let mut sample_to_play = None;
 
-                let time_diff = press_time_ms - note.target_time_ms;
-                log::debug!(
-                    "[INPUT] Checking tap note at target={:.2}ms, diff={:.2}ms (abs={:.2}ms)",
-                    note.target_time_ms,
-                    time_diff,
-                    time_diff.abs()
-                );
-
-                if time_diff.abs() <= base_bad_window_ms {
-                    let judgment = judge_tap_note(time_diff, bpm);
-                    note.judged = true;
-                    let has_pill = self.stats.pill_count > 0;
-                    let effective = self
-                        .stats
-                        .record_judgment(judgment, has_pill, self.difficulty);
-                    note.judgment_type = Some(effective);
-                    log::debug!(
-                        "[INPUT]   *** HIT! Judgment: {:?} (raw: {:?}), diff={:.2}ms ***",
-                        effective,
-                        judgment,
-                        time_diff
-                    );
-
-                    // Play keysound only when judgment is accepted (O2Jam behavior)
-                    if let Some(sample_id) = note.sample_id {
-                        if let Some(frames) = self.sound_cache.get_sound(sample_id) {
-                            // Unique source_id per note event — no voice-steal
-                            let source_id = ((sample_id as u64) << 32)
-                                | (note.target_time_ms as u64 & 0xFFFF_FFFF);
-                            let command = crate::audio::bgm_signal::BgmCommand {
-                                frames: std::sync::Arc::clone(frames),
-                                delay_samples: 0,
-                                volume: 1.0,
-                                pan: 0.0,
-                                source_id,
-                            };
-                            if let Err(_) = audio_manager.push_bgm_command(command) {
-                                log::warn!(
-                                    "[AUDIO] keysound queue full, dropping sample_id={}",
-                                    sample_id
-                                );
-                            }
-                        }
-                    }
-
-                    if matches!(effective, JudgmentType::Cool | JudgmentType::Good) {
-                        self.trigger_note_click_effect(lane, press_time_ms);
-                    }
-                    self.clear_pending_judgments();
-                    self.pending_judgments.push(PendingJudgment::new(
-                        effective,
-                        lane,
-                        press_time_ms,
-                    ));
-                    return Some(effective);
-                }
-                // Note is beyond the window — stop searching (notes are in order)
-                if time_diff < -base_bad_window_ms {
-                    log::debug!(
-                        "[INPUT]   Note too early (diff={:.2}ms), stopping search",
-                        time_diff
-                    );
-                    break;
-                }
+        // 1. Try to judge tap notes
+        for note in &mut self.active_notes {
+            if note.lane != lane || note.judged || note.missed {
+                continue;
             }
 
-            // Check long notes
+            let time_diff = press_time_ms - note.target_time_ms;
+            if time_diff.abs() <= base_bad_window_ms {
+                let judgment = judge_tap_note(time_diff, bpm);
+                note.judged = true;
+                let has_pill = self.stats.pill_count > 0;
+                let effective = self.stats.record_judgment(judgment, has_pill, self.difficulty);
+                note.judgment_type = Some(effective);
+                
+                sample_to_play = note.sample_id.map(|id| (id, note.target_time_ms, note.volume, note.pan));
+                judgment_result = Some(effective);
+                break;
+            }
+            if time_diff < -base_bad_window_ms {
+                break;
+            }
+        }
+
+        // 2. Try to judge long notes (head) if no tap note was judged
+        if judgment_result.is_none() {
             for ln in &mut self.active_long_notes {
                 if ln.lane != lane || ln.judged || ln.missed {
                     continue;
                 }
 
                 let time_diff = press_time_ms - ln.head_time_ms;
-                log::debug!(
-                    "[INPUT]   Checking long note at target={:.2}ms, diff={:.2}ms",
-                    ln.head_time_ms,
-                    time_diff
-                );
-
                 if time_diff.abs() <= base_bad_window_ms {
                     let judgment = judge_tap_note(time_diff, bpm);
                     ln.judged = true;
                     let has_pill = self.stats.pill_count > 0;
-                    let effective = self
-                        .stats
-                        .record_judgment(judgment, has_pill, self.difficulty);
+                    let effective = self.stats.record_judgment(judgment, has_pill, self.difficulty);
                     ln.head_judgment = Some(effective);
 
-                    // Tap Dependency: If initial tap is Miss, or Bad (and not saved by pill),
-                    // the release is immediately marked as a Miss.
-                    if effective == JudgmentType::Miss {
-                        ln.tail_judgment = Some(JudgmentType::Miss);
-                        self.stats.record_judgment(JudgmentType::Miss, false, self.difficulty);
-                        ln.holding = false;
-                        ln.dead = true;
-                    } else if effective == JudgmentType::Bad {
+                    if effective == JudgmentType::Miss || effective == JudgmentType::Bad {
                         ln.tail_judgment = Some(JudgmentType::Miss);
                         self.stats.record_judgment(JudgmentType::Miss, false, self.difficulty);
                         ln.holding = false;
@@ -1501,50 +1513,48 @@ impl GameState {
                     } else {
                         ln.holding = true;
                     }
-                    log::debug!(
-                        "[INPUT]   *** HIT LONG! Judgment: {:?} (raw: {:?}), diff={:.2}ms ***",
-                        effective,
-                        judgment,
-                        time_diff
-                    );
 
-                    if let Some(sample_id) = ln.sample_id {
-                        if let Some(frames) = self.sound_cache.get_sound(sample_id) {
-                            let source_id =
-                                ((sample_id as u64) << 32) | (ln.head_time_ms as u64 & 0xFFFF_FFFF);
-                            let command = crate::audio::bgm_signal::BgmCommand {
-                                frames: std::sync::Arc::clone(frames),
-                                delay_samples: 0,
-                                volume: 1.0,
-                                pan: 0.0,
-                                source_id,
-                            };
-                            let _ = audio_manager.push_bgm_command(command);
-                        }
-                    }
-
-                    if matches!(effective, JudgmentType::Cool | JudgmentType::Good) {
-                        self.trigger_longflare_effect(lane, press_time_ms);
-                    }
-                    self.clear_pending_judgments();
-                    self.pending_judgments.push(PendingJudgment::new(
-                        effective,
-                        lane,
-                        press_time_ms,
-                    ));
-                    return Some(effective);
+                    sample_to_play = ln.sample_id.map(|id| (id, ln.head_time_ms, ln.volume, ln.pan));
+                    judgment_result = Some(effective);
+                    break;
                 }
                 if time_diff < -base_bad_window_ms {
-                    log::debug!(
-                        "[INPUT]   Long note too early (diff={:.2}ms), stopping search",
-                        time_diff
-                    );
                     break;
                 }
             }
-
-            log::debug!("[INPUT]   No note in judgment window for lane {}", lane);
         }
+
+        // 3. Perform side effects if a judgment was made
+        if let Some(effective) = judgment_result {
+                if let Some((sample_id, target_time, volume, pan)) = sample_to_play {
+                    self.play_sample(sample_id, target_time, volume, pan, audio_manager);
+                }
+
+            if matches!(effective, JudgmentType::Cool | JudgmentType::Good) {
+                self.trigger_note_click_effect(lane, press_time_ms);
+                // For long notes, trigger flare if it's a head hit
+                // We can't easily know if it was a long note here without more state, 
+                // but we can check if the note just became 'holding'.
+                // Actually, let's just re-check the notes for the flare.
+                for ln in &self.active_long_notes {
+                    if ln.lane == lane && ln.holding && ln.head_judgment == Some(effective) {
+                        self.trigger_longflare_effect(lane, press_time_ms);
+                        break;
+                    }
+                }
+            }
+            self.clear_pending_judgments();
+            self.pending_judgments.push(PendingJudgment::new(
+                effective,
+                lane,
+                press_time_ms,
+            ));
+            return Some(effective);
+        }
+
+        // 4. Sampler Mode: Fallback to the next available sound for this lane
+        self.trigger_sampler_sound(lane, audio_manager);
+        
         None
     }
 
