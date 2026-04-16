@@ -462,7 +462,7 @@ impl ApplicationHandler for App {
                 .with_visible(true)
                 .with_resizable(true);
 
-            if self.display_fullscreen {
+            if self.mode == AppMode::Playing && self.display_fullscreen {
                 attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
             }
 

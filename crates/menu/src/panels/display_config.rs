@@ -91,8 +91,6 @@ pub fn ui_display_config(
 
     // ── Display Mode (horizontal with separator) ──
     ui.horizontal(|ui| {
-        ui.checkbox(&mut opts.menu_fullscreen, "Menu Fullscreen");
-        ui.separator();
         ui.checkbox(&mut opts.display_fullscreen, "Game Fullscreen");
     });
 

@@ -275,9 +275,6 @@ pub struct GameOptions {
     #[serde(default)]
     pub ui_theme: UiTheme,
 
-    /// Menu window fullscreen state (independent of game fullscreen).
-    #[serde(default)]
-    pub menu_fullscreen: bool,
 
     /// Haste Mode: advanced timing mode.
     #[serde(default)]
@@ -333,7 +330,6 @@ impl Default for GameOptions {
             display_lag: 0.0,
             audio_latency: 0.0,
             ui_theme: UiTheme::Automatic,
-            menu_fullscreen: false,
             haste_mode: false,
             haste_mode_normalize_speed: true,
         }
