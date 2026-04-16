@@ -1342,13 +1342,25 @@ impl GameState {
         let mut flare_lanes_to_kill: Vec<usize> = Vec::new();
 
         for ln in &mut self.active_long_notes {
-            // If the note hasn't been judged as a release yet, and the tail has passed the Bad window
             if ln.judged && ln.tail_judgment.is_none() {
                 let tail_diff = render_time - ln.tail_time_ms;
                 let bad_window_release = crate::gameplay::judgment::bad_window_ms_release(bpm);
 
-                if tail_diff > bad_window_release {
-                    // Player either never released or released too late
+                if self.auto_play && tail_diff >= 0.0 {
+                    // Autoplay: release exactly at tail time
+                    ln.tail_judgment = Some(JudgmentType::Cool);
+                    ln.holding = false;
+                    ln.dead = true;
+                    self.stats
+                        .record_judgment(JudgmentType::Cool, false, self.difficulty);
+                    flare_lanes_to_kill.push(ln.lane);
+                    judgments_to_add.push(PendingJudgment::new(
+                        JudgmentType::Cool,
+                        ln.lane,
+                        render_time,
+                    ));
+                } else if tail_diff > bad_window_release {
+                    // Manual: Player either never released or released too late
                     ln.tail_judgment = Some(JudgmentType::Miss);
                     self.stats
                         .record_judgment(JudgmentType::Miss, false, self.difficulty);

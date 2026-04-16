@@ -448,19 +448,38 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.render.is_none() {
+            let inner_size = if self.mode == AppMode::Menu {
+                if let Some(monitor) = event_loop.primary_monitor() {
+                    let size = monitor.size();
+                    let scale = monitor.scale_factor();
+                    winit::dpi::LogicalSize::new(
+                        (size.width as f64 * 0.65) / scale as f64,
+                        (size.height as f64 * 0.65) / scale as f64,
+                    )
+                } else {
+                    // Fallback for menu if monitor info is unavailable, decoupled from game config
+                    winit::dpi::LogicalSize::new(1280.0, 720.0)
+                }
+            } else {
+                winit::dpi::LogicalSize::new(
+                    self.display_width as f64,
+                    self.display_height as f64,
+                )
+            };
+
             info!(
                 "Creating window ({}x{}, fullscreen={}) and initialising wgpu...",
-                self.display_width, self.display_height, self.display_fullscreen
+                inner_size.width,
+                inner_size.height,
+                self.display_fullscreen
             );
 
             let mut attrs = winit::window::WindowAttributes::default()
                 .with_title("open2jam-rs")
-                .with_inner_size(winit::dpi::LogicalSize::new(
-                    self.display_width as f64,
-                    self.display_height as f64,
-                ))
                 .with_visible(true)
                 .with_resizable(true);
+
+            attrs = attrs.with_inner_size(inner_size);
 
             if self.mode == AppMode::Playing && self.display_fullscreen {
                 attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
@@ -609,19 +628,25 @@ impl ApplicationHandler for App {
                 };
 
                 if let Some(lane) = lane {
-                    if let Some(gs) = &mut self.game_state {
-                        let os_timestamp = std::time::Instant::now();
-                        match key_event.state {
-                            ElementState::Pressed => {
-                                if !gs.pressed_lanes[lane] {
-                                    if let Some(audio_mgr) = &mut self.audio {
-                                        gs.handle_key_press(lane, os_timestamp, audio_mgr);
-                                    }
+                    if self.auto_play {
+                        return;
+                    }
+
+                    let Some(gs) = &mut self.game_state else {
+                        return;
+                    };
+
+                    let os_timestamp = std::time::Instant::now();
+                    match key_event.state {
+                        ElementState::Pressed => {
+                            if !gs.pressed_lanes[lane] {
+                                if let Some(audio_mgr) = &mut self.audio {
+                                    gs.handle_key_press(lane, os_timestamp, audio_mgr);
                                 }
                             }
-                            ElementState::Released => {
-                                gs.handle_key_release(lane, os_timestamp);
-                            }
+                        }
+                        ElementState::Released => {
+                            gs.handle_key_release(lane, os_timestamp);
                         }
                     }
                 } else if key_event.state == ElementState::Pressed {
