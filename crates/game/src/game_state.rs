@@ -1104,8 +1104,12 @@ impl GameState {
         self.active_notes
             .retain(|note| note.target_time_ms >= cleanup_threshold);
 
-        self.active_long_notes
-            .retain(|long_note| render_time <= long_note.tail_time_ms);
+        let bad_window_release = crate::gameplay::judgment::bad_window_ms_release(bpm);
+        self.active_long_notes.retain(|ln| {
+            // Keep if the note is still "alive" (not yet judged as release or missed)
+            // and hasn't passed the point where it's definitely a miss.
+            !ln.dead && (render_time - ln.tail_time_ms) <= bad_window_release + 100.0
+        });
     }
 
     /// Process audio triggers for the current game time.
@@ -1330,15 +1334,13 @@ impl GameState {
         let mut flare_lanes_to_kill: Vec<usize> = Vec::new();
 
         for ln in &mut self.active_long_notes {
-            if ln.judged && ln.tail_judgment.is_none() && render_time >= ln.tail_time_ms {
-                if ln.holding {
-                    ln.holding = false;
-                    let j = judge_release((render_time - ln.tail_time_ms).abs(), bpm);
-                    ln.tail_judgment = Some(j);
-                    self.stats.record_judgment(j, false, self.difficulty);
-                    flare_lanes_to_kill.push(ln.lane);
-                    judgments_to_add.push(PendingJudgment::new(j, ln.lane, render_time));
-                } else {
+            // If the note hasn't been judged as a release yet, and the tail has passed the Bad window
+            if ln.judged && ln.tail_judgment.is_none() {
+                let tail_diff = render_time - ln.tail_time_ms;
+                let bad_window_release = crate::gameplay::judgment::bad_window_ms_release(bpm);
+
+                if tail_diff > bad_window_release {
+                    // Player either never released or released too late
                     ln.tail_judgment = Some(JudgmentType::Miss);
                     self.stats
                         .record_judgment(JudgmentType::Miss, false, self.difficulty);
@@ -1348,8 +1350,8 @@ impl GameState {
                         ln.lane,
                         render_time,
                     ));
+                    ln.dead = true;
                 }
-                ln.dead = true;
             }
         }
 
@@ -1483,7 +1485,22 @@ impl GameState {
                         .stats
                         .record_judgment(judgment, has_pill, self.difficulty);
                     ln.head_judgment = Some(effective);
-                    ln.holding = true;
+
+                    // Tap Dependency: If initial tap is Miss, or Bad (and not saved by pill),
+                    // the release is immediately marked as a Miss.
+                    if effective == JudgmentType::Miss {
+                        ln.tail_judgment = Some(JudgmentType::Miss);
+                        self.stats.record_judgment(JudgmentType::Miss, false, self.difficulty);
+                        ln.holding = false;
+                        ln.dead = true;
+                    } else if effective == JudgmentType::Bad {
+                        ln.tail_judgment = Some(JudgmentType::Miss);
+                        self.stats.record_judgment(JudgmentType::Miss, false, self.difficulty);
+                        ln.holding = false;
+                        ln.dead = true;
+                    } else {
+                        ln.holding = true;
+                    }
                     log::debug!(
                         "[INPUT]   *** HIT LONG! Judgment: {:?} (raw: {:?}), diff={:.2}ms ***",
                         effective,
@@ -1531,9 +1548,8 @@ impl GameState {
         None
     }
 
-    /// Handle key release for a lane. Only tracks the released state.
-    /// Release judgment for long note tails happens in process_judgments().
-    #[allow(unused_variables)]
+    /// Handle key release for a lane.
+    /// If a long note is being held, it judges the release immediately.
     pub fn handle_key_release(
         &mut self,
         lane: usize,
@@ -1541,8 +1557,32 @@ impl GameState {
     ) -> Option<JudgmentType> {
         if lane < 7 {
             self.pressed_lanes[lane] = false;
-            // Kill flare on key release (matching original game behavior)
             self.kill_longflare(lane);
+
+            let current_time = self.game_time_ms();
+            let bpm = self.clock.bpm() as f64;
+
+            if let Some(ln) = self.active_long_notes.iter_mut().find(|ln| ln.lane == lane && ln.holding) {
+                ln.holding = false;
+                ln.dead = true;
+
+                let time_diff = current_time - ln.tail_time_ms;
+                let judgment = judge_release(time_diff, bpm);
+
+                let has_pill = self.stats.pill_count > 0;
+                let effective = self.stats.record_judgment(judgment, has_pill, self.difficulty);
+
+                ln.tail_judgment = Some(effective);
+
+                self.clear_pending_judgments();
+                self.pending_judgments.push(PendingJudgment::new(
+                    effective,
+                    lane,
+                    current_time,
+                ));
+
+                return Some(effective);
+            }
         }
         None
     }
