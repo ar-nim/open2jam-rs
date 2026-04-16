@@ -781,8 +781,23 @@ impl App {
         let mut textured_renderer = TexturedRenderer::new(&device, &queue, &config);
 
         // Try to load the skin XML and build atlas
-        let skin_dir = std::path::Path::new("resources");
-        let (atlas, skin, skin_scale) = Self::load_skin(&device, &queue, skin_dir);
+        let root_dir = if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+            // During 'cargo run', manifest_dir is '.../crates/game'. 
+            // We need to go up to the workspace root to find /assets.
+            std::path::PathBuf::from(manifest_dir)
+                .parent()
+                .and_then(|p| p.parent())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+        } else {
+            // In production, assets are expected to be relative to the executable.
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|parent| parent.to_path_buf()))
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+        };
+        let skin_dir = root_dir.join("assets").join("skins").join("default");
+        let (atlas, skin, skin_scale) = Self::load_skin(&device, &queue, skin_dir.as_path());
 
         if let Some(ref atlas) = atlas {
             textured_renderer.set_atlas(&device, atlas);
@@ -2023,6 +2038,7 @@ fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
     // Embed fonts directly into the binary
+    // Path is relative to this file: crates/game/src/engine.rs -> root/assets/fonts/
     let inter_data = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
     let noto_data = include_bytes!("../../../assets/fonts/NotoSansCJKsc-Regular.otf");
 
