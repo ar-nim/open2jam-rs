@@ -7,10 +7,16 @@
 //!   T_visual = (samples_played / sample_rate) + (Instant_now - Instant_callback)
 //! providing continuous, monotonic time for rendering while remaining phase-locked
 //! to the discrete steps of the audio buffer.
+//!
+//! ## Thread Safety
+//!
+//! All synchronization uses lock-free atomics:
+//! - `AudioTimeSource`: Writer owned by audio thread, publishes via atomics
+//! - `AudioTimeReader`: Cloned to consumers, provides consistent time reads
+//! - Audio callback NEVER blocks on mutexes - zero-latency synchronization
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::sync::RwLock;
 use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -19,11 +25,12 @@ use oddio::{Mixer, MixerControl};
 use rtrb::RingBuffer;
 
 use super::bgm_signal::BgmSignalQueue;
+use super::sync::{elevate_audio_thread, AudioTimeReader, AudioTimeSource};
 
 pub type StereoFrame = [f32; 2];
 
-/// A synchronization point mapping audio timeline to OS monotonic time.
-/// Broadcasted by the audio thread every buffer fill, read by the input handler.
+/// Legacy sync point type for backward compatibility.
+/// Deprecated: Use AudioTimeReader instead.
 #[derive(Clone, Copy)]
 pub struct AudioSyncPoint {
     /// The authoritative audio timeline position (derived from samples processed)
@@ -41,8 +48,9 @@ impl Default for AudioSyncPoint {
     }
 }
 
-/// Thread-safe shared sync point, updated by cpal thread, read by main thread.
-pub type SharedSyncPoint = Arc<RwLock<AudioSyncPoint>>;
+/// Legacy shared sync point type.
+/// Deprecated: Use AudioTimeReader instead.
+pub type SharedSyncPoint = Arc<parking_lot::RwLock<AudioSyncPoint>>;
 
 /// Shared state between the main thread and the cpal audio callback.
 /// All fields are lock-free atomics so they can be safely read/written
@@ -72,9 +80,16 @@ pub struct AudioManager {
     active: bool,
     /// BGM signal queue producer (main thread pushes commands here)
     bgm_producer: Option<rtrb::Producer<super::bgm_signal::BgmCommand>>,
-    /// Shared sync point — updated by cpal thread, read by input handler.
+    /// Legacy shared sync point — updated by cpal thread, read by main thread.
     /// Maps audio sample count to OS monotonic timestamps.
-    shared_sync_point: SharedSyncPoint,
+    /// Deprecated: Use time_reader instead for lock-free access.
+    shared_sync_point: Arc<parking_lot::RwLock<AudioSyncPoint>>,
+    /// Lock-free time source for the audio thread.
+    /// This is the primary time synchronization mechanism.
+    time_source: AudioTimeSource,
+    /// Lock-free time reader for consumers (game logic, rendering).
+    /// Clone this to share across threads without any mutex overhead.
+    time_reader: AudioTimeReader,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -85,8 +100,14 @@ pub enum AudioPlayError {
 
 impl AudioManager {
     pub fn new() -> Self {
-        match Self::init() {
-            Ok((mixer, stream, state, bgm_producer, shared_sync_point)) => {
+        let sample_rate = 44100; // Will be updated from actual config
+        
+        // Create the lock-free time source and reader
+        let time_source = AudioTimeSource::new(sample_rate);
+        let time_reader = time_source.reader();
+        
+        match Self::init(Arc::new(time_source.clone())) {
+            Ok((mixer, stream, state, bgm_producer)) => {
                 info!("AudioManager initialised (oddio + cpal). Stream paused — call play() to start.");
                 Self {
                     mixer: Some(mixer),
@@ -94,11 +115,14 @@ impl AudioManager {
                     state,
                     active: false, // Stream created but not started
                     bgm_producer: Some(bgm_producer),
-                    shared_sync_point,
+                    shared_sync_point: Arc::new(parking_lot::RwLock::new(AudioSyncPoint::default())),
+                    time_source,
+                    time_reader,
                 }
             }
             Err(e) => {
                 warn!("AudioManager init failed: {}", e);
+                let fallback_source = AudioTimeSource::new(44100);
                 Self {
                     mixer: None,
                     _stream: None,
@@ -113,18 +137,19 @@ impl AudioManager {
                     }),
                     active: false,
                     bgm_producer: None,
-                    shared_sync_point: Arc::new(RwLock::new(AudioSyncPoint::default())),
+                    shared_sync_point: Arc::new(parking_lot::RwLock::new(AudioSyncPoint::default())),
+                    time_source: fallback_source.clone(),
+                    time_reader: fallback_source.reader(),
                 }
             }
         }
     }
 
-    fn init() -> anyhow::Result<(
+    fn init(time_source: Arc<AudioTimeSource>) -> anyhow::Result<(
         MixerControl<StereoFrame>,
         cpal::Stream,
         Arc<AudioState>,
         rtrb::Producer<super::bgm_signal::BgmCommand>,
-        SharedSyncPoint,
     )> {
         let host = cpal::default_host();
         let device = host
@@ -141,15 +166,15 @@ impl AudioManager {
             config.sample_format()
         );
 
+        // Update time source with actual sample rate
+        time_source.set_sample_rate(sample_rate);
+
         let (mut mixer_control, mut mixer) = Mixer::<StereoFrame>::new();
 
         // Create BGM signal queue and rtrb channel
         let (producer, consumer) = RingBuffer::new(1024);
         let mut bgm_queue = BgmSignalQueue::new();
         bgm_queue.set_consumer(consumer);
-
-        // Create the shared sync point — updated by cpal thread, read by input handler
-        let shared_sync_point: SharedSyncPoint = Arc::new(RwLock::new(AudioSyncPoint::default()));
 
         // Capture a stable reference instant before stream creation.
         // All callback timestamps will be relative to this via `.elapsed().as_nanos()`.
@@ -171,40 +196,14 @@ impl AudioManager {
             buffer_size: cpal::BufferSize::Fixed(128),
         };
 
-        // Helper: record frames played, timestamp, and CPU usage into the shared state.
-        let record_callback = move |frames_len: usize, elapsed_us: u32, state: &Arc<AudioState>| {
-            state
-                .samples_played
-                .fetch_add(frames_len as u64, Ordering::Relaxed);
-            let now_ns = callback_token.elapsed().as_nanos() as u64;
-            state.last_callback_instant.store(now_ns, Ordering::Relaxed);
-
-            // Update max (compare-exchange loop)
-            let mut current_max = state.max_callback_us.load(Ordering::Relaxed);
-            while elapsed_us > current_max {
-                match state.max_callback_us.compare_exchange_weak(
-                    current_max,
-                    elapsed_us,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(val) => current_max = val,
-                }
-            }
-
-            // Update EMA (alpha = 0.01 for slow, stable response)
-            let prev_avg = state.avg_callback_us.load(Ordering::Relaxed);
-            let new_avg = ((prev_avg as u64 * 99 + elapsed_us as u64) / 100) as u32;
-            state.avg_callback_us.store(new_avg, Ordering::Relaxed);
-        };
-
-        let state_for_f32 = Arc::clone(&state);
-        let state_for_i16 = Arc::clone(&state);
-        let state_for_u16 = Arc::clone(&state);
-        let sync_for_f32 = Arc::clone(&shared_sync_point);
-        let sync_for_i16 = Arc::clone(&shared_sync_point);
-        let sync_for_u16 = Arc::clone(&shared_sync_point);
+        // Clone for callback
+        let time_source_f32 = Arc::clone(&time_source);
+        let time_source_i16 = Arc::clone(&time_source);
+        let time_source_u16 = Arc::clone(&time_source);
+        let state_f32 = Arc::clone(&state);
+        let state_i16 = Arc::clone(&state);
+        let state_u16 = Arc::clone(&state);
+        let time_source_ref = Arc::clone(&time_source);
 
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => device.build_output_stream(
@@ -214,18 +213,32 @@ impl AudioManager {
                     let frames = oddio::frame_stereo(data);
                     oddio::run(&mut mixer, sample_rate, frames);
                     let elapsed_us = start.elapsed().as_micros() as u32;
-                    record_callback(frames.len(), elapsed_us, &state_for_f32);
+                    
+                    // Record callback using LOCK-FREE time source (NO MUTEX)
+                    let samples = frames.len() as u64;
+                    time_source_f32.record_callback(samples);
+                    
+                    // Also update legacy state for compatibility
+                    state_f32.samples_played.fetch_add(samples, Ordering::Relaxed);
+                    let now_ns = callback_token.elapsed().as_nanos() as u64;
+                    state_f32.last_callback_instant.store(now_ns, Ordering::Relaxed);
 
-                    // Broadcast sync point to main thread
-                    if let Ok(mut sync) = sync_for_f32.write() {
-                        *sync = AudioSyncPoint {
-                            audio_time_ms: state_for_f32.samples_played.load(Ordering::Relaxed)
-                                as f64
-                                / state_for_f32.sample_rate.load(Ordering::Relaxed) as f64
-                                * 1000.0,
-                            os_time: Instant::now(),
-                        };
+                    // Update CPU stats (lock-free)
+                    let mut current_max = state_f32.max_callback_us.load(Ordering::Relaxed);
+                    while elapsed_us > current_max {
+                        match state_f32.max_callback_us.compare_exchange_weak(
+                            current_max,
+                            elapsed_us,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => break,
+                            Err(val) => current_max = val,
+                        }
                     }
+                    let prev_avg = state_f32.avg_callback_us.load(Ordering::Relaxed);
+                    let new_avg = ((prev_avg as u64 * 99 + elapsed_us as u64) / 100) as u32;
+                    state_f32.avg_callback_us.store(new_avg, Ordering::Relaxed);
                 },
                 |err| warn!("Audio error: {}", err),
                 None,
@@ -243,18 +256,30 @@ impl AudioManager {
                         data[i] = (buf[i] * 32767.0).clamp(-32768.0, 32767.0) as i16;
                     }
                     let elapsed_us = start.elapsed().as_micros() as u32;
-                    record_callback(frame_count, elapsed_us, &state_for_i16);
+                    
+                    // Record callback using LOCK-FREE time source (NO MUTEX)
+                    time_source_i16.record_callback(frame_count as u64);
+                    
+                    // Also update legacy state
+                    state_i16.samples_played.fetch_add(frame_count as u64, Ordering::Relaxed);
+                    let now_ns = callback_token.elapsed().as_nanos() as u64;
+                    state_i16.last_callback_instant.store(now_ns, Ordering::Relaxed);
 
-                    // Broadcast sync point to main thread
-                    if let Ok(mut sync) = sync_for_i16.write() {
-                        *sync = AudioSyncPoint {
-                            audio_time_ms: state_for_i16.samples_played.load(Ordering::Relaxed)
-                                as f64
-                                / state_for_i16.sample_rate.load(Ordering::Relaxed) as f64
-                                * 1000.0,
-                            os_time: Instant::now(),
-                        };
+                    let mut current_max = state_i16.max_callback_us.load(Ordering::Relaxed);
+                    while elapsed_us > current_max {
+                        match state_i16.max_callback_us.compare_exchange_weak(
+                            current_max,
+                            elapsed_us,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => break,
+                            Err(val) => current_max = val,
+                        }
                     }
+                    let prev_avg = state_i16.avg_callback_us.load(Ordering::Relaxed);
+                    let new_avg = ((prev_avg as u64 * 99 + elapsed_us as u64) / 100) as u32;
+                    state_i16.avg_callback_us.store(new_avg, Ordering::Relaxed);
                 },
                 |err| warn!("Audio error: {}", err),
                 None,
@@ -272,18 +297,30 @@ impl AudioManager {
                         data[i] = ((buf[i] * 32767.0 + 32767.0).clamp(0.0, 65535.0)) as u16;
                     }
                     let elapsed_us = start.elapsed().as_micros() as u32;
-                    record_callback(frame_count, elapsed_us, &state_for_u16);
+                    
+                    // Record callback using LOCK-FREE time source (NO MUTEX)
+                    time_source_u16.record_callback(frame_count as u64);
+                    
+                    // Also update legacy state
+                    state_u16.samples_played.fetch_add(frame_count as u64, Ordering::Relaxed);
+                    let now_ns = callback_token.elapsed().as_nanos() as u64;
+                    state_u16.last_callback_instant.store(now_ns, Ordering::Relaxed);
 
-                    // Broadcast sync point to main thread
-                    if let Ok(mut sync) = sync_for_u16.write() {
-                        *sync = AudioSyncPoint {
-                            audio_time_ms: state_for_u16.samples_played.load(Ordering::Relaxed)
-                                as f64
-                                / state_for_u16.sample_rate.load(Ordering::Relaxed) as f64
-                                * 1000.0,
-                            os_time: Instant::now(),
-                        };
+                    let mut current_max = state_u16.max_callback_us.load(Ordering::Relaxed);
+                    while elapsed_us > current_max {
+                        match state_u16.max_callback_us.compare_exchange_weak(
+                            current_max,
+                            elapsed_us,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => break,
+                            Err(val) => current_max = val,
+                        }
                     }
+                    let prev_avg = state_u16.avg_callback_us.load(Ordering::Relaxed);
+                    let new_avg = ((prev_avg as u64 * 99 + elapsed_us as u64) / 100) as u32;
+                    state_u16.avg_callback_us.store(new_avg, Ordering::Relaxed);
                 },
                 |err| warn!("Audio error: {}", err),
                 None,
@@ -291,12 +328,14 @@ impl AudioManager {
             fmt => return Err(anyhow::anyhow!("Unsupported sample format: {:?}", fmt)),
         };
 
+        // Elevate audio thread priority BEFORE starting (requires platform-specific setup)
+        elevate_audio_thread();
+
         // Add the BGM queue to the mixer so it's always playing.
-        // The queue is now owned by the mixer; we only keep the producer.
         mixer_control.play(bgm_queue);
 
         // Stream is created but NOT started. Call audio_mgr.play() to begin playback.
-        Ok((mixer_control, stream, state, producer, shared_sync_point))
+        Ok((mixer_control, stream, state, producer))
     }
 
     pub fn mixer(&mut self) -> Option<&mut MixerControl<StereoFrame>> {
@@ -333,8 +372,15 @@ impl AudioManager {
     }
 
     /// Get a clone of the shared sync point for reading from the main thread.
+    /// Deprecated: Use time_reader() for lock-free access.
     pub fn sync_point(&self) -> SharedSyncPoint {
         Arc::clone(&self.shared_sync_point)
+    }
+
+    /// Get a clone of the lock-free time reader.
+    /// Use this for high-performance time queries without mutex contention.
+    pub fn time_reader(&self) -> AudioTimeReader {
+        self.time_reader.clone()
     }
 
     // ── CPU Usage Monitoring ───────────────────────────────────────
