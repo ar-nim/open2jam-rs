@@ -3,19 +3,14 @@
 use serde::{Deserialize, Serialize};
 
 /// Scroll speed type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum SpeedType {
+    #[default]
     HiSpeed,
     XSpeed,
     WSpeed,
     RegulSpeed,
-}
-
-impl Default for SpeedType {
-    fn default() -> Self {
-        Self::HiSpeed
-    }
 }
 
 impl std::fmt::Display for SpeedType {
@@ -30,19 +25,14 @@ impl std::fmt::Display for SpeedType {
 }
 
 /// Lane channel modifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ChannelMod {
+    #[default]
     None,
     Random,
     Panic,
     Mirror,
-}
-
-impl Default for ChannelMod {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl std::fmt::Display for ChannelMod {
@@ -57,19 +47,14 @@ impl std::fmt::Display for ChannelMod {
 }
 
 /// Note visibility modifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum VisibilityMod {
+    #[default]
     None,
     Hidden,
     Sudden,
     Dark,
-}
-
-impl Default for VisibilityMod {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl std::fmt::Display for VisibilityMod {
@@ -84,21 +69,16 @@ impl std::fmt::Display for VisibilityMod {
 }
 
 /// VSync mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum VSyncMode {
     /// AutoVsync — standard vsync, limits to refresh rate.
+    #[default]
     On,
     /// Mailbox — triple-buffered vsync, lower latency, no tearing.
     Fast,
     /// AutoNoVsync — no vsync, unlimited framerate.
     Off,
-}
-
-impl Default for VSyncMode {
-    fn default() -> Self {
-        Self::On
-    }
 }
 
 impl std::fmt::Display for VSyncMode {
@@ -112,20 +92,15 @@ impl std::fmt::Display for VSyncMode {
 }
 
 /// FPS limiter setting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum FpsLimiter {
-    Unlimited,
+    #[default]
     X1,
     X2,
     X4,
     X8,
-}
-
-impl Default for FpsLimiter {
-    fn default() -> Self {
-        Self::X1
-    }
+    Unlimited,
 }
 
 impl std::fmt::Display for FpsLimiter {
@@ -141,18 +116,13 @@ impl std::fmt::Display for FpsLimiter {
 }
 
 /// UI theme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum UiTheme {
+    #[default]
     Automatic,
     Light,
     Dark,
-}
-
-impl Default for UiTheme {
-    fn default() -> Self {
-        Self::Automatic
-    }
 }
 
 impl std::fmt::Display for UiTheme {
@@ -166,18 +136,13 @@ impl std::fmt::Display for UiTheme {
 }
 
 /// Difficulty selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Difficulty {
     Easy,
+    #[default]
     Normal,
     Hard,
-}
-
-impl Default for Difficulty {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 /// Complete game options, mirroring Java GameOptions.
@@ -274,7 +239,6 @@ pub struct GameOptions {
     /// GUI theme.
     #[serde(default)]
     pub ui_theme: UiTheme,
-
 
     /// Haste Mode: advanced timing mode.
     #[serde(default)]

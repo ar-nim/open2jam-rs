@@ -1,4 +1,4 @@
-//! Keyboard key bindings for 4–8 key layouts.
+//! Keyboard key bindings for the 7-note K7 layout.
 
 use serde::{Deserialize, Serialize};
 
@@ -10,104 +10,53 @@ pub struct KeyMap {
     pub key: String,
 }
 
-/// Key bindings for a specific layout (K4, K5, K6, K7, K8).
+/// Key bindings for the K7 layout (7 lanes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyBindings {
+    /// Lane 1–7 note keys.
+    #[serde(default)]
+    pub k7: KeyboardLayout,
+}
+
+impl Default for KeyBindings {
+    fn default() -> Self {
+        // Default K7: S D F Space J K L
+        Self {
+            k7: KeyboardLayout {
+                lanes: vec![
+                    KeyMap { key: "KeyS".into() },
+                    KeyMap { key: "KeyD".into() },
+                    KeyMap { key: "KeyF".into() },
+                    KeyMap { key: "Space".into() },
+                    KeyMap { key: "KeyJ".into() },
+                    KeyMap { key: "KeyK".into() },
+                    KeyMap { key: "KeyL".into() },
+                ],
+            },
+        }
+    }
+}
+
+/// Key bindings for a specific layout.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyboardLayout {
-    /// Lane 1–8 note keys.
+    /// Lane note keys.
     #[serde(default)]
     pub lanes: Vec<KeyMap>,
 }
 
 impl Default for KeyboardLayout {
     fn default() -> Self {
-        // Default K7: S D F Space J K L
         Self {
             lanes: vec![
                 KeyMap { key: "KeyS".into() },
                 KeyMap { key: "KeyD".into() },
                 KeyMap { key: "KeyF".into() },
-                KeyMap {
-                    key: "Space".into(),
-                },
+                KeyMap { key: "Space".into() },
                 KeyMap { key: "KeyJ".into() },
                 KeyMap { key: "KeyK".into() },
                 KeyMap { key: "KeyL".into() },
             ],
-        }
-    }
-}
-
-/// All keyboard configurations, keyed by layout name.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeyBindings {
-    #[serde(default)]
-    pub k4: KeyboardLayout,
-    #[serde(default = "default_k5")]
-    pub k5: KeyboardLayout,
-    #[serde(default = "default_k6")]
-    pub k6: KeyboardLayout,
-    #[serde(default)]
-    pub k7: KeyboardLayout,
-    #[serde(default = "default_k8")]
-    pub k8: KeyboardLayout,
-}
-
-fn default_k5() -> KeyboardLayout {
-    KeyboardLayout {
-        lanes: vec![
-            KeyMap { key: "KeyD".into() },
-            KeyMap {
-                key: "Space".into(),
-            },
-            KeyMap { key: "KeyK".into() },
-            KeyMap { key: "KeyL".into() },
-            KeyMap {
-                key: "Semicolon".into(),
-            },
-        ],
-    }
-}
-
-fn default_k6() -> KeyboardLayout {
-    KeyboardLayout {
-        lanes: vec![
-            KeyMap { key: "KeyD".into() },
-            KeyMap { key: "KeyF".into() },
-            KeyMap {
-                key: "Space".into(),
-            },
-            KeyMap { key: "KeyJ".into() },
-            KeyMap { key: "KeyK".into() },
-            KeyMap { key: "KeyL".into() },
-        ],
-    }
-}
-
-fn default_k8() -> KeyboardLayout {
-    KeyboardLayout {
-        lanes: vec![
-            KeyMap { key: "KeyA".into() },
-            KeyMap { key: "KeyS".into() },
-            KeyMap { key: "KeyD".into() },
-            KeyMap { key: "KeyF".into() },
-            KeyMap {
-                key: "Space".into(),
-            },
-            KeyMap { key: "KeyJ".into() },
-            KeyMap { key: "KeyK".into() },
-            KeyMap { key: "KeyL".into() },
-        ],
-    }
-}
-
-impl Default for KeyBindings {
-    fn default() -> Self {
-        Self {
-            k4: KeyboardLayout::default(),
-            k5: default_k5(),
-            k6: default_k6(),
-            k7: KeyboardLayout::default(),
-            k8: default_k8(),
         }
     }
 }
