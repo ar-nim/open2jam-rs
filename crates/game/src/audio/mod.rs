@@ -4,6 +4,8 @@ pub mod bgm_signal;
 pub mod cache;
 pub mod chart_audio;
 pub mod manager;
+pub mod sync;
 pub mod trigger;
 
 pub use manager::{AudioManager, AudioSyncPoint, SharedSyncPoint};
+pub use sync::{AudioTimeReader, AudioTimeSource, elevate_audio_thread};
