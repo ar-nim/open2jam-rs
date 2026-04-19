@@ -1100,6 +1100,7 @@ impl GameState {
     }
 
     /// Remove notes that are well past the judgment line and no longer hittable.
+    /// Uses swap_remove instead of retain to avoid O(N) memory shifts.
     /// Keeps notes for the full judgment window (bad_window + safety margin)
     /// so that late key presses can still find and judge them.
     pub fn cleanup_notes(&mut self) {
@@ -1109,15 +1110,33 @@ impl GameState {
         // Keep notes for the full judgment window + 100ms safety margin
         let cleanup_threshold = render_time - bad_window - 100.0;
 
-        self.active_notes
-            .retain(|note| note.target_time_ms >= cleanup_threshold);
+        // Swap-remove instead of retain: O(1) per removal instead of O(N) shift
+        let mut write_idx = 0;
+        for read_idx in 0..self.active_notes.len() {
+            if self.active_notes[read_idx].target_time_ms >= cleanup_threshold {
+                if write_idx != read_idx {
+                    self.active_notes.swap(write_idx, read_idx);
+                }
+                write_idx += 1;
+            }
+        }
+        self.active_notes.truncate(write_idx);
 
         let bad_window_release = crate::gameplay::judgment::bad_window_ms_release(bpm);
-        self.active_long_notes.retain(|ln| {
-            // Always keep the note until its tail has passed the judgment line (plus window),
-            // regardless of whether it was judged, missed, or released early.
-            (render_time - ln.tail_time_ms) <= bad_window_release + 100.0
-        });
+        // Same swap-remove optimization for long notes
+        let mut write_idx = 0;
+        for read_idx in 0..self.active_long_notes.len() {
+            let ln = &self.active_long_notes[read_idx];
+            // Always keep the note until its tail has passed the judgment line (plus window)
+            let should_keep = (render_time - ln.tail_time_ms) <= bad_window_release + 100.0;
+            if should_keep {
+                if write_idx != read_idx {
+                    self.active_long_notes.swap(write_idx, read_idx);
+                }
+                write_idx += 1;
+            }
+        }
+        self.active_long_notes.truncate(write_idx);
     }
 
     /// Process audio triggers for the current game time.

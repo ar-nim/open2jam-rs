@@ -1,6 +1,8 @@
 //! Sound cache resource mapping sample IDs to pre-decoded `oddio::Frames`.
+//!
+//! Optimized for O(1) lookup using a flat array indexed by sample_id.
+//! OJN sample IDs are typically sequential (0-999 for WAV, 1000+ for OGG).
 
-use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -10,22 +12,31 @@ use oddio::Frames;
 use open2jam_rs_parsers::ojm::{SampleEntry, SampleMap};
 
 // ---------------------------------------------------------------------------
-// Sound cache
+// Sound cache with flat array for O(1) lookup
 // ---------------------------------------------------------------------------
+
+/// Maximum sample ID we expect to encounter.
+/// WAV samples: 0-999, OGG samples: 1000+
+const MAX_SAMPLE_ID: usize = 4096;
 
 #[derive(Debug)]
 pub struct SoundCache {
-    sounds: HashMap<u32, Arc<Frames<[f32; 2]>>>,
+    /// Flat array indexed by sample_id for O(1) lookup.
+    /// None = not loaded, Some = loaded sample.
+    sounds: Vec<Option<Arc<Frames<[f32; 2]>>>>,
     source_path: String,
     loaded: bool,
+    /// Count of actually loaded samples (for len())
+    loaded_count: usize,
 }
 
 impl Default for SoundCache {
     fn default() -> Self {
         Self {
-            sounds: HashMap::new(),
+            sounds: Vec::with_capacity(MAX_SAMPLE_ID),
             source_path: String::new(),
             loaded: false,
+            loaded_count: 0,
         }
     }
 }
@@ -39,28 +50,53 @@ impl SoundCache {
         self.loaded
     }
 
+    /// Get a sound by sample_id.
+    /// O(1) lookup - no hashing, no pointer chasing.
+    #[inline]
     pub fn get_sound(&self, sample_id: u32) -> Option<&Arc<Frames<[f32; 2]>>> {
-        self.sounds.get(&sample_id)
+        let idx = sample_id as usize;
+        if idx < self.sounds.len() {
+            self.sounds[idx].as_ref()
+        } else {
+            None
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.sounds.len()
+        self.loaded_count
     }
 
     pub fn is_empty(&self) -> bool {
-        self.sounds.is_empty()
+        self.loaded_count == 0
     }
 
     pub fn populate_from_sample_map(&mut self, sample_map: SampleMap, source_path: &str) {
         self.source_path = source_path.to_string();
+        
+        // Find the maximum sample_id to size our array
+        let max_id = sample_map.keys().max().copied().unwrap_or(0) as usize;
+        let size = (max_id + 1).max(MAX_SAMPLE_ID);
+        
+        // Pre-allocate with None slots
+        self.sounds = vec![None; size];
+        self.loaded_count = 0;
+        
         let total = sample_map.len();
         let mut decoded = 0;
         let mut failed = 0;
 
         for (id, entry) in sample_map {
+            let idx = id as usize;
+            
+            // Expand array if needed (unlikely but safe)
+            if idx >= self.sounds.len() {
+                self.sounds.resize(idx + 1, None);
+            }
+            
             match sample_entry_to_frames(&entry) {
                 Ok(frames) => {
-                    self.sounds.insert(id, frames);
+                    self.sounds[idx] = Some(frames);
+                    self.loaded_count += 1;
                     decoded += 1;
                 }
                 Err(e) => {
@@ -72,8 +108,8 @@ impl SoundCache {
 
         self.loaded = true;
         info!(
-            "SoundCache: {}/{} decoded ({} skipped) from {}",
-            decoded, total, failed, source_path
+            "SoundCache: {}/{} decoded ({} skipped) from {} (array size: {})",
+            decoded, total, failed, source_path, self.sounds.len()
         );
     }
 }
