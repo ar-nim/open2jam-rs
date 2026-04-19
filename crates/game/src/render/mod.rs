@@ -5,3 +5,4 @@ pub mod hud;
 pub mod pipeline;
 pub mod states;
 pub mod textured_renderer;
+pub mod thread;
