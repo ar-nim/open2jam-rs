@@ -39,7 +39,7 @@ pub fn ui_modifiers(ui: &mut egui::Ui, opts: &mut GameOptions) {
             ui.add(
                 DragValue::new(&mut opts.speed_multiplier)
                     .speed(0.1)
-                    .clamp_range(0.5..=10.0),
+                    .range(0.5..=10.0),
             );
         }
     });

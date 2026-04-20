@@ -46,12 +46,10 @@ const OJN_GENRE_NAMES: [&str; 11] = [
     "Etc",         // 10
 ];
 
-/// Convert an OJN genre ID to a display name.
-fn genre_name(genre_id: u32) -> &'static str {
-    OJN_GENRE_NAMES
-        .get(genre_id as usize)
-        .copied()
-        .unwrap_or("Etc")
+/// Convert an OJN genre ID to a display name. Returns None for out-of-bounds IDs.
+#[allow(clippy::redundant_closure)]
+fn genre_name(genre_id: u32) -> Option<&'static str> {
+    OJN_GENRE_NAMES.get(genre_id as usize).copied()
 }
 
 // ---------------------------------------------------------------------------
@@ -168,7 +166,7 @@ impl SongColumn {
         }
     }
 
-    fn to_sort_column(&self) -> Option<SongSortColumn> {
+    fn to_sort_column(self) -> Option<SongSortColumn> {
         match self {
             SongColumn::Name => Some(SongSortColumn::Name),
             SongColumn::Artist => Some(SongSortColumn::Artist),
@@ -801,6 +799,7 @@ impl MenuApp {
             }
         }
 
+        #[allow(deprecated)]
         egui::Panel::top("tab_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.active_tab, MenuTab::MusicSelect, "Music Select");
@@ -813,6 +812,7 @@ impl MenuApp {
             });
         });
 
+        #[allow(deprecated)]
         egui::Panel::bottom("bottom_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.separator();
@@ -828,6 +828,7 @@ impl MenuApp {
             });
         });
 
+        #[allow(deprecated)]
         egui::CentralPanel::default().show(ctx, |ui| match self.active_tab {
             MenuTab::MusicSelect => self.ui_music_select(ui),
             MenuTab::Configuration => self.ui_configuration(ui, ctx),
@@ -981,7 +982,7 @@ impl MenuApp {
                 // Genre filter dropdown
                 let genre_label = self
                     .genre_filter
-                    .map(|id| genre_name(id))
+                    .and_then(genre_name)
                     .unwrap_or("All genres");
                 ui.horizontal(|ui| {
                     ui.label("Genre:");
@@ -995,7 +996,7 @@ impl MenuApp {
                                 self.genre_filter = None;
                             }
                             for gid in 0..=10u32 {
-                                let name = genre_name(gid);
+                                let name = genre_name(gid).unwrap_or("Etc");
                                 if ui
                                     .selectable_label(self.genre_filter == Some(gid), name)
                                     .clicked()
@@ -1042,7 +1043,7 @@ impl MenuApp {
                     // Update cache (only rebuilds when inputs change), then copy for use in closure
                     let sorted_indices: Vec<usize> = self.update_sorted_cache().to_vec();
                     let mut sel = self.selected_song;
-                    let mut sd = self.selected_difficulty;
+                    let sd = self.selected_difficulty;
                     let di = self.selected_difficulty.min(2);
 
                     let all_cols = [
@@ -1146,7 +1147,8 @@ impl MenuApp {
                                         if self.songs[orig_idx].genre == 0 {
                                             ui.label("");
                                         } else {
-                                            ui.label(genre_name(self.songs[orig_idx].genre));
+                                            let gname = genre_name(self.songs[orig_idx].genre).unwrap_or("Etc");
+                                            ui.label(gname);
                                         }
                                     }
                                 });
@@ -1240,7 +1242,8 @@ impl MenuApp {
                                         dur as u32 % 60
                                     ));
                                     if song.genre != 0 {
-                                        ui.label(format!("Genre: {}", genre_name(song.genre)));
+                                        let gname = genre_name(song.genre).unwrap_or("Etc");
+                                        ui.label(format!("Genre: {}", gname));
                                     }
                                 });
                             });
@@ -1269,6 +1272,7 @@ impl MenuApp {
                         if let Some(song) = &selected_song_data {
                             let dn = ["Easy", "Normal", "Hard"];
                             egui::Grid::new("diff_grid").striped(true).show(ui, |ui| {
+                                #[allow(clippy::needless_range_loop)]
                                 for i in 0..3usize {
                                     let level = song.levels[i];
                                     let notes = song.note_counts[i];
@@ -1324,7 +1328,7 @@ impl MenuApp {
                                     &mut self.config.game_options.speed_multiplier,
                                 )
                                 .speed(0.5)
-                                .clamp_range(0.5..=10.0)
+                                .range(0.5..=10.0)
                                 .custom_formatter(|n, _| format!("{:.1}", n))
                                 .custom_parser(|s| s.parse::<f64>().ok()),
                             );
