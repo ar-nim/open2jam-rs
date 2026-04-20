@@ -8,14 +8,18 @@
 //! - No CLI args → launches menu
 //! - `<path.ojn>` → launches game directly
 
+pub mod app;
+pub mod assets;
 pub mod audio;
-pub mod engine;
+pub mod event_loop;
 pub mod game_state;
 pub mod gameplay;
+pub mod gpu;
+pub mod input;
 pub mod render;
-pub mod resources;
+pub mod render_game;
 pub mod skin;
-pub mod test_harness;
+pub mod types;
 
 pub use open2jam_rs_core as core;
 pub use open2jam_rs_menu as menu;

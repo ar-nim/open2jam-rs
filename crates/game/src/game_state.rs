@@ -9,13 +9,13 @@ use log::{info, warn};
 use crate::audio::cache::SoundCache;
 use crate::audio::manager::AudioManager;
 use crate::audio::trigger::{AudioTriggerEvent, AudioTriggerSystem};
+use crate::gameplay::clock::Clock;
 use crate::gameplay::judgment::{
     cool_score_with_jam_bonus, good_score_with_jam_bonus, judge_release, judge_tap_note,
     JudgmentType,
 };
 use crate::gameplay::scroll::scroll_travel_time_ms;
 use crate::gameplay::timing_data::TimingData;
-use crate::resources::clock::Clock;
 use crate::skin::prefab::NotePrefabs;
 use open2jam_rs_parsers::xml::Resources as SkinResources;
 use open2jam_rs_parsers::{Chart, NoteType, TimedEvent};
@@ -1447,21 +1447,47 @@ impl GameState {
     }
 
     /// Triggers the next available sound for a lane when no judgment is made.
-    fn trigger_sampler_sound(&self, lane: usize, audio_manager: &mut crate::audio::manager::AudioManager) {
+    fn trigger_sampler_sound(
+        &self,
+        lane: usize,
+        audio_manager: &mut crate::audio::manager::AudioManager,
+    ) {
         // 1. Check active tap notes
-        if let Some(note) = self.active_notes.iter().find(|n| n.lane == lane && !n.judged && !n.missed) {
+        if let Some(note) = self
+            .active_notes
+            .iter()
+            .find(|n| n.lane == lane && !n.judged && !n.missed)
+        {
             if let Some(sample_id) = note.sample_id {
-                self.play_sample(sample_id, note.target_time_ms, note.volume, note.pan, audio_manager);
-                log::debug!("[SAMPLER] Triggered next active note sample: id={}, lane={}", sample_id, lane);
+                self.play_sample(
+                    sample_id,
+                    note.target_time_ms,
+                    note.volume,
+                    note.pan,
+                    audio_manager,
+                );
+                log::debug!(
+                    "[SAMPLER] Triggered next active note sample: id={}, lane={}",
+                    sample_id,
+                    lane
+                );
                 return;
             }
         }
 
         // 2. Check active long notes
-        if let Some(ln) = self.active_long_notes.iter().find(|ln| ln.lane == lane && !ln.judged && !ln.missed) {
+        if let Some(ln) = self
+            .active_long_notes
+            .iter()
+            .find(|ln| ln.lane == lane && !ln.judged && !ln.missed)
+        {
             if let Some(sample_id) = ln.sample_id {
                 self.play_sample(sample_id, ln.head_time_ms, ln.volume, ln.pan, audio_manager);
-                log::debug!("[SAMPLER] Triggered next active long note sample: id={}, lane={}", sample_id, lane);
+                log::debug!(
+                    "[SAMPLER] Triggered next active long note sample: id={}, lane={}",
+                    sample_id,
+                    lane
+                );
                 return;
             }
         }
@@ -1469,12 +1495,28 @@ impl GameState {
         // 3. Look ahead into the chart events
         if let Some(note_event) = self.chart.events[self.next_event_idx..]
             .iter()
-            .filter_map(|e| if let TimedEvent::Note(n) = e { Some(n) } else { None })
-            .find(|n| n.channel.lane_index() == Some(lane)) 
+            .filter_map(|e| {
+                if let TimedEvent::Note(n) = e {
+                    Some(n)
+                } else {
+                    None
+                }
+            })
+            .find(|n| n.channel.lane_index() == Some(lane))
         {
             if let Some(sample_id) = note_event.sample_id {
-                self.play_sample(sample_id, note_event.time_ms, note_event.volume, note_event.pan, audio_manager);
-                log::debug!("[SAMPLER] Triggered future chart note sample: id={}, lane={}", sample_id, lane);
+                self.play_sample(
+                    sample_id,
+                    note_event.time_ms,
+                    note_event.volume,
+                    note_event.pan,
+                    audio_manager,
+                );
+                log::debug!(
+                    "[SAMPLER] Triggered future chart note sample: id={}, lane={}",
+                    sample_id,
+                    lane
+                );
             }
         }
     }
@@ -1488,7 +1530,7 @@ impl GameState {
         if lane >= 7 {
             return None;
         }
-        
+
         self.pressed_lanes[lane] = true;
 
         let press_time_ms = self.clock.game_time() as f64;
@@ -1509,10 +1551,14 @@ impl GameState {
                 let judgment = judge_tap_note(time_diff, bpm);
                 note.judged = true;
                 let has_pill = self.stats.pill_count > 0;
-                let effective = self.stats.record_judgment(judgment, has_pill, self.difficulty);
+                let effective = self
+                    .stats
+                    .record_judgment(judgment, has_pill, self.difficulty);
                 note.judgment_type = Some(effective);
-                
-                sample_to_play = note.sample_id.map(|id| (id, note.target_time_ms, note.volume, note.pan));
+
+                sample_to_play = note
+                    .sample_id
+                    .map(|id| (id, note.target_time_ms, note.volume, note.pan));
                 judgment_result = Some(effective);
                 break;
             }
@@ -1533,19 +1579,24 @@ impl GameState {
                     let judgment = judge_tap_note(time_diff, bpm);
                     ln.judged = true;
                     let has_pill = self.stats.pill_count > 0;
-                    let effective = self.stats.record_judgment(judgment, has_pill, self.difficulty);
+                    let effective = self
+                        .stats
+                        .record_judgment(judgment, has_pill, self.difficulty);
                     ln.head_judgment = Some(effective);
 
                     if effective == JudgmentType::Miss || effective == JudgmentType::Bad {
                         ln.tail_judgment = Some(JudgmentType::Miss);
-                        self.stats.record_judgment(JudgmentType::Miss, false, self.difficulty);
+                        self.stats
+                            .record_judgment(JudgmentType::Miss, false, self.difficulty);
                         ln.holding = false;
                         ln.dead = true;
                     } else {
                         ln.holding = true;
                     }
 
-                    sample_to_play = ln.sample_id.map(|id| (id, ln.head_time_ms, ln.volume, ln.pan));
+                    sample_to_play = ln
+                        .sample_id
+                        .map(|id| (id, ln.head_time_ms, ln.volume, ln.pan));
                     judgment_result = Some(effective);
                     break;
                 }
@@ -1557,14 +1608,14 @@ impl GameState {
 
         // 3. Perform side effects if a judgment was made
         if let Some(effective) = judgment_result {
-                if let Some((sample_id, target_time, volume, pan)) = sample_to_play {
-                    self.play_sample(sample_id, target_time, volume, pan, audio_manager);
-                }
+            if let Some((sample_id, target_time, volume, pan)) = sample_to_play {
+                self.play_sample(sample_id, target_time, volume, pan, audio_manager);
+            }
 
             if matches!(effective, JudgmentType::Cool | JudgmentType::Good) {
                 self.trigger_note_click_effect(lane, press_time_ms);
                 // For long notes, trigger flare if it's a head hit
-                // We can't easily know if it was a long note here without more state, 
+                // We can't easily know if it was a long note here without more state,
                 // but we can check if the note just became 'holding'.
                 // Actually, let's just re-check the notes for the flare.
                 for ln in &self.active_long_notes {
@@ -1575,17 +1626,14 @@ impl GameState {
                 }
             }
             self.clear_pending_judgments();
-            self.pending_judgments.push(PendingJudgment::new(
-                effective,
-                lane,
-                press_time_ms,
-            ));
+            self.pending_judgments
+                .push(PendingJudgment::new(effective, lane, press_time_ms));
             return Some(effective);
         }
 
         // 4. Sampler Mode: Fallback to the next available sound for this lane
         self.trigger_sampler_sound(lane, audio_manager);
-        
+
         None
     }
 
@@ -1603,7 +1651,11 @@ impl GameState {
             let current_time = self.game_time_ms();
             let bpm = self.clock.bpm() as f64;
 
-            if let Some(ln) = self.active_long_notes.iter_mut().find(|ln| ln.lane == lane && ln.holding) {
+            if let Some(ln) = self
+                .active_long_notes
+                .iter_mut()
+                .find(|ln| ln.lane == lane && ln.holding)
+            {
                 ln.holding = false;
                 ln.dead = true;
 
@@ -1611,16 +1663,15 @@ impl GameState {
                 let judgment = judge_release(time_diff, bpm);
 
                 let has_pill = self.stats.pill_count > 0;
-                let effective = self.stats.record_judgment(judgment, has_pill, self.difficulty);
+                let effective = self
+                    .stats
+                    .record_judgment(judgment, has_pill, self.difficulty);
 
                 ln.tail_judgment = Some(effective);
 
                 self.clear_pending_judgments();
-                self.pending_judgments.push(PendingJudgment::new(
-                    effective,
-                    lane,
-                    current_time,
-                ));
+                self.pending_judgments
+                    .push(PendingJudgment::new(effective, lane, current_time));
 
                 return Some(effective);
             }

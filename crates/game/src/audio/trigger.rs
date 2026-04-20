@@ -8,7 +8,7 @@ use log::{info, warn};
 
 use super::cache::SoundCache;
 use super::manager::AudioPlayError;
-use crate::resources::Clock;
+use crate::gameplay::clock::Clock;
 
 // ---------------------------------------------------------------------------
 // Audio trigger event
