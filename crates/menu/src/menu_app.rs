@@ -20,9 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::db::{self, CachedChart, ChartScanEntry, LibraryEntry};
 use crate::panels::display_config::ui_display_config;
-use crate::panels::key_bind_editor::{
-    handle_key_capture, ui_key_bind_editor, KeyCaptureState,
-};
+use crate::panels::key_bind_editor::{handle_key_capture, ui_key_bind_editor, KeyCaptureState};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -397,13 +395,11 @@ impl MenuApp {
         self.last_save_time = Instant::now();
     }
 
-    /// Populate monitor resolution info from egui viewport data.
-    /// Uses monitor_size (logical pixels) × native_pixels_per_point to get native resolution.
-    fn ensure_monitor_info(&mut self, ctx: &egui::Context) {
+    fn ensure_monitor_info(&mut self, ui: &mut egui::Ui) {
         if self.monitor_native_resolution.is_some() {
             return;
         }
-        ctx.input(|i| {
+        ui.ctx().input(|i| {
             let vp = i.viewport();
             if let Some(monitor_size) = vp.monitor_size {
                 let ppp = vp.native_pixels_per_point.unwrap_or(1.0);
@@ -719,9 +715,9 @@ impl MenuApp {
 impl MenuApp {
     /// Draw the menu UI using egui.
     /// Call this from the unified render loop when in Menu state.
-    pub fn ui(&mut self, ctx: &egui::Context) {
+    pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.maybe_save_config();
-        self.ensure_monitor_info(ctx);
+        self.ensure_monitor_info(ui);
 
         // Drain messages from background threads (non-blocking)
         while let Ok(msg) = self.msg_rx.try_recv() {
@@ -729,7 +725,7 @@ impl MenuApp {
                 AppMessage::SongsLoaded(entries) => {
                     self.songs = entries;
                     self.loading = false;
-                    ctx.request_repaint();
+                    ui.ctx().request_repaint();
                 }
                 AppMessage::LibrariesLoaded(libs) => {
                     let was_empty = self.libraries.is_empty();
@@ -741,15 +737,15 @@ impl MenuApp {
                         // During add-library flow, select the last (newest) library
                         self.selected_library = Some(self.libraries.len() - 1);
                     }
-                    ctx.request_repaint();
+                    ui.ctx().request_repaint();
                 }
                 AppMessage::PoolReady(pool) => {
                     self.db_pool = Some(pool);
-                    ctx.request_repaint();
+                    ui.ctx().request_repaint();
                 }
                 AppMessage::ScanProgress { scanned } => {
                     self.scan_progress_count = scanned;
-                    ctx.request_repaint();
+                    ui.ctx().request_repaint();
                 }
                 AppMessage::ScanComplete(entries) => {
                     self.songs = entries;
@@ -771,18 +767,18 @@ impl MenuApp {
                             }
                         });
                     }
-                    ctx.request_repaint();
+                    ui.ctx().request_repaint();
                 }
                 AppMessage::CoverLoaded { song_index, cover } => {
                     if let (Some((w, h, pixels)), Some(song)) =
                         (cover, self.songs.get_mut(song_index))
                     {
-                        song.cover = Some(ctx.load_texture(
+                        song.cover = Some(ui.ctx().load_texture(
                             "song_cover",
                             egui::ColorImage::from_rgba_unmultiplied([w, h], &pixels),
                             egui::TextureOptions::LINEAR,
                         ));
-                        ctx.request_repaint();
+                        ui.ctx().request_repaint();
                     }
                 }
                 AppMessage::Error(err) => {
@@ -790,13 +786,12 @@ impl MenuApp {
                     self.loading = false;
                     self.scan_in_progress = false;
                     log::error!("Background error: {err}");
-                    ctx.request_repaint();
+                    ui.ctx().request_repaint();
                 }
             }
         }
 
-        #[allow(deprecated)]
-        egui::Panel::top("tab_bar").show(ctx, |ui| {
+        egui::Panel::top("tab_bar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.active_tab, MenuTab::MusicSelect, "Music Select");
                 ui.selectable_value(
@@ -808,8 +803,7 @@ impl MenuApp {
             });
         });
 
-        #[allow(deprecated)]
-        egui::Panel::bottom("bottom_bar").show(ctx, |ui| {
+        egui::Panel::bottom("bottom_bar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.separator();
                 ui.checkbox(&mut self.config.game_options.autoplay, "Autoplay");
@@ -824,10 +818,9 @@ impl MenuApp {
             });
         });
 
-        #[allow(deprecated)]
-        egui::CentralPanel::default().show(ctx, |ui| match self.active_tab {
+        egui::CentralPanel::default().show_inside(ui, |ui| match self.active_tab {
             MenuTab::MusicSelect => self.ui_music_select(ui),
-            MenuTab::Configuration => self.ui_configuration(ui, ctx),
+            MenuTab::Configuration => self.ui_configuration(ui),
             MenuTab::Advanced => self.ui_advanced(ui),
         });
 
@@ -835,7 +828,7 @@ impl MenuApp {
         if self.active_tab == MenuTab::Configuration
             && matches!(self.key_capture_state, KeyCaptureState::Listening(_))
         {
-            ctx.input(|i| {
+            ui.input(|i| {
                 for event in &i.events {
                     if let egui::Event::Key {
                         key, pressed: true, ..
@@ -1143,7 +1136,8 @@ impl MenuApp {
                                         if self.songs[orig_idx].genre == 0 {
                                             ui.label("");
                                         } else {
-                                            let gname = genre_name(self.songs[orig_idx].genre).unwrap_or("Etc");
+                                            let gname = genre_name(self.songs[orig_idx].genre)
+                                                .unwrap_or("Etc");
                                             ui.label(gname);
                                         }
                                     }
@@ -1181,7 +1175,9 @@ impl MenuApp {
                             std::thread::spawn(move || {
                                 let cover = std::fs::read(Path::new(&root).join(&rel))
                                     .ok()
-                                    .and_then(|data| open2jam_rs_parsers::ojn::decode_bmp_thumbnail(&data));
+                                    .and_then(|data| {
+                                        open2jam_rs_parsers::ojn::decode_bmp_thumbnail(&data)
+                                    });
                                 tx.send(AppMessage::CoverLoaded {
                                     song_index: idx,
                                     cover,
@@ -1427,9 +1423,8 @@ impl MenuApp {
         });
     }
 
-    fn ui_configuration(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        // Ensure monitor info is populated before rendering display config
-        self.ensure_monitor_info(ctx);
+    fn ui_configuration(&mut self, ui: &mut egui::Ui) {
+        self.ensure_monitor_info(ui);
         let native_res = self.monitor_native_resolution;
 
         egui::ScrollArea::vertical()

@@ -461,17 +461,12 @@ impl ApplicationHandler for App {
                     winit::dpi::LogicalSize::new(1280.0, 720.0)
                 }
             } else {
-                winit::dpi::LogicalSize::new(
-                    self.display_width as f64,
-                    self.display_height as f64,
-                )
+                winit::dpi::LogicalSize::new(self.display_width as f64, self.display_height as f64)
             };
 
             info!(
                 "Creating window ({}x{}, fullscreen={}) and initialising wgpu...",
-                inner_size.width,
-                inner_size.height,
-                self.display_fullscreen
+                inner_size.width, inner_size.height, self.display_fullscreen
             );
 
             let mut attrs = winit::window::WindowAttributes::default()
@@ -807,7 +802,7 @@ impl App {
 
         // Try to load the skin XML and build atlas
         let root_dir = if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-            // During 'cargo run', manifest_dir is '.../crates/game'. 
+            // During 'cargo run', manifest_dir is '.../crates/game'.
             // We need to go up to the workspace root to find /assets.
             std::path::PathBuf::from(manifest_dir)
                 .parent()
@@ -837,7 +832,8 @@ impl App {
             };
 
         let hud_layout = skin.as_ref().and_then(|res| {
-            res.get_skin("o2jam").map(|s| crate::render::hud::HudLayout::from_skin(s))
+            res.get_skin("o2jam")
+                .map(|s| crate::render::hud::HudLayout::from_skin(s))
         });
 
         let gpu = GpuResources {
@@ -1170,8 +1166,8 @@ impl App {
                     .unwrap()
                     .take_egui_input(&render.window);
 
-                let full_output = self.egui_ctx.run(raw_input, |ctx| {
-                    menu.ui(ctx);
+                let full_output = self.egui_ctx.run_ui(raw_input, |ui| {
+                    menu.ui(ui);
                 });
 
                 let pixels_per_point = self.egui_ctx.pixels_per_point();

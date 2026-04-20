@@ -5,6 +5,7 @@ assets/skins/*
 # Qwen Code settings (user-specific)
 .qwen/
 .cline/
+.kilocode/
 
 # Temporary documentation (auto-generated, not for version control)
 tmpdocs/
