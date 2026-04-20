@@ -47,7 +47,6 @@ const OJN_GENRE_NAMES: [&str; 11] = [
 ];
 
 /// Convert an OJN genre ID to a display name. Returns None for out-of-bounds IDs.
-#[allow(clippy::redundant_closure)]
 fn genre_name(genre_id: u32) -> Option<&'static str> {
     OJN_GENRE_NAMES.get(genre_id as usize).copied()
 }
@@ -57,7 +56,6 @@ fn genre_name(genre_id: u32) -> Option<&'static str> {
 // ---------------------------------------------------------------------------
 
 /// Messages sent from background threads to the egui main thread.
-#[allow(dead_code)]
 enum AppMessage {
     /// Initial song load completed.
     SongsLoaded(Vec<SongEntry>),
@@ -132,7 +130,6 @@ enum MenuTab {
 
 /// Sort column for the song list table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 enum SongSortColumn {
     #[default]
     Name,
@@ -699,7 +696,6 @@ impl MenuApp {
     }
 
     /// Load songs from the database for a specific library (looks up path internally).
-    #[allow(dead_code)]
     fn load_library_songs(&mut self, library_id: i64) {
         // Get the root path from the libraries list
         let lib_root = self
@@ -1272,8 +1268,7 @@ impl MenuApp {
                         if let Some(song) = &selected_song_data {
                             let dn = ["Easy", "Normal", "Hard"];
                             egui::Grid::new("diff_grid").striped(true).show(ui, |ui| {
-                                #[allow(clippy::needless_range_loop)]
-                                for i in 0..3usize {
+                                for i in [0usize, 1, 2] {
                                     let level = song.levels[i];
                                     let notes = song.note_counts[i];
                                     if level == 0 && notes == 0 {
