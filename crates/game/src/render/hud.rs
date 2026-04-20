@@ -3,7 +3,7 @@
 //! Uses skin XML entity positions for all HUD elements.
 //! All positions match the entities defined in resources.xml o2jam skin.
 
-use crate::game_state::{GameState, PendingJudgment};
+use crate::game_state::{animations::PendingJudgment, GameState};
 use crate::gameplay::judgment::JudgmentType;
 use crate::render::atlas::{AtlasFrame, SkinAtlas};
 use crate::render::textured_renderer::TexturedRenderer;
@@ -63,7 +63,8 @@ impl HudLayout {
     /// Create HUD layout from skin XML entity positions.
     pub fn from_skin(skin: &SkinDef) -> Self {
         let get_pos = |id: &str| {
-            skin.entities.iter()
+            skin.entities
+                .iter()
                 .find(|e| e.id.as_deref() == Some(id))
                 .map(|e| (e.x as f32, e.y as f32))
                 .unwrap_or_else(|| {
@@ -323,7 +324,6 @@ pub fn draw_max_combo(
     skin_scale: (f32, f32),
     offset: (f32, f32),
 ) {
-
     let (sx, sy) = skin_scale;
     let (ox, oy) = offset;
     let x = ox + layout.max_combo_x * sx;
