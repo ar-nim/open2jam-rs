@@ -10,13 +10,19 @@ use encoding_rs::EUC_KR;
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
+// Type aliases
+// ---------------------------------------------------------------------------
+
+/// A raw measure block: (measure_num, channel_num, events_count, event_bytes)
+type MeasureBlock = (u32, u16, u16, Vec<[u8; 4]>);
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const OJN_SIGNATURE: u32 = 0x006E_6A6F; // "ojn\0" little-endian
 const HEADER_SIZE: usize = 300;
 pub const CHART_PADDING_MS: f64 = 0.0;
-const MEASURE_SIZE_FRACTION: f64 = 0.8; // 80% of viewport
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -257,7 +263,7 @@ fn decode_bmp(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
 
     // BMP rows are bottom-to-top and padded to 4-byte boundaries.
     // Each row size = ceil(width * bpp / 8) rounded up to 4 bytes.
-    let bytes_per_pixel = (bpp + 7) / 8;
+    let bytes_per_pixel = bpp.div_ceil(8);
     let row_stride = (width * bytes_per_pixel as usize + 3) & !3;
 
     if pixel_data.len() < row_stride * height_abs {
@@ -546,13 +552,14 @@ fn parse_difficulty_notes(
 }
 
 fn build_timed_events(
-    measure_blocks: &[(u32, u16, u16, Vec<[u8; 4]>)],
+    measure_blocks: &[MeasureBlock],
     base_bpm: f64,
 ) -> Result<Vec<TimedEvent>, OjnError> {
     let mut events: Vec<TimedEvent> = Vec::new();
 
     // Group blocks by measure number
-    let mut measures: HashMap<u32, Vec<(u16, u16, Vec<[u8; 4]>)>> = HashMap::new();
+    type MeasureEvents = Vec<(u16, u16, Vec<[u8; 4]>)>;
+    let mut measures: HashMap<u32, MeasureEvents> = HashMap::new();
     for &(measure, channel, events_count, ref event_data) in measure_blocks {
         measures
             .entry(measure)
@@ -749,7 +756,8 @@ mod tests {
 
     #[test]
     fn test_parse_ojn_header() {
-        let chart = parse_file("test_assets/o2ma100.ojn").expect("Failed to parse OJN file");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_assets/o2ma100.ojn");
+        let chart = parse_file(path).expect("Failed to parse OJN file");
         let h = &chart.header;
 
         assert_eq!(h.song_id, 100);
@@ -816,7 +824,8 @@ mod tests {
 
     #[test]
     fn test_chart_has_events() {
-        let chart = parse_file("test_assets/o2ma100.ojn").expect("Failed to parse OJN");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_assets/o2ma100.ojn");
+        let chart = parse_file(path).expect("Failed to parse OJN");
         let note_count = chart
             .events
             .iter()
@@ -879,7 +888,8 @@ mod tests {
 
     #[test]
     fn test_chart_has_measure_markers() {
-        let chart = parse_file("test_assets/o2ma100.ojn").expect("Failed to parse OJN");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_assets/o2ma100.ojn");
+        let chart = parse_file(path).expect("Failed to parse OJN");
         let measure_count = chart
             .events
             .iter()
