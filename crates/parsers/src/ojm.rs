@@ -128,7 +128,6 @@ fn parse_m30(data: &[u8]) -> Result<SampleMap, OjmError> {
     let encryption_flag = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
     let mut samples = SampleMap::new();
     let mut offset = HEADER_SIZE;
-    let mut sample_id: u32 = 0;
 
     while offset + SAMPLE_HEADER_SIZE <= data.len() {
         let name = decode_sample_name(&data[offset..offset + 32]);
@@ -181,7 +180,6 @@ fn parse_m30(data: &[u8]) -> Result<SampleMap, OjmError> {
                 extension: ext.to_string(),
             },
         );
-        sample_id += 1;
     }
 
     Ok(samples)
@@ -371,7 +369,8 @@ mod tests {
 
     #[test]
     fn test_parse_m30_file() {
-        let result = parse_file("test_assets/o2ma100.ojm");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_assets/o2ma100.ojm");
+        let result = parse_file(path);
         assert!(result.is_ok());
         let samples = result.unwrap();
         assert!(!samples.is_empty(), "M30 file should contain samples");
