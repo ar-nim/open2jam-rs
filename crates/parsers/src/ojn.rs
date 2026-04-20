@@ -897,4 +897,59 @@ mod tests {
             .count();
         assert!(measure_count > 0, "Chart should have measure markers");
     }
+
+    #[test]
+    fn test_long_notes_have_paired_end_times() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_assets/o2ma100.ojn");
+        let chart = parse_file(path).expect("Failed to parse OJN");
+        
+        // Find all long note heads (Hold type notes)
+        let long_notes: Vec<&NoteEvent> = chart
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                TimedEvent::Note(n) if n.note_type == NoteType::Hold => Some(n),
+                _ => None,
+            })
+            .collect();
+        
+        // If chart has long notes, all should have end_time_ms populated
+        if !long_notes.is_empty() {
+            for ln in &long_notes {
+                assert!(
+                    ln.end_time_ms.is_some(),
+                    "Long note at {:.1}ms should have paired end_time_ms, got None",
+                    ln.time_ms
+                );
+                if let Some(end) = ln.end_time_ms {
+                    assert!(
+                        end > ln.time_ms,
+                        "Long note end_time ({}) should be after start_time ({})",
+                        end,
+                        ln.time_ms
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_timed_events_are_sorted_by_time() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_assets/o2ma100.ojn");
+        let chart = parse_file(path).expect("Failed to parse OJN");
+        
+        let times: Vec<f64> = chart.events.iter().map(|e| match e {
+            TimedEvent::Note(n) => n.time_ms,
+            TimedEvent::BpmChange(b) => b.time_ms,
+            TimedEvent::Measure(m) => m.time_ms,
+        }).collect();
+        
+        for i in 1..times.len() {
+            assert!(
+                times[i] >= times[i - 1],
+                "Events should be sorted by time, but {} < {} at index {}",
+                times[i], times[i - 1], i
+            );
+        }
+    }
 }

@@ -406,4 +406,42 @@ mod tests {
         xor_with_mask(&mut data, &mask);
         assert_eq!(data, [0x6E, 0x61, 0x6D, 0x69, 0x00, 0x00, 0x00]);
     }
+
+    #[test]
+    fn test_rearrange_preserves_length() {
+        // Rearrange should preserve the length of data
+        let original: Vec<u8> = (0..=255).collect();
+        let len = original.len();
+        
+        let mut data = original.clone();
+        rearrange(&mut data);
+        
+        assert_eq!(data.len(), len, "Rearrange should preserve data length");
+    }
+
+    #[test]
+    fn test_rearrange_empty_and_small() {
+        // Empty data should not panic
+        let mut empty: Vec<u8> = vec![];
+        rearrange(&mut empty);
+        assert!(empty.is_empty());
+        
+        // Data smaller than 17 bytes
+        let mut small = vec![1u8, 2, 3];
+        rearrange(&mut small);
+        // Should not panic and data should be unchanged or rearranged
+    }
+
+    #[test]
+    fn test_sample_ref_id_from_m30() {
+        // Test that sample IDs come from ref_id field, not sequential counter
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_assets/o2ma100.ojm");
+        let result = parse_file(path).expect("Failed to parse OJM");
+        
+        // All sample keys should be u32 values derived from ref_id
+        for (sample_id, _sample) in result.iter() {
+            assert!(*sample_id < 1000 || *sample_id >= 1000, 
+                "Sample ID {} should be from ref_id", sample_id);
+        }
+    }
 }

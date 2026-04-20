@@ -440,4 +440,49 @@ mod tests {
         assert_eq!(skin.entities[0].id.as_deref(), Some("NOTE_1"));
         assert_eq!(skin.entities[0].sprite.as_deref(), Some("note1"));
     }
+
+    #[test]
+    fn test_entity_attributes_parsing() {
+        let xml = r#"<Resources><skin name="test" width="800" height="600" judgment_line="480">
+<layer>
+<entity id="NOTE_1" sprite="note1" x="100" y="200"/>
+<entity id="NOTE_2" sprite="note2" x="150" y="250"/>
+</layer>
+</skin></Resources>"#;
+        let resources = parse_str(xml, Path::new("")).expect("Failed to parse");
+        let skin = resources.get_skin("test").expect("Skin not found");
+        
+        // First entity has x, y attributes
+        let note1 = skin.entities.iter().find(|e| e.id.as_deref() == Some("NOTE_1")).unwrap();
+        assert_eq!(note1.x, 100);
+        assert_eq!(note1.y, 200);
+        assert_eq!(note1.sprite.as_deref(), Some("note1"));
+        
+        // Second entity
+        let note2 = skin.entities.iter().find(|e| e.id.as_deref() == Some("NOTE_2")).unwrap();
+        assert_eq!(note2.x, 150);
+        assert_eq!(note2.y, 250);
+    }
+
+    #[test]
+    fn test_multiple_skins_parsing() {
+        let xml = r#"<Resources>
+<skin name="skin1" width="800" height="600" judgment_line="480">
+<layer><entity id="A" sprite="a" x="0" y="0"/></layer>
+</skin>
+<skin name="skin2" width="1024" height="768" judgment_line="600">
+<layer><entity id="B" sprite="b" x="10" y="20"/></layer>
+</skin>
+</Resources>"#;
+        let resources = parse_str(xml, Path::new("")).expect("Failed to parse");
+        
+        let skin1 = resources.get_skin("skin1").expect("skin1 not found");
+        assert_eq!(skin1.width, 800);
+        assert_eq!(skin1.judgment_line_y, 480);
+        
+        let skin2 = resources.get_skin("skin2").expect("skin2 not found");
+        assert_eq!(skin2.width, 1024);
+        assert_eq!(skin2.height, 768);
+        assert_eq!(skin2.judgment_line_y, 600);
+    }
 }
