@@ -371,9 +371,8 @@ mod tests {
 
     #[test]
     fn test_parse_real_skin() {
-        let resources =
-            parse_file("resources/resources.xml")
-                .expect("Failed to parse skin XML");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/skins/default/resources.xml");
+        let resources = parse_file(path).expect("Failed to parse skin XML");
 
         // Check sprites are loaded
         assert!(
@@ -410,16 +409,16 @@ mod tests {
 
     #[test]
     fn test_parse_sprites() {
-        let resources =
-            parse_file("resources/resources.xml")
-                .expect("Failed to parse skin XML");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/skins/default/resources.xml");
+        let resources = parse_file(path).expect("Failed to parse skin XML");
 
         let head_white = resources
             .sprites
             .get("head_note_white")
             .expect("head_note_white not found");
         assert_eq!(head_white.frames.len(), 3); // 3 animation frames
-        assert_eq!(head_white.frame_speed_ms, 12);
+        // framespeed in XML is stored as-is (83 in this case)
+        assert_eq!(head_white.frame_speed_ms, 83);
 
         let judgment = resources
             .sprites
