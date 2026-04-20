@@ -27,7 +27,9 @@ impl Default for KeyBindings {
                     KeyMap { key: "KeyS".into() },
                     KeyMap { key: "KeyD".into() },
                     KeyMap { key: "KeyF".into() },
-                    KeyMap { key: "Space".into() },
+                    KeyMap {
+                        key: "Space".into(),
+                    },
                     KeyMap { key: "KeyJ".into() },
                     KeyMap { key: "KeyK".into() },
                     KeyMap { key: "KeyL".into() },
@@ -52,7 +54,9 @@ impl Default for KeyboardLayout {
                 KeyMap { key: "KeyS".into() },
                 KeyMap { key: "KeyD".into() },
                 KeyMap { key: "KeyF".into() },
-                KeyMap { key: "Space".into() },
+                KeyMap {
+                    key: "Space".into(),
+                },
                 KeyMap { key: "KeyJ".into() },
                 KeyMap { key: "KeyK".into() },
                 KeyMap { key: "KeyL".into() },

@@ -371,7 +371,10 @@ mod tests {
 
     #[test]
     fn test_parse_real_skin() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/skins/default/resources.xml");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/skins/default/resources.xml"
+        );
         let resources = parse_file(path).expect("Failed to parse skin XML");
 
         // Check sprites are loaded
@@ -409,7 +412,10 @@ mod tests {
 
     #[test]
     fn test_parse_sprites() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/skins/default/resources.xml");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/skins/default/resources.xml"
+        );
         let resources = parse_file(path).expect("Failed to parse skin XML");
 
         let head_white = resources
@@ -417,7 +423,7 @@ mod tests {
             .get("head_note_white")
             .expect("head_note_white not found");
         assert_eq!(head_white.frames.len(), 3); // 3 animation frames
-        // framespeed in XML is stored as-is (83 in this case)
+                                                // framespeed in XML is stored as-is (83 in this case)
         assert_eq!(head_white.frame_speed_ms, 83);
 
         let judgment = resources
@@ -451,15 +457,23 @@ mod tests {
 </skin></Resources>"#;
         let resources = parse_str(xml, Path::new("")).expect("Failed to parse");
         let skin = resources.get_skin("test").expect("Skin not found");
-        
+
         // First entity has x, y attributes
-        let note1 = skin.entities.iter().find(|e| e.id.as_deref() == Some("NOTE_1")).unwrap();
+        let note1 = skin
+            .entities
+            .iter()
+            .find(|e| e.id.as_deref() == Some("NOTE_1"))
+            .unwrap();
         assert_eq!(note1.x, 100);
         assert_eq!(note1.y, 200);
         assert_eq!(note1.sprite.as_deref(), Some("note1"));
-        
+
         // Second entity
-        let note2 = skin.entities.iter().find(|e| e.id.as_deref() == Some("NOTE_2")).unwrap();
+        let note2 = skin
+            .entities
+            .iter()
+            .find(|e| e.id.as_deref() == Some("NOTE_2"))
+            .unwrap();
         assert_eq!(note2.x, 150);
         assert_eq!(note2.y, 250);
     }
@@ -475,11 +489,11 @@ mod tests {
 </skin>
 </Resources>"#;
         let resources = parse_str(xml, Path::new("")).expect("Failed to parse");
-        
+
         let skin1 = resources.get_skin("skin1").expect("skin1 not found");
         assert_eq!(skin1.width, 800);
         assert_eq!(skin1.judgment_line_y, 480);
-        
+
         let skin2 = resources.get_skin("skin2").expect("skin2 not found");
         assert_eq!(skin2.width, 1024);
         assert_eq!(skin2.height, 768);

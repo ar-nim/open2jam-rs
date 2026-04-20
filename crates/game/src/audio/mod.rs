@@ -8,4 +8,4 @@ pub mod sync;
 pub mod trigger;
 
 pub use manager::{AudioManager, AudioSyncPoint, SharedSyncPoint};
-pub use sync::{AudioTimeReader, AudioTimeSource, elevate_audio_thread};
+pub use sync::{elevate_audio_thread, AudioTimeReader, AudioTimeSource};

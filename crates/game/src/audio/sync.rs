@@ -20,14 +20,16 @@ impl Clone for AtomicF64 {
 impl AtomicF64 {
     #[inline]
     pub fn new(val: f64) -> Self {
-        Self { bits: AtomicU64::new(val.to_bits()) }
+        Self {
+            bits: AtomicU64::new(val.to_bits()),
+        }
     }
-    
+
     #[inline]
     pub fn load(&self, order: Ordering) -> f64 {
         f64::from_bits(self.bits.load(order))
     }
-    
+
     #[inline]
     pub fn store(&self, val: f64, order: Ordering) {
         self.bits.store(val.to_bits(), order);
@@ -150,12 +152,12 @@ pub fn elevate_audio_thread() {
 #[cfg(target_os = "linux")]
 fn elevate_linux_audio_thread() {
     use std::ffi::c_int;
-    
+
     const SCHED_FIFO: c_int = 1;
     const SCHED_RR: c_int = 2;
-    
+
     let param = libc::sched_param { sched_priority: 50 };
-    
+
     unsafe {
         if libc::sched_setscheduler(0, SCHED_FIFO, &param) == 0 {
             log::info!("Audio thread: SCHED_FIFO priority 50");
@@ -201,7 +203,9 @@ mod libc {
 mod libc {
     pub use std::os::raw::c_int;
     #[repr(C)]
-    pub struct sched_param { pub sched_priority: c_int }
+    pub struct sched_param {
+        pub sched_priority: c_int,
+    }
     extern "C" {
         pub fn sched_setscheduler(pid: c_int, policy: c_int, param: *const sched_param) -> c_int;
         pub fn setpriority(which: c_int, who: c_int, prio: c_int) -> c_int;

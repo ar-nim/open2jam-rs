@@ -692,6 +692,7 @@ impl MenuApp {
     }
 
     /// Load songs from the database for a specific library (looks up path internally).
+    #[allow(dead_code)]
     fn load_library_songs(&mut self, library_id: i64) {
         // Get the root path from the libraries list
         let lib_root = self

@@ -8,5 +8,6 @@
 //! (`main.rs`) but compiled from the same crate.
 
 pub mod db;
+pub mod fonts;
 pub mod menu_app;
 pub mod panels;

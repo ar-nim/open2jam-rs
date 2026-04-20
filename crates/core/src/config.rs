@@ -217,9 +217,9 @@ mod tests {
     #[test]
     fn test_key_bindings_default() {
         use crate::key_bindings::*;
-        
+
         let bindings = KeyBindings::default();
-        
+
         // K7 should have 7 lanes (default)
         assert_eq!(bindings.k7.lanes.len(), 7);
         assert_eq!(bindings.k7.lanes[0].key, "KeyS");

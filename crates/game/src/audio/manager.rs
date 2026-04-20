@@ -101,11 +101,11 @@ pub enum AudioPlayError {
 impl AudioManager {
     pub fn new() -> Self {
         let sample_rate = 44100; // Will be updated from actual config
-        
+
         // Create the lock-free time source and reader
         let time_source = AudioTimeSource::new(sample_rate);
         let time_reader = time_source.reader();
-        
+
         match Self::init(Arc::new(time_source.clone())) {
             Ok((mixer, stream, state, bgm_producer)) => {
                 info!("AudioManager initialised (oddio + cpal). Stream paused — call play() to start.");
@@ -115,7 +115,9 @@ impl AudioManager {
                     state,
                     active: false, // Stream created but not started
                     bgm_producer: Some(bgm_producer),
-                    shared_sync_point: Arc::new(parking_lot::RwLock::new(AudioSyncPoint::default())),
+                    shared_sync_point: Arc::new(
+                        parking_lot::RwLock::new(AudioSyncPoint::default()),
+                    ),
                     time_source,
                     time_reader,
                 }
@@ -137,7 +139,9 @@ impl AudioManager {
                     }),
                     active: false,
                     bgm_producer: None,
-                    shared_sync_point: Arc::new(parking_lot::RwLock::new(AudioSyncPoint::default())),
+                    shared_sync_point: Arc::new(
+                        parking_lot::RwLock::new(AudioSyncPoint::default()),
+                    ),
                     time_source: fallback_source.clone(),
                     time_reader: fallback_source.reader(),
                 }
@@ -145,7 +149,9 @@ impl AudioManager {
         }
     }
 
-    fn init(time_source: Arc<AudioTimeSource>) -> anyhow::Result<(
+    fn init(
+        time_source: Arc<AudioTimeSource>,
+    ) -> anyhow::Result<(
         MixerControl<StereoFrame>,
         cpal::Stream,
         Arc<AudioState>,
@@ -213,15 +219,19 @@ impl AudioManager {
                     let frames = oddio::frame_stereo(data);
                     oddio::run(&mut mixer, sample_rate, frames);
                     let elapsed_us = start.elapsed().as_micros() as u32;
-                    
+
                     // Record callback using LOCK-FREE time source (NO MUTEX)
                     let samples = frames.len() as u64;
                     time_source_f32.record_callback(samples);
-                    
+
                     // Also update legacy state for compatibility
-                    state_f32.samples_played.fetch_add(samples, Ordering::Relaxed);
+                    state_f32
+                        .samples_played
+                        .fetch_add(samples, Ordering::Relaxed);
                     let now_ns = callback_token.elapsed().as_nanos() as u64;
-                    state_f32.last_callback_instant.store(now_ns, Ordering::Relaxed);
+                    state_f32
+                        .last_callback_instant
+                        .store(now_ns, Ordering::Relaxed);
 
                     // Update CPU stats (lock-free)
                     let mut current_max = state_f32.max_callback_us.load(Ordering::Relaxed);
@@ -256,14 +266,18 @@ impl AudioManager {
                         data[i] = (buf[i] * 32767.0).clamp(-32768.0, 32767.0) as i16;
                     }
                     let elapsed_us = start.elapsed().as_micros() as u32;
-                    
+
                     // Record callback using LOCK-FREE time source (NO MUTEX)
                     time_source_i16.record_callback(frame_count as u64);
-                    
+
                     // Also update legacy state
-                    state_i16.samples_played.fetch_add(frame_count as u64, Ordering::Relaxed);
+                    state_i16
+                        .samples_played
+                        .fetch_add(frame_count as u64, Ordering::Relaxed);
                     let now_ns = callback_token.elapsed().as_nanos() as u64;
-                    state_i16.last_callback_instant.store(now_ns, Ordering::Relaxed);
+                    state_i16
+                        .last_callback_instant
+                        .store(now_ns, Ordering::Relaxed);
 
                     let mut current_max = state_i16.max_callback_us.load(Ordering::Relaxed);
                     while elapsed_us > current_max {
@@ -297,14 +311,18 @@ impl AudioManager {
                         data[i] = ((buf[i] * 32767.0 + 32767.0).clamp(0.0, 65535.0)) as u16;
                     }
                     let elapsed_us = start.elapsed().as_micros() as u32;
-                    
+
                     // Record callback using LOCK-FREE time source (NO MUTEX)
                     time_source_u16.record_callback(frame_count as u64);
-                    
+
                     // Also update legacy state
-                    state_u16.samples_played.fetch_add(frame_count as u64, Ordering::Relaxed);
+                    state_u16
+                        .samples_played
+                        .fetch_add(frame_count as u64, Ordering::Relaxed);
                     let now_ns = callback_token.elapsed().as_nanos() as u64;
-                    state_u16.last_callback_instant.store(now_ns, Ordering::Relaxed);
+                    state_u16
+                        .last_callback_instant
+                        .store(now_ns, Ordering::Relaxed);
 
                     let mut current_max = state_u16.max_callback_us.load(Ordering::Relaxed);
                     while elapsed_us > current_max {

@@ -902,7 +902,7 @@ mod tests {
     fn test_long_notes_have_paired_end_times() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_assets/o2ma100.ojn");
         let chart = parse_file(path).expect("Failed to parse OJN");
-        
+
         // Find all long note heads (Hold type notes)
         let long_notes: Vec<&NoteEvent> = chart
             .events
@@ -912,7 +912,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        
+
         // If chart has long notes, all should have end_time_ms populated
         if !long_notes.is_empty() {
             for ln in &long_notes {
@@ -937,18 +937,24 @@ mod tests {
     fn test_timed_events_are_sorted_by_time() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_assets/o2ma100.ojn");
         let chart = parse_file(path).expect("Failed to parse OJN");
-        
-        let times: Vec<f64> = chart.events.iter().map(|e| match e {
-            TimedEvent::Note(n) => n.time_ms,
-            TimedEvent::BpmChange(b) => b.time_ms,
-            TimedEvent::Measure(m) => m.time_ms,
-        }).collect();
-        
+
+        let times: Vec<f64> = chart
+            .events
+            .iter()
+            .map(|e| match e {
+                TimedEvent::Note(n) => n.time_ms,
+                TimedEvent::BpmChange(b) => b.time_ms,
+                TimedEvent::Measure(m) => m.time_ms,
+            })
+            .collect();
+
         for i in 1..times.len() {
             assert!(
                 times[i] >= times[i - 1],
                 "Events should be sorted by time, but {} < {} at index {}",
-                times[i], times[i - 1], i
+                times[i],
+                times[i - 1],
+                i
             );
         }
     }

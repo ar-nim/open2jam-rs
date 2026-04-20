@@ -168,20 +168,20 @@ pub fn spawn_render_thread(
 ) -> RenderThreadHandle {
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = Arc::clone(&running);
-    
+
     let handle = thread::spawn(move || {
         info!("Render thread started");
-        
+
         let target_frame_us = frame_limiter.map(|fps| (1_000_000.0 / fps) as u64);
         let mut stats = RenderStats::default();
-        
+
         while running_clone.load(Ordering::Relaxed) {
             // Block waiting for a command
             let command = match command_queue.recv() {
                 Some(cmd) => cmd,
                 None => continue,
             };
-            
+
             match command {
                 RenderCommand::Shutdown => {
                     info!("Render thread received shutdown command");
@@ -196,16 +196,16 @@ pub fn spawn_render_thread(
                 RenderCommand::RenderFrame { frame, prepared_at } => {
                     let frame_start = Instant::now();
                     let queue_depth = command_queue.len();
-                    
+
                     // In a real implementation, this would:
                     // 1. Acquire surface texture
                     // 2. Execute render passes
                     // 3. Present
                     // For now, we just track stats
-                    
+
                     let render_us = frame_start.elapsed().as_micros() as u64;
                     stats.record_frame(render_us, queue_depth);
-                    
+
                     // Frame limiting: sleep if we're ahead of schedule
                     if let Some(target_us) = target_frame_us {
                         let elapsed = frame_start.elapsed().as_micros() as u64;
@@ -214,7 +214,7 @@ pub fn spawn_render_thread(
                             thread::sleep(std::time::Duration::from_micros(sleep_us));
                         }
                     }
-                    
+
                     // Log stats periodically
                     if stats.frames_rendered % 600 == 0 {
                         info!(
@@ -229,13 +229,13 @@ pub fn spawn_render_thread(
                 }
             }
         }
-        
+
         info!(
             "Render thread exiting: {} frames rendered, avg={}µs/frame",
             stats.frames_rendered, stats.avg_frame_us
         );
     });
-    
+
     RenderThreadHandle {
         running,
         join_handle: handle,
@@ -253,7 +253,7 @@ impl RenderThreadHandle {
     pub fn shutdown(&self) {
         self.running.store(false, Ordering::Relaxed);
     }
-    
+
     /// Wait for the render thread to finish.
     pub fn join(self) -> thread::Result<()> {
         self.join_handle.join()
@@ -263,10 +263,7 @@ impl RenderThreadHandle {
 /// Request a render frame on the render thread.
 /// This is a non-blocking operation - the command is queued and returns immediately.
 #[inline]
-pub fn request_render_frame(
-    queue: &RenderCommandQueue,
-    frame: u64,
-) -> bool {
+pub fn request_render_frame(queue: &RenderCommandQueue, frame: u64) -> bool {
     queue.push(RenderCommand::RenderFrame {
         frame,
         prepared_at: Instant::now(),
@@ -275,11 +272,7 @@ pub fn request_render_frame(
 
 /// Request a resize on the render thread.
 #[inline]
-pub fn request_resize(
-    queue: &RenderCommandQueue,
-    width: u32,
-    height: u32,
-) -> bool {
+pub fn request_resize(queue: &RenderCommandQueue, width: u32, height: u32) -> bool {
     queue.push(RenderCommand::Resize { width, height })
 }
 

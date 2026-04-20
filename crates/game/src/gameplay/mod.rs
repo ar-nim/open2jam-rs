@@ -1,5 +1,6 @@
 //! Gameplay subsystem exports.
 
+pub mod clock;
 pub mod judgment;
 pub mod modifiers;
 pub mod scroll;

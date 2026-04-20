@@ -72,27 +72,27 @@ impl SoundCache {
 
     pub fn populate_from_sample_map(&mut self, sample_map: SampleMap, source_path: &str) {
         self.source_path = source_path.to_string();
-        
+
         // Find the maximum sample_id to size our array
         let max_id = sample_map.keys().max().copied().unwrap_or(0) as usize;
         let size = (max_id + 1).max(MAX_SAMPLE_ID);
-        
+
         // Pre-allocate with None slots
         self.sounds = vec![None; size];
         self.loaded_count = 0;
-        
+
         let total = sample_map.len();
         let mut decoded = 0;
         let mut failed = 0;
 
         for (id, entry) in sample_map {
             let idx = id as usize;
-            
+
             // Expand array if needed (unlikely but safe)
             if idx >= self.sounds.len() {
                 self.sounds.resize(idx + 1, None);
             }
-            
+
             match sample_entry_to_frames(&entry) {
                 Ok(frames) => {
                     self.sounds[idx] = Some(frames);
@@ -109,7 +109,11 @@ impl SoundCache {
         self.loaded = true;
         info!(
             "SoundCache: {}/{} decoded ({} skipped) from {} (array size: {})",
-            decoded, total, failed, source_path, self.sounds.len()
+            decoded,
+            total,
+            failed,
+            source_path,
+            self.sounds.len()
         );
     }
 }
