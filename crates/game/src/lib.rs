@@ -11,7 +11,6 @@
 pub mod app;
 pub mod assets;
 pub mod audio;
-pub mod event_loop;
 pub mod game_state;
 pub mod gameplay;
 pub mod gpu;

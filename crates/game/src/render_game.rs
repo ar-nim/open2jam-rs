@@ -11,7 +11,7 @@ pub fn render_game(
     config_width: u32,
     config_height: u32,
     metrics: &RenderMetrics,
-    #[allow(unused_variables)] audio_mgr: &mut Option<crate::audio::manager::AudioManager>,
+    #[allow(unused_variables)] audio_mgr: Option<&mut crate::audio::manager::AudioManager>,
     #[allow(unused_variables)] game_start_instant: Option<std::time::Instant>,
     #[allow(unused_variables)] hybrid_clock_prev: &mut Option<f64>,
     #[allow(unused_variables)] hybrid_clock_prev_delta: &mut Option<f64>,
