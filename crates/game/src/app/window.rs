@@ -1,7 +1,7 @@
 use winit::dpi::LogicalSize;
 use winit::window::Fullscreen;
 
-use crate::types::AppMode;
+use open2jam_rs_core::orchestrator::AppMode;
 
 pub fn compute_inner_size(
     mode: AppMode,
@@ -36,7 +36,7 @@ pub fn build_window_attributes(
         .with_resizable(true)
         .with_inner_size(inner_size);
 
-    if mode == AppMode::Playing && fullscreen {
+    if mode == AppMode::Game && fullscreen {
         attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(None)));
     }
 

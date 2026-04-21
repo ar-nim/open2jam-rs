@@ -2,6 +2,7 @@ use crate::gpu::GpuResources;
 
 pub struct RenderCtx {
     pub window: winit::window::Window,
+    pub instance: wgpu::Instance,
     pub surface: Option<wgpu::Surface<'static>>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,

@@ -10,6 +10,7 @@ pub use game_ctx::GameCtx;
 pub use menu_ctx::MenuCtx;
 pub use render_ctx::RenderCtx;
 
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -22,7 +23,8 @@ use winit::keyboard::Key;
 use winit::window::{Window, WindowId};
 
 use crate::input;
-use crate::types::{AppMode, LaneIndex, RenderMetrics};
+use crate::types::{LaneIndex, RenderMetrics};
+use open2jam_rs_core::orchestrator::AppMode;
 
 pub struct App {
     ojn_path: Option<std::path::PathBuf>,
@@ -66,7 +68,7 @@ impl App {
         );
 
         let mode = if ojn_path.is_some() {
-            AppMode::Playing
+            AppMode::Game
         } else {
             AppMode::Menu
         };
@@ -77,7 +79,7 @@ impl App {
             None
         };
 
-        let game_ctx = if mode == AppMode::Playing {
+        let game_ctx = if mode == AppMode::Game {
             Some(GameCtx::new())
         } else {
             None
@@ -205,7 +207,7 @@ impl App {
     }
 
     fn init_wgpu(&mut self, window: Window) {
-        let (window, _, surface, _, device, queue, config) =
+        let (window, instance, surface, _, device, queue, config) =
             wgpu_init::init_wgpu(window, self.vsync_mode);
 
         let root_dir = if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
@@ -238,6 +240,7 @@ impl App {
 
         self.render_ctx = Some(RenderCtx {
             window,
+            instance,
             surface: Some(surface),
             device,
             queue,
@@ -286,7 +289,7 @@ impl App {
                     }
                 }
 
-                if self.mode != AppMode::Playing {
+                if self.mode != AppMode::Game {
                     return;
                 }
 
@@ -655,21 +658,41 @@ impl App {
             }
         }
 
-        let Some(ref surface) = render_ctx.surface else {
-            return false;
-        };
-        let surface_texture = match surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(st) => st,
-            wgpu::CurrentSurfaceTexture::Suboptimal(st) => st,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return false
-            }
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                surface.configure(&render_ctx.device, &render_ctx.config);
+        let surface_texture = {
+            let Some(surface) = render_ctx.surface.as_ref() else {
                 return false;
-            }
-            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Validation => {
-                return false
+            };
+            let result = surface.get_current_texture();
+            match result {
+                wgpu::CurrentSurfaceTexture::Success(st) => st,
+                wgpu::CurrentSurfaceTexture::Suboptimal(st) => st,
+                wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                    return false;
+                }
+                wgpu::CurrentSurfaceTexture::Outdated => {
+                    surface.configure(&render_ctx.device, &render_ctx.config);
+                    return false;
+                }
+                wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Validation => {
+                    let raw_display = render_ctx.window.display_handle().unwrap().as_raw();
+                    let raw_window = render_ctx.window.window_handle().unwrap().as_raw();
+                    let new_surface = unsafe {
+                        render_ctx.instance.create_surface_unsafe(
+                            wgpu::SurfaceTargetUnsafe::RawHandle {
+                                raw_display_handle: Some(raw_display),
+                                raw_window_handle: raw_window,
+                            },
+                        )
+                    }
+                    .expect("Failed to recreate surface after Lost");
+                    render_ctx.surface = Some(new_surface);
+                    render_ctx
+                        .surface
+                        .as_ref()
+                        .unwrap()
+                        .configure(&render_ctx.device, &render_ctx.config);
+                    return false;
+                }
             }
         };
 
