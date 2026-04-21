@@ -2771,6 +2771,30 @@ name = "open2jam-rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "env_logger",
+ "log",
+ "open2jam-rs-core",
+ "open2jam-rs-game",
+ "open2jam-rs-menu",
+]
+
+[[package]]
+name = "open2jam-rs-core"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "open2jam-rs-game"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "bytemuck",
  "cpal",
  "crossbeam",
@@ -2780,7 +2804,6 @@ dependencies = [
  "egui-winit",
  "egui_extras",
  "encoding_rs",
- "env_logger",
  "hound",
  "image",
  "lewton",
@@ -2805,18 +2828,6 @@ dependencies = [
  "walkdir",
  "wgpu",
  "winit",
-]
-
-[[package]]
-name = "open2jam-rs-core"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "log",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
 ]
 
 [[package]]

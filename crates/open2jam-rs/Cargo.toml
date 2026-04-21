@@ -1,0 +1,13 @@
+[package]
+name = "open2jam-rs"
+version = "0.1.0"
+edition = "2021"
+description = "O2Jam rhythm game port in Rust with wgpu + oddio"
+
+[dependencies]
+open2jam-rs-game = { path = "../open2jam-rs-game" }
+open2jam-rs-menu = { path = "../open2jam-rs-menu" }
+open2jam-rs-core = { path = "../open2jam-rs-core" }
+anyhow = "1"
+env_logger = "0.11"
+log = "0.4"

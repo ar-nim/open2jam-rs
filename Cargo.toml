@@ -1,8 +1,13 @@
 [workspace]
 members = [
-    "crates/core",
-    "crates/game",
-    "crates/parsers",
-    "crates/menu",
+    "crates/open2jam-rs",
+    "crates/open2jam-rs-core",
+    "crates/open2jam-rs-game",
+    "crates/open2jam-rs-menu",
+    "crates/open2jam-rs-parsers",
 ]
 resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = true

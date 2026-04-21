@@ -5,7 +5,7 @@ edition = "2021"
 description = "Parsers for OJN/OJM/XML for open2jam-rs"
 
 [dependencies]
-open2jam-rs-core = { path = "../core" }
+open2jam-rs-core = { path = "../open2jam-rs-core" }
 encoding_rs = "0.8"
 thiserror = "1"
 log = "0.4"
