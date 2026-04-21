@@ -7,10 +7,11 @@
 //! # Types
 //!
 //! - [`LaneIndex`] — newtype for validated lane indices (0–6)
-//! - [`AppMode`] — menu vs. game engine mode
 //! - [`RenderMetrics`] — spatial layout for game rendering
 //! - [`LoadingMessage`] — async loading result passed via mpsc
 //! - [`FrameLimiter`] — hybrid spin-sleep FPS limiter
+//!
+//! [`AppMode`][open2jam_rs_core::orchestrator::AppMode] lives in `core::orchestrator`.
 
 use mint::Vector2;
 
@@ -49,19 +50,6 @@ impl LaneIndex {
     pub fn index(self) -> usize {
         self.0 as usize
     }
-}
-
-// ---------------------------------------------------------------------------
-// AppMode
-// ---------------------------------------------------------------------------
-
-/// The current application mode: menu GUI or game engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AppMode {
-    /// Menu GUI: song library, configuration panels.
-    Menu,
-    /// Game engine: chart playback, note rendering, audio.
-    Playing,
 }
 
 // ---------------------------------------------------------------------------
@@ -212,23 +200,6 @@ mod tests {
             let c = LaneIndex::new(4).unwrap();
             assert_eq!(a, b);
             assert_ne!(a, c);
-        }
-    }
-
-    mod app_mode {
-        use super::*;
-
-        #[test]
-        fn app_mode_has_menu_and_playing() {
-            assert_eq!(AppMode::Menu, AppMode::Menu);
-            assert_eq!(AppMode::Playing, AppMode::Playing);
-            assert_ne!(AppMode::Menu, AppMode::Playing);
-        }
-
-        #[test]
-        fn app_mode_debug() {
-            assert!(format!("{:?}", AppMode::Menu).contains("Menu"));
-            assert!(format!("{:?}", AppMode::Playing).contains("Playing"));
         }
     }
 
