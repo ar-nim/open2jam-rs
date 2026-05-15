@@ -47,20 +47,5 @@ pub struct KeyboardLayout {
     pub lanes: Vec<KeyMap>,
 }
 
-impl Default for KeyboardLayout {
-    fn default() -> Self {
-        Self {
-            lanes: vec![
-                KeyMap { key: "KeyS".into() },
-                KeyMap { key: "KeyD".into() },
-                KeyMap { key: "KeyF".into() },
-                KeyMap {
-                    key: "Space".into(),
-                },
-                KeyMap { key: "KeyJ".into() },
-                KeyMap { key: "KeyK".into() },
-                KeyMap { key: "KeyL".into() },
-            ],
-        }
-    }
-}
+// Note: KeyboardLayout's default is derived from KeyBindings::default().
+// They must agree — see KeyBindings::default() for the canonical layout.
