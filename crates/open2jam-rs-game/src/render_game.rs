@@ -98,6 +98,12 @@ pub fn render_game(
                     }
 
                     for note in &state.active_notes {
+                        if note.target_time_ms < 10000.0 {
+                            eprintln!(
+                                "[RENDER] note.lane={}, prefab_x={}",
+                                note.lane, state.note_prefabs.lanes[note.lane].x
+                            );
+                        }
                         let y = gameplay::scroll::note_y_position_bpm_aware(
                             render_time,
                             note.target_time_ms,

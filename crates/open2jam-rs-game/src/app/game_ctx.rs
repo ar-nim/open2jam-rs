@@ -78,6 +78,7 @@ impl GameCtx {
         auto_play: bool,
         difficulty: open2jam_rs_core::Difficulty,
         skin_res: Option<open2jam_rs_parsers::xml::Resources>,
+        channel_modifier: open2jam_rs_core::game_options::ChannelMod,
     ) {
         if self.loading_state.is_some() {
             return;
@@ -97,6 +98,7 @@ impl GameCtx {
                 auto_play,
                 difficulty,
                 skin_res.as_ref(),
+                channel_modifier,
             );
             let _ = tx.send(LoadingMessage::GameLoaded(result));
         });

@@ -21,6 +21,7 @@ use crate::audio::manager::AudioManager;
 use crate::audio::trigger::AudioTriggerSystem;
 use crate::gameplay::clock::Clock;
 use crate::gameplay::judgment::{judge_release, judge_tap_note, JudgmentType};
+use crate::gameplay::modifiers::{Modifiers, PanicPrecomputed};
 use crate::gameplay::scroll::scroll_travel_time_ms;
 use crate::gameplay::timing_data::TimingData;
 use crate::skin::prefab::NotePrefabs;
@@ -112,6 +113,8 @@ pub struct GameState {
     /// BEFORE the render frame starts, so a local `prev_combo` variable would
     /// always see the already-incremented value.
     pub prev_frame_combo: u32,
+    /// Lane arrangement modifier (Mirror, Random, Panic)
+    pub modifiers: Modifiers,
 }
 
 impl GameState {
@@ -122,6 +125,7 @@ impl GameState {
         auto_play: bool,
         difficulty: open2jam_rs_core::Difficulty,
         skin_resources: Option<&SkinResources>,
+        channel_modifier: open2jam_rs_core::game_options::ChannelMod,
     ) -> Result<Self> {
         let ojn_path = ojn_path.as_ref();
         let dir = ojn_path
@@ -348,6 +352,13 @@ impl GameState {
         );
 
         let song_duration_ms = chart.header.duration_hard as f64 * 1000.0;
+        let chart_song_id = chart.header.song_id;
+        let panic_precomputed =
+            if channel_modifier == open2jam_rs_core::game_options::ChannelMod::Panic {
+                Some(PanicPrecomputed::build(&chart))
+            } else {
+                None
+            };
 
         Ok(Self {
             clock,
@@ -387,6 +398,11 @@ impl GameState {
             next_bgm_event_idx,
             bgm_lookahead_ms,
             prev_frame_combo: 0,
+            modifiers: Modifiers::new(
+                channel_modifier,
+                (chart_song_id as u64) ^ (difficulty as u64) ^ 0x2F9E4A3B,
+                panic_precomputed,
+            ),
         })
     }
 
@@ -616,15 +632,27 @@ impl GameState {
 
             if let TimedEvent::Note(note_event) = event {
                 if let Some(lane) = note_event.channel.lane_index() {
+                    let occupied_lanes: Vec<usize> = self
+                        .active_long_notes
+                        .iter()
+                        .filter(|ln| ln.tail_time_ms > note_event.time_ms)
+                        .map(|ln| ln.lane)
+                        .collect();
                     match note_event.note_type {
                         NoteType::Tap => {
-                            log::debug!(
-                                "[SPAWN] TAP note: lane={}, target={:.2}ms",
+                            let transformed_lane = self.modifiers.transform_lane(
                                 lane,
-                                note_event.time_ms
+                                note_event.measure,
+                                note_event.note_type,
+                                false,
+                                &occupied_lanes,
+                            );
+                            eprintln!(
+                                "[SPAWN] lane={}→{}, transformed_lane={}",
+                                lane, lane, transformed_lane
                             );
                             self.active_notes.push(ActiveNote {
-                                lane,
+                                lane: transformed_lane,
                                 target_time_ms: note_event.time_ms,
                                 sample_id: note_event.sample_id,
                                 volume: note_event.volume,
@@ -638,14 +666,22 @@ impl GameState {
                         NoteType::Hold => {
                             let end_time =
                                 note_event.end_time_ms.unwrap_or(note_event.time_ms + 500.0);
-                            log::debug!(
-                                "[SPAWN] HOLD note: lane={}, head={:.2}ms, tail={:.2}ms",
+                            let transformed_lane = self.modifiers.transform_lane(
                                 lane,
+                                note_event.measure,
+                                note_event.note_type,
+                                false,
+                                &occupied_lanes,
+                            );
+                            log::debug!(
+                                "[SPAWN] HOLD note: lane={}→{}, head={:.2}ms, tail={:.2}ms",
+                                lane,
+                                transformed_lane,
                                 note_event.time_ms,
                                 end_time
                             );
                             self.active_long_notes.push(ActiveLongNote {
-                                lane,
+                                lane: transformed_lane,
                                 head_time_ms: note_event.time_ms,
                                 tail_time_ms: end_time,
                                 sample_id: note_event.sample_id,
@@ -661,7 +697,23 @@ impl GameState {
                             spawned_count += 1;
                         }
                         NoteType::Release => {
-                            // Skip (already paired with HEAD during parsing)
+                            // Release: look up stored lane (channel locking) and clean up lane_lock.
+                            // Release events don't spawn a new entity — the tail is rendered by the
+                            // existing ActiveLongNote that was spawned at the hold head.
+                            let transformed_lane = self.modifiers.transform_lane(
+                                lane,
+                                note_event.measure,
+                                note_event.note_type,
+                                true,
+                                &occupied_lanes,
+                            );
+                            log::debug!(
+                                "[SPAWN] RELEASE: lane={}→{}, time={:.2}ms",
+                                lane,
+                                transformed_lane,
+                                note_event.time_ms
+                            );
+                            self.modifiers.clear_release(lane);
                         }
                     }
                 }

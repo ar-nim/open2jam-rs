@@ -406,6 +406,7 @@ impl App {
                                 self.auto_play,
                                 self.difficulty,
                                 skin_res,
+                                self.config.game_options.channel_modifier,
                             );
                         }
                     }
