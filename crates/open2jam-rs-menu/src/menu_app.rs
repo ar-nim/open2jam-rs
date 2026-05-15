@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -19,6 +20,18 @@ use open2jam_rs_parsers::ojn::parse_metadata_bytes;
 use sha2::{Digest, Sha256};
 
 use crate::db::{self, CachedChart, ChartScanEntry, LibraryEntry};
+
+/// Signal from the menu to the App that a chart should be played.
+/// Set by `play_selected_song`, consumed by the App after menu UI finishes.
+#[derive(Debug, Clone)]
+pub struct ChartToPlay {
+    pub path: PathBuf,
+    pub difficulty: open2jam_rs_core::Difficulty,
+    pub auto_play: bool,
+    pub scroll_speed: f64,
+    pub channel_modifier: open2jam_rs_core::game_options::ChannelMod,
+}
+
 use crate::panels::display_config::ui_display_config;
 use crate::panels::key_bind_editor::{handle_key_capture, ui_key_bind_editor, KeyCaptureState};
 
@@ -28,6 +41,20 @@ use crate::panels::key_bind_editor::{handle_key_capture, ui_key_bind_editor, Key
 
 /// How often to report scan progress (number of files between reports).
 const SCAN_PROGRESS_INTERVAL: usize = 100;
+
+/// Shared tokio multi-thread runtime for all background DB operations.
+/// Created once on first use and shared across all background threads.
+/// Uses 2 worker threads — enough for sqlite queries without excessive threading.
+fn db_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(2)
+            .build()
+            .expect("Failed to build shared tokio runtime")
+    })
+}
 
 /// OJN genre codes mapped to human-readable names.
 const OJN_GENRE_NAMES: [&str; 11] = [
@@ -225,6 +252,9 @@ pub struct MenuApp {
     cached_song_count: usize,
     cached_difficulty: usize,
 
+    /// Set by play_selected_song, consumed by App after menu UI returns.
+    pub chart_to_play: Option<ChartToPlay>,
+
     // Key capture state for the keyboard configuration editor
     key_capture_state: KeyCaptureState,
 
@@ -250,18 +280,7 @@ impl MenuApp {
         // This keeps new() fast (<1ms) — egui shows "Loading..." on first frame.
         let load_tx = tx.clone();
         std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    load_tx
-                        .send(AppMessage::Error(format!("tokio runtime: {e}")))
-                        .ok();
-                    return;
-                }
-            };
+            let rt = db_runtime();
 
             let db_path = Config::default_path()
                 .parent()
@@ -368,6 +387,7 @@ impl MenuApp {
             cached_genre_filter: None,
             cached_song_count: 0,
             cached_difficulty: 0,
+            chart_to_play: None,
             key_capture_state: KeyCaptureState::Idle,
             monitor_native_resolution: None,
         })
@@ -488,12 +508,30 @@ impl MenuApp {
         &self.cached_sorted
     }
 
-    fn play_selected_song(&self) {
+    fn play_selected_song(&mut self) {
         if let Some(idx) = self.selected_song {
             if let Some(song) = self.songs.get(idx) {
                 if let Some(chart) = song.charts.get(self.selected_difficulty) {
                     log::info!("PLAY: {}", chart.path.display());
-                    spawn_game(&chart.path, &self.config);
+                    let config = &self.config;
+                    let opts = &config.game_options;
+                    let scroll_speed = if opts.speed_type == open2jam_rs_core::game_options::SpeedType::HiSpeed {
+                        1.0 * opts.speed_multiplier as f64
+                    } else {
+                        1.0
+                    };
+                    let difficulty = match self.selected_difficulty {
+                        0 => open2jam_rs_core::Difficulty::Easy,
+                        1 => open2jam_rs_core::Difficulty::Normal,
+                        _ => open2jam_rs_core::Difficulty::Hard,
+                    };
+                    self.chart_to_play = Some(ChartToPlay {
+                        path: chart.path.clone(),
+                        difficulty,
+                        auto_play: config.game_options.autoplay,
+                        scroll_speed,
+                        channel_modifier: config.game_options.channel_modifier,
+                    });
                 }
             }
         }
@@ -520,17 +558,7 @@ impl MenuApp {
         self.scan_error = None;
 
         std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tx.send(AppMessage::Error(format!("tokio runtime: {e}")))
-                        .ok();
-                    return;
-                }
-            };
+            let rt = db_runtime();
 
             // Step 1: clear old cache
             if let Err(e) = rt.block_on(db::clear_cache(&pool, library_id)) {
@@ -580,17 +608,7 @@ impl MenuApp {
         self.scan_error = None;
 
         std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tx.send(AppMessage::Error(format!("tokio runtime: {e}")))
-                        .ok();
-                    return;
-                }
-            };
+            let rt = db_runtime();
 
             match rt.block_on(db::add_library(&pool, &root_path)) {
                 Ok(lib) => {
@@ -632,17 +650,7 @@ impl MenuApp {
         let tx = self.msg_tx.clone();
 
         std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tx.send(AppMessage::Error(format!("tokio runtime: {e}")))
-                        .ok();
-                    return;
-                }
-            };
+            let rt = db_runtime();
 
             if let Err(e) = rt.block_on(db::delete_library(&pool, library_id)) {
                 tx.send(AppMessage::Error(format!("delete library: {e}")))
@@ -667,17 +675,7 @@ impl MenuApp {
         let lib_root = lib_root.to_string();
 
         std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tx.send(AppMessage::Error(format!("tokio runtime: {e}")))
-                        .ok();
-                    return;
-                }
-            };
+            let rt = db_runtime();
 
             match rt.block_on(db::get_charts_for_library(&pool, library_id)) {
                 Ok(charts) => {
@@ -689,19 +687,6 @@ impl MenuApp {
                 }
             }
         });
-    }
-
-    /// Load songs from the database for a specific library (looks up path internally).
-    #[allow(dead_code)]
-    fn load_library_songs(&mut self, library_id: i64) {
-        // Get the root path from the libraries list
-        let lib_root = self
-            .libraries
-            .iter()
-            .find(|l| l.id == library_id)
-            .map(|l| l.root_path.clone())
-            .unwrap_or_default();
-        self.load_library_songs_from_path(library_id, &lib_root);
     }
 
     fn rescan_library(&mut self) {
@@ -758,13 +743,9 @@ impl MenuApp {
                         let pool = pool.clone();
                         let tx = self.msg_tx.clone();
                         std::thread::spawn(move || {
-                            let rt = tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build();
-                            if let Ok(rt) = rt {
-                                if let Ok(libs) = rt.block_on(db::get_all_libraries(&pool)) {
-                                    tx.send(AppMessage::LibrariesLoaded(libs)).ok();
-                                }
+                            let rt = db_runtime();
+                            if let Ok(libs) = rt.block_on(db::get_all_libraries(&pool)) {
+                                tx.send(AppMessage::LibrariesLoaded(libs)).ok();
                             }
                         });
                     }
@@ -1726,32 +1707,6 @@ pub fn group_charts_into_songs(charts: &[CachedChart], library_root: &str) -> Ve
         .collect()
 }
 
-fn spawn_game(chart_path: &std::path::Path, config: &Config) {
-    if let Ok(exe) = std::env::current_exe() {
-        let game_bin = exe.with_file_name("open2jam-rs");
-        let project_root = exe
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent());
-
-        let mut cmd = std::process::Command::new(&game_bin);
-        cmd.arg(chart_path);
-        if config.game_options.autoplay {
-            cmd.arg("--autoplay");
-        }
-
-        if let Some(root) = project_root {
-            cmd.current_dir(root);
-        }
-
-        match cmd.spawn() {
-            Ok(_) => log::info!("Launched game for: {}", chart_path.display()),
-            Err(e) => log::error!("Failed to launch game: {}", e),
-        }
-    }
-}
-
-/// Format a unix epoch timestamp as a human-readable "X ago" string.
 fn format_timestamp_age(ts: i64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
