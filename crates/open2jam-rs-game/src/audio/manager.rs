@@ -29,29 +29,6 @@ use super::sync::{elevate_audio_thread, AudioTimeReader, AudioTimeSource};
 
 pub type StereoFrame = [f32; 2];
 
-/// Legacy sync point type for backward compatibility.
-/// Deprecated: Use AudioTimeReader instead.
-#[derive(Clone, Copy)]
-pub struct AudioSyncPoint {
-    /// The authoritative audio timeline position (derived from samples processed)
-    pub audio_time_ms: f64,
-    /// The precise OS timestamp captured the moment the audio buffer was filled
-    pub os_time: Instant,
-}
-
-impl Default for AudioSyncPoint {
-    fn default() -> Self {
-        Self {
-            audio_time_ms: 0.0,
-            os_time: Instant::now(),
-        }
-    }
-}
-
-/// Legacy shared sync point type.
-/// Deprecated: Use AudioTimeReader instead.
-pub type SharedSyncPoint = Arc<parking_lot::RwLock<AudioSyncPoint>>;
-
 /// Shared state between the main thread and the cpal audio callback.
 /// All fields are lock-free atomics so they can be safely read/written
 /// from both threads.
@@ -80,10 +57,6 @@ pub struct AudioManager {
     active: bool,
     /// BGM signal queue producer (main thread pushes commands here)
     bgm_producer: Option<rtrb::Producer<super::bgm_signal::BgmCommand>>,
-    /// Legacy shared sync point — updated by cpal thread, read by main thread.
-    /// Maps audio sample count to OS monotonic timestamps.
-    /// Deprecated: Use time_reader instead for lock-free access.
-    shared_sync_point: Arc<parking_lot::RwLock<AudioSyncPoint>>,
     /// Lock-free time source for the audio thread.
     /// This is the primary time synchronization mechanism.
     time_source: AudioTimeSource,
@@ -115,9 +88,6 @@ impl AudioManager {
                     state,
                     active: false, // Stream created but not started
                     bgm_producer: Some(bgm_producer),
-                    shared_sync_point: Arc::new(
-                        parking_lot::RwLock::new(AudioSyncPoint::default()),
-                    ),
                     time_source,
                     time_reader,
                 }
@@ -139,9 +109,6 @@ impl AudioManager {
                     }),
                     active: false,
                     bgm_producer: None,
-                    shared_sync_point: Arc::new(
-                        parking_lot::RwLock::new(AudioSyncPoint::default()),
-                    ),
                     time_source: fallback_source.clone(),
                     time_reader: fallback_source.reader(),
                 }
@@ -387,12 +354,6 @@ impl AudioManager {
 
     pub fn state(&self) -> &Arc<AudioState> {
         &self.state
-    }
-
-    /// Get a clone of the shared sync point for reading from the main thread.
-    /// Deprecated: Use time_reader() for lock-free access.
-    pub fn sync_point(&self) -> SharedSyncPoint {
-        Arc::clone(&self.shared_sync_point)
     }
 
     /// Get a clone of the lock-free time reader.
