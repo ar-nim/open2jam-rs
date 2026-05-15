@@ -25,6 +25,7 @@ use winit::window::{Window, WindowId};
 use crate::input;
 use crate::types::{LaneIndex, RenderMetrics};
 use open2jam_rs_core::orchestrator::AppMode;
+use open2jam_rs_menu::menu_app::ChartToPlay;
 
 pub struct App {
     ojn_path: Option<std::path::PathBuf>,
@@ -156,6 +157,36 @@ impl App {
             .and_then(|r| r.window.current_monitor());
         self.frame_limiter =
             frame::setup_frame_limiter(self.vsync_mode, self.fps_limiter, monitor.as_ref());
+    }
+
+    /// Switch from Menu to Game mode with the selected chart.
+    /// Consumed by the App loop after the menu's `ui()` call returns.
+    fn start_game(&mut self, play: ChartToPlay) {
+        info!("Starting game: {}", play.path.display());
+        self.mode = AppMode::Game;
+        self.ojn_path = Some(play.path);
+        self.auto_play = play.auto_play;
+        self.scroll_speed = play.scroll_speed;
+        self.difficulty = play.difficulty;
+        self.config.game_options.channel_modifier = play.channel_modifier;
+
+        if self.game_ctx.is_none() {
+            self.game_ctx = Some(GameCtx::new());
+        }
+        if let Some(ref mut game_ctx) = self.game_ctx {
+            game_ctx.start_load_game_state = true;
+        }
+    }
+
+    /// Return to the menu after a game ends (song finished or Escape pressed).
+    fn switch_to_menu(&mut self) {
+        info!("Switching back to menu mode");
+        if let Some(ref mut game_ctx) = self.game_ctx {
+            game_ctx.cleanup();
+        }
+        self.game_ctx.take();
+        self.ojn_path.take();
+        self.mode = AppMode::Menu;
     }
 }
 
@@ -367,9 +398,8 @@ impl App {
                     }
                 } else if key_event.state == ElementState::Pressed {
                     if let Key::Named(NamedKey::Escape) = &key_event.logical_key {
-                        info!("Escape pressed, exiting...");
-                        self.cleanup();
-                        event_loop.exit();
+                        info!("Escape pressed, switching to menu");
+                        self.switch_to_menu();
                     }
                 }
             }
@@ -414,9 +444,11 @@ impl App {
 
                 let song_ended = self.render_frame();
                 if song_ended {
-                    info!("Song ended, exiting game loop");
-                    self.cleanup();
-                    event_loop.exit();
+                    info!("Song ended, switching to menu");
+                    self.switch_to_menu();
+                    if let Some(ref render_ctx) = self.render_ctx {
+                        render_ctx.window.request_redraw();
+                    }
                     return;
                 }
                 if let Some(ref render_ctx) = self.render_ctx {
@@ -546,6 +578,14 @@ impl App {
 
                         render_ctx.queue.submit(Some(encoder.finish()));
                         surface_texture.present();
+                    }
+                }
+            }
+            // Check if the menu selected a chart to play (in-process mode switch)
+            if let Some(ref mut menu_ctx) = self.menu_ctx {
+                if let Some(ref mut menu) = menu_ctx.menu_app {
+                    if let Some(pending) = menu.chart_to_play.take() {
+                        self.start_game(pending);
                     }
                 }
             }

@@ -256,7 +256,7 @@ pub async fn bulk_insert_charts(
         .bind(h.duration_normal as i32)
         .bind(h.duration_hard as i32)
         .bind(h.bpm as f64)
-        .bind(h.duration_hard as f64)
+        .bind((h.duration_easy.max(h.duration_normal).max(h.duration_hard)) as f64)
         .bind(7i32)
         .bind(h.cover_offset as i32)
         .bind(h.cover_size as i32)
