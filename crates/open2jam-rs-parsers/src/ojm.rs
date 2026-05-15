@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use encoding_rs::EUC_KR;
+use crate::text::decode_c_string;
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -348,15 +348,7 @@ fn xor_with_state(buf: &mut [u8], mut acc_keybyte: u8, mut acc_counter: u8) -> (
 }
 
 fn decode_sample_name(bytes: &[u8]) -> String {
-    let trimmed = bytes.split(|&b| b == 0).next().unwrap_or(b"");
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    let (decoded, _encoding, had_errors) = EUC_KR.decode(trimmed);
-    if !had_errors {
-        return decoded.into_owned();
-    }
-    String::from_utf8_lossy(trimmed).into_owned()
+    decode_c_string(bytes)
 }
 
 // ---------------------------------------------------------------------------

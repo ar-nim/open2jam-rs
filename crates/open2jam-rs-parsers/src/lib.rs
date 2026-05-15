@@ -3,6 +3,7 @@
 pub mod chart;
 pub mod ojm;
 pub mod ojn;
+pub mod text;
 pub mod xml;
 
 // Re-export shared OJN parser so existing game code still compiles.

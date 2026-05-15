@@ -6,7 +6,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use encoding_rs::EUC_KR;
+use crate::text::decode_c_string;
+use open2jam_rs_core::Difficulty as CoreDifficulty;
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -34,6 +35,16 @@ pub enum Difficulty {
     Easy = 0,
     Normal = 1,
     Hard = 2,
+}
+
+impl From<CoreDifficulty> for Difficulty {
+    fn from(d: CoreDifficulty) -> Self {
+        match d {
+            CoreDifficulty::Easy => Difficulty::Easy,
+            CoreDifficulty::Normal => Difficulty::Normal,
+            CoreDifficulty::Hard => Difficulty::Hard,
+        }
+    }
 }
 
 /// Channel types in an OJN chart.
@@ -307,20 +318,7 @@ fn decode_bmp(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
 // ---------------------------------------------------------------------------
 
 fn decode_c_string(bytes: &[u8]) -> String {
-    let trimmed = bytes.split(|&b| b == 0).next().unwrap_or(b"");
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    // Try EUC-KR first (Korean charts)
-    let (decoded, _encoding, had_errors) = EUC_KR.decode(trimmed);
-    if !had_errors {
-        let s = decoded.into_owned();
-        if !s.is_empty() {
-            return s;
-        }
-    }
-    // Fallback to UTF-8
-    String::from_utf8_lossy(trimmed).into_owned()
+    crate::text::decode_c_string(bytes)
 }
 
 fn decode_volume_pan(volume_pan: u8) -> (f32, f32) {
@@ -396,14 +394,14 @@ pub fn parse_metadata_bytes(data: &[u8]) -> Result<OjnHeader, OjnError> {
 // Public API — full chart parsing
 // ---------------------------------------------------------------------------
 
-/// Parse an OJN file from disk.
-pub fn parse_file(path: impl AsRef<Path>) -> Result<Chart, OjnError> {
+/// Parse an OJN file from disk, selecting the given difficulty.
+pub fn parse_file(path: impl AsRef<Path>, difficulty: Difficulty) -> Result<Chart, OjnError> {
     let data = std::fs::read(path)?;
-    parse_bytes(&data)
+    parse_bytes(&data, difficulty)
 }
 
-/// Parse an OJN file from raw bytes.
-pub fn parse_bytes(data: &[u8]) -> Result<Chart, OjnError> {
+/// Parse an OJN file from raw bytes, selecting the given difficulty.
+pub fn parse_bytes(data: &[u8], difficulty: Difficulty) -> Result<Chart, OjnError> {
     if data.len() < HEADER_SIZE {
         return Err(OjnError::Truncated {
             expected: HEADER_SIZE,
@@ -420,9 +418,8 @@ pub fn parse_bytes(data: &[u8]) -> Result<Chart, OjnError> {
     // Parse header
     let header = parse_header(data)?;
 
-    // For now, parse only the Hard difficulty (most common for testing)
-    // Full implementation would parse all difficulties
-    let events = parse_difficulty_notes(data, &header, Difficulty::Hard)?;
+    // Parse notes for the selected difficulty
+    let events = parse_difficulty_notes(data, &header, difficulty)?;
 
     Ok(Chart { header, events })
 }
@@ -757,7 +754,7 @@ mod tests {
     #[test]
     fn test_parse_ojn_header() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_assets/o2ma100.ojn");
-        let chart = parse_file(path).expect("Failed to parse OJN file");
+        let chart = parse_file(path, Difficulty::Hard).expect("Failed to parse OJN file");
         let h = &chart.header;
 
         assert_eq!(h.song_id, 100);
@@ -775,13 +772,13 @@ mod tests {
 
     #[test]
     fn test_parse_ojn_signature() {
-        let result = parse_bytes(&[0u8; HEADER_SIZE]);
+        let result = parse_bytes(&[0u8; HEADER_SIZE], Difficulty::Hard);
         assert!(matches!(result, Err(OjnError::InvalidSignature(_))));
     }
 
     #[test]
     fn test_parse_ojn_truncated() {
-        let result = parse_bytes(&[0u8; 100]);
+        let result = parse_bytes(&[0u8; 100], Difficulty::Hard);
         assert!(matches!(result, Err(OjnError::Truncated { .. })));
     }
 
@@ -825,7 +822,7 @@ mod tests {
     #[test]
     fn test_chart_has_events() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_assets/o2ma100.ojn");
-        let chart = parse_file(path).expect("Failed to parse OJN");
+        let chart = parse_file(path, Difficulty::Hard).expect("Failed to parse OJN");
         let note_count = chart
             .events
             .iter()
@@ -889,7 +886,7 @@ mod tests {
     #[test]
     fn test_chart_has_measure_markers() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_assets/o2ma100.ojn");
-        let chart = parse_file(path).expect("Failed to parse OJN");
+        let chart = parse_file(path, Difficulty::Hard).expect("Failed to parse OJN");
         let measure_count = chart
             .events
             .iter()
@@ -901,7 +898,7 @@ mod tests {
     #[test]
     fn test_long_notes_have_paired_end_times() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_assets/o2ma100.ojn");
-        let chart = parse_file(path).expect("Failed to parse OJN");
+        let chart = parse_file(path, Difficulty::Hard).expect("Failed to parse OJN");
 
         // Find all long note heads (Hold type notes)
         let long_notes: Vec<&NoteEvent> = chart
@@ -936,7 +933,7 @@ mod tests {
     #[test]
     fn test_timed_events_are_sorted_by_time() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_assets/o2ma100.ojn");
-        let chart = parse_file(path).expect("Failed to parse OJN");
+        let chart = parse_file(path, Difficulty::Hard).expect("Failed to parse OJN");
 
         let times: Vec<f64> = chart
             .events
